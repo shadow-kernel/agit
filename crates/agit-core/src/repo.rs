@@ -314,11 +314,27 @@ impl Repository {
     }
 
     pub fn set_head(&self, head: &Head) -> Result<()> {
+        self.set_head_with(head, "head")
+    }
+
+    /// Set HEAD and record the move in the workspace's HEAD reflog.
+    pub fn set_head_with(&self, head: &Head, message: &str) -> Result<()> {
+        let old = self.head_commit().unwrap_or(None);
         let content = match head {
             Head::Branch(b) => format!("ref: {HEADS_PREFIX}{b}\n"),
             Head::Detached(id) => format!("{id}\n"),
         };
-        write_atomic(&self.head_path(), content.as_bytes())
+        write_atomic(&self.head_path(), content.as_bytes())?;
+        let new = self.head_commit().unwrap_or(None);
+        if old != new {
+            crate::reflog::append(&self.ws_dir, "HEAD", old, new, message)?;
+        }
+        Ok(())
+    }
+
+    /// The workspace HEAD reflog, oldest first.
+    pub fn head_reflog(&self) -> Result<Vec<crate::reflog::ReflogEntry>> {
+        crate::reflog::read(&self.ws_dir, "HEAD")
     }
 
     /// Commit id HEAD points at (None on an unborn branch).
@@ -345,6 +361,15 @@ impl Repository {
 
     /// Move HEAD forward to `new` with CAS on the underlying branch.
     pub fn advance_head(&self, expected: Option<ObjectId>, new: ObjectId) -> Result<()> {
+        self.advance_head_with(expected, new, "update")
+    }
+
+    pub fn advance_head_with(
+        &self,
+        expected: Option<ObjectId>,
+        new: ObjectId,
+        message: &str,
+    ) -> Result<()> {
         match self.head()? {
             Head::Branch(b) => {
                 let expect = match expected {
@@ -352,9 +377,10 @@ impl Repository {
                     None => Expect::Absent,
                 };
                 self.refs
-                    .update(&format!("{HEADS_PREFIX}{b}"), expect, Some(new))
+                    .update_with(&format!("{HEADS_PREFIX}{b}"), expect, Some(new), message)?;
+                crate::reflog::append(&self.ws_dir, "HEAD", expected, Some(new), message)
             }
-            Head::Detached(_) => self.set_head(&Head::Detached(new)),
+            Head::Detached(_) => self.set_head_with(&Head::Detached(new), message),
         }
     }
 

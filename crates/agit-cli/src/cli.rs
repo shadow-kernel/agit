@@ -80,8 +80,17 @@ pub enum Cmd {
         #[arg(long)]
         cached: bool,
     },
-    /// Unstage paths (reset index entries to HEAD).
-    Reset { paths: Vec<PathBuf> },
+    /// `reset [paths]` unstages; `reset [--soft|--mixed|--hard] <rev>` moves the branch (undo via `agit reflog`).
+    Reset {
+        /// Paths to unstage, or a single revision when moving the branch.
+        args: Vec<String>,
+        #[arg(long, conflicts_with_all = ["soft", "mixed"])]
+        hard: bool,
+        #[arg(long)]
+        soft: bool,
+        #[arg(long)]
+        mixed: bool,
+    },
     /// Show staged, unstaged, untracked and conflicted paths.
     Status {
         /// Compact one-line-per-path output.
@@ -123,6 +132,28 @@ pub enum Cmd {
     },
     /// Restore the working tree to any commit or checkpoint.
     Restore { rev: String },
+    /// Show where a ref (default: HEAD) pointed over time, newest first.
+    Reflog {
+        #[arg(default_value = "HEAD")]
+        name: String,
+        #[arg(short = 'n', long)]
+        limit: Option<usize>,
+    },
+    /// Remove unreachable objects, expire old checkpoints and reflog entries.
+    Gc {
+        /// Report only.
+        #[arg(long)]
+        dry_run: bool,
+        /// Keep objects younger than this many seconds (default 120).
+        #[arg(long, default_value_t = 120)]
+        grace: u64,
+        /// Expire reflog entries older than this (e.g. 90d, 0 = keep all).
+        #[arg(long, default_value = "90d")]
+        reflog_expire: String,
+        /// Expire checkpoints older than this (e.g. 30d, 0 = keep all).
+        #[arg(long, default_value = "30d")]
+        checkpoint_expire: String,
+    },
     /// Show commit history.
     Log {
         #[arg(default_value = "HEAD")]
@@ -527,12 +558,96 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
             });
         }
-        Cmd::Reset { paths } => {
+        Cmd::Reset {
+            args,
+            hard,
+            soft,
+            mixed,
+        } => {
             let repo = open(&cli.dir)?;
-            let rel = rels(&repo, &cwd(&cli.dir)?, &paths)?;
-            let touched = worktree::unstage(&repo, &rel)?;
-            emit(json, &serde_json::json!({ "unstaged": touched }), || {
-                println!("Unstaged {} path(s)", touched.len());
+            let explicit_mode = hard || soft || mixed;
+            let is_rev = args.len() == 1
+                && !repo.work_dir().join(&args[0]).exists()
+                && repo.resolve(&args[0]).is_ok();
+            if explicit_mode || is_rev {
+                let rev = args.first().cloned().unwrap_or_else(|| "HEAD".into());
+                let mode = if hard {
+                    ops::ResetMode::Hard
+                } else if soft {
+                    ops::ResetMode::Soft
+                } else {
+                    ops::ResetMode::Mixed
+                };
+                let r = ops::reset(&repo, &rev, mode)?;
+                emit(json, &r, || {
+                    println!("HEAD is now at {} ({:?})", r.to.short(), r.mode)
+                });
+            } else {
+                let paths: Vec<PathBuf> = args.iter().map(PathBuf::from).collect();
+                let rel = rels(&repo, &cwd(&cli.dir)?, &paths)?;
+                let touched = worktree::unstage(&repo, &rel)?;
+                emit(json, &serde_json::json!({ "unstaged": touched }), || {
+                    println!("Unstaged {} path(s)", touched.len());
+                });
+            }
+        }
+        Cmd::Reflog { name, limit } => {
+            let repo = open(&cli.dir)?;
+            let mut entries = if name == "HEAD" {
+                repo.head_reflog()?
+            } else {
+                let full = if name.starts_with("refs/") {
+                    name.clone()
+                } else {
+                    format!("refs/heads/{name}")
+                };
+                repo.refs().reflog(&full)?
+            };
+            entries.reverse();
+            if let Some(l) = limit {
+                entries.truncate(l);
+            }
+            emit(json, &entries, || {
+                for (i, e) in entries.iter().enumerate() {
+                    println!(
+                        "{} {name}@{{{i}}}: {} ({}, {})",
+                        e.new.map(|n| n.short()).unwrap_or_else(|| "deleted".into()),
+                        e.message,
+                        e.actor,
+                        fmt_time(e.time_ms)
+                    );
+                }
+            });
+        }
+        Cmd::Gc {
+            dry_run,
+            grace,
+            reflog_expire,
+            checkpoint_expire,
+        } => {
+            let repo = open(&cli.dir)?;
+            let dur = |s: &str| -> Result<Option<u64>> {
+                if s == "0" {
+                    Ok(None)
+                } else {
+                    Ok(Some(parse_duration(s)?.as_secs()))
+                }
+            };
+            let r = ops::gc(
+                &repo,
+                &ops::GcOptions {
+                    grace_secs: grace,
+                    reflog_expire_secs: dur(&reflog_expire)?,
+                    checkpoint_expire_secs: dur(&checkpoint_expire)?,
+                    dry_run,
+                },
+            )?;
+            emit(json, &r, || {
+                println!(
+                    "{}{} object(s) total, {} reachable, {} removed ({} bytes), {} kept (younger than grace), {} reflog entries and {} checkpoints expired",
+                    if r.dry_run { "[dry run] " } else { "" },
+                    r.objects_total, r.objects_reachable, r.objects_removed, r.bytes_removed, r.objects_kept_young, r.reflog_entries_expired, r.checkpoints_expired
+                );
             });
         }
         Cmd::Status { short } => {

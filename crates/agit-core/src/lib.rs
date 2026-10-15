@@ -18,6 +18,7 @@ pub mod lock;
 pub mod merge;
 pub mod object;
 pub mod ops;
+pub mod reflog;
 pub mod refs;
 pub mod repo;
 pub mod store;

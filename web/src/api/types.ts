@@ -128,6 +128,7 @@ export interface CommitDetail {
 export interface TreeDir {
   kind: "tree";
   path: string;
+  id: ObjectId;
   entries: TreeEntry[];
 }
 
@@ -328,12 +329,21 @@ export interface Note {
   confidence: number;
   created_ms: number;
   updated_ms: number;
-  superseded_by: string | null;
+  /** Absent or null when the note is current. */
+  superseded_by?: string | null;
 }
 
-/** Note without `body`, plus `excerpt`. */
-export interface NoteSummary extends Omit<Note, "body"> {
+/** Item of `GET /knowledge/notes`: a subset of `Note` plus `excerpt` (no body, commits, pulls or created_ms). */
+export interface NoteSummary {
+  id: string;
+  title: string;
+  tags: string[];
+  paths: string[];
+  author: string;
+  confidence: number;
+  updated_ms: number;
   excerpt: string;
+  superseded_by?: string | null;
 }
 
 export interface NoteCreateRequest {
@@ -359,16 +369,69 @@ export interface TagRule {
 }
 
 export interface Context {
+  path: string;
   notes: NoteSummary[];
+  suggested_tags: string[];
   recent_commits: CommitListItem[];
   leases: Lease[];
   open_pulls: Pull[];
+}
+
+// ---- Policy -----------------------------------------------------------------
+
+/** `GET/PUT /repos/{repo}/policy`. Field names follow `agit_protocol::Policy`. */
+export interface Policy {
+  /** Full ref names (`refs/heads/main`), branch names or globs (`release/*`). */
+  protected_branches: string[];
+  require_pull_request: boolean;
+  require_approvals: number;
+  require_intent: boolean;
+  require_agent: boolean;
+  require_checks: boolean;
+  block_on_blockers: boolean;
+  allowed_merge_agents: string[];
+  allowed_push_agents: string[];
+  /** 0 = unlimited. */
+  max_files_per_commit: number;
+}
+
+export const DEFAULT_POLICY: Policy = {
+  protected_branches: [],
+  require_pull_request: false,
+  require_approvals: 0,
+  require_intent: false,
+  require_agent: false,
+  require_checks: false,
+  block_on_blockers: true,
+  allowed_merge_agents: [],
+  allowed_push_agents: [],
+  max_files_per_commit: 0,
+};
+
+// ---- Webhooks ---------------------------------------------------------------
+
+export interface Webhook {
+  id: string;
+  url: string;
+  /** Exact kinds (`commit`), prefixes (`pull.*`) or empty for all. */
+  kinds: string[];
+  active: boolean;
+  /** The secret itself is never returned. */
+  has_secret: boolean;
+  created_ms: number;
+}
+
+export interface WebhookCreateRequest {
+  url: string;
+  kinds?: string[];
+  secret?: string;
 }
 
 // ---- Activity ---------------------------------------------------------------
 
 export interface AgentActivity {
   id: string;
+  model?: string | null;
   commits: number;
   last_seen_ms: number;
   open_pulls: number;

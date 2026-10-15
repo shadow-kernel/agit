@@ -10,3 +10,6 @@ node_modules/
 # Logs and scratch
 *.log
 /tmp/
+
+# agent worktrees
+.claude/worktrees/

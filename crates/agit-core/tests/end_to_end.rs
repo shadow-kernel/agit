@@ -396,3 +396,133 @@ fn concurrent_commits_from_two_handles_use_cas() {
     assert!(matches!(err, Error::RefConflict { .. }));
     assert!(err.is_retryable());
 }
+
+#[test]
+fn reflog_reset_and_gc() {
+    use agit_core::ops::{GcOptions, ResetMode};
+    let (_d, repo) = fresh();
+    let root = repo.work_dir().to_path_buf();
+    write(&root, "a.txt", "1\n");
+    let c1 = commit_all(&repo, "one", None);
+    write(&root, "a.txt", "2\n");
+    let c2 = commit_all(&repo, "two", None);
+    write(&root, "a.txt", "3\n");
+    let c3 = commit_all(&repo, "three", None);
+
+    // Reflog recorded every move of the branch and of HEAD.
+    let log = repo.refs().reflog("refs/heads/main").unwrap();
+    assert_eq!(log.len(), 3);
+    assert_eq!(log[2].new, Some(c3.id));
+    assert!(log[2].message.starts_with("commit: three"));
+    assert_eq!(repo.head_reflog().unwrap().len(), 3);
+
+    // Hard reset back two commits, then undo it through the reflog.
+    let r = ops::reset(&repo, &c1.id.to_hex(), ResetMode::Hard).unwrap();
+    assert_eq!((r.from, r.to), (Some(c3.id), c1.id));
+    assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "1\n");
+    assert!(worktree::status(&repo, true).unwrap().is_clean());
+    let log = repo.refs().reflog("refs/heads/main").unwrap();
+    assert_eq!(log.last().unwrap().old, Some(c3.id));
+    ops::reset(
+        &repo,
+        &log.last().unwrap().old.unwrap().to_hex(),
+        ResetMode::Hard,
+    )
+    .unwrap();
+    assert_eq!(repo.head_commit().unwrap(), Some(c3.id));
+    assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "3\n");
+
+    // Soft reset keeps the working tree and index.
+    ops::reset(&repo, "HEAD~1", ResetMode::Soft).unwrap();
+    assert_eq!(repo.head_commit().unwrap(), Some(c2.id));
+    let st = worktree::status(&repo, true).unwrap();
+    assert_eq!(st.staged.len(), 1);
+    ops::reset(&repo, &c3.id.to_hex(), ResetMode::Mixed).unwrap();
+    assert!(worktree::status(&repo, true).unwrap().is_clean());
+
+    // GC: a dangling blob is removed once it is old enough; reachable and
+    // reflog-referenced objects survive.
+    let dangling = repo
+        .store()
+        .write(agit_core::ObjectKind::Blob, b"dangling")
+        .unwrap();
+    let before = repo.store().iter_ids().unwrap().len();
+    let r = ops::gc(
+        &repo,
+        &GcOptions {
+            grace_secs: 3600,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(r.objects_removed, 0);
+    assert_eq!(r.objects_kept_young, 1);
+    let r = ops::gc(
+        &repo,
+        &GcOptions {
+            grace_secs: 0,
+            dry_run: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(r.objects_removed, 1);
+    assert!(repo.store().contains(&dangling));
+    let r = ops::gc(
+        &repo,
+        &GcOptions {
+            grace_secs: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(r.objects_removed, 1);
+    assert!(!repo.store().contains(&dangling));
+    assert_eq!(repo.store().iter_ids().unwrap().len(), before - 1);
+    // Every commit is still readable (c1 is only reachable through the reflog
+    // and the history; both must be roots).
+    for c in [c1.id, c2.id, c3.id] {
+        repo.store().read_commit(&c).unwrap();
+    }
+    assert!(ops::fsck(&repo).unwrap().missing.is_empty());
+
+    // Expiring the reflog (0 seconds) and running gc drops nothing that is
+    // still reachable from the branch.
+    let r = ops::gc(
+        &repo,
+        &GcOptions {
+            grace_secs: 0,
+            reflog_expire_secs: Some(0),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(r.reflog_entries_expired > 0);
+    assert_eq!(r.objects_removed, 0);
+    assert!(ops::fsck(&repo).unwrap().missing.is_empty());
+
+    // Checkpoints expire by age: a fresh one stays.
+    ops::checkpoint(&repo, None, None).unwrap();
+    let r = ops::gc(
+        &repo,
+        &GcOptions {
+            grace_secs: 0,
+            checkpoint_expire_secs: Some(3600),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(r.checkpoints_expired, 0);
+    assert_eq!(ops::list_checkpoints(&repo, 10).unwrap().len(), 1);
+    let r = ops::gc(
+        &repo,
+        &GcOptions {
+            grace_secs: 0,
+            checkpoint_expire_secs: Some(0),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(r.checkpoints_expired, 1);
+    assert_eq!(ops::list_checkpoints(&repo, 10).unwrap().len(), 0);
+}

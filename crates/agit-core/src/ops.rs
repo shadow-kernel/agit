@@ -126,7 +126,7 @@ pub fn commit(repo: &Repository, opts: CommitOptions) -> Result<CommitResult> {
         meta: opts.meta,
     };
     let id = repo.store().write_commit(&commit)?;
-    repo.advance_head(head, id)?;
+    repo.advance_head_with(head, id, &format!("commit: {}", commit.summary()))?;
     repo.set_merge_head(None)?;
     let branch = repo.current_branch()?;
     repo.events().append(
@@ -376,8 +376,12 @@ pub fn create_branch(repo: &Repository, name: &str, start: Option<&str>) -> Resu
             .head_commit()?
             .ok_or_else(|| Error::UnknownRevision("HEAD (unborn branch)".into()))?,
     };
-    repo.refs()
-        .update(&format!("{HEADS_PREFIX}{name}"), Expect::Absent, Some(id))?;
+    repo.refs().update_with(
+        &format!("{HEADS_PREFIX}{name}"),
+        Expect::Absent,
+        Some(id),
+        "branch: created",
+    )?;
     repo.events().append(
         "ref.update",
         Some(repo.workspace()),
@@ -494,7 +498,7 @@ pub fn switch(repo: &Repository, target: &str, create: bool, force: bool) -> Res
     let from = repo.head_tree()?;
     let to = repo.store().read_commit(&id)?.tree;
     let changes = worktree::checkout_tree(repo, from.as_ref(), &to, force)?;
-    repo.set_head(&new_head)?;
+    repo.set_head_with(&new_head, &format!("switch: {target}"))?;
     repo.events().append(
         "head.switch",
         Some(repo.workspace()),
@@ -584,7 +588,7 @@ pub fn merge(repo: &Repository, rev: &str, opts: MergeOptions) -> Result<MergeRe
 
     if base == Some(ours_id) && !opts.no_ff {
         let changes = worktree::checkout_tree(repo, Some(&ours_tree), &theirs_tree, opts.force)?;
-        repo.advance_head(Some(ours_id), theirs)?;
+        repo.advance_head_with(Some(ours_id), theirs, &format!("merge {rev}: fast-forward"))?;
         repo.events().append(
             "merge",
             Some(repo.workspace()),
@@ -675,7 +679,7 @@ pub fn merge(repo: &Repository, rev: &str, opts: MergeOptions) -> Result<MergeRe
         meta: BTreeMap::new(),
     };
     let id = store.write_commit(&commit)?;
-    repo.advance_head(Some(ours_id), id)?;
+    repo.advance_head_with(Some(ours_id), id, &format!("merge {rev}"))?;
     repo.events().append(
         "merge",
         Some(repo.workspace()),
@@ -767,4 +771,321 @@ pub fn fsck(repo: &Repository) -> Result<FsckReport> {
 /// Convenience for callers that want a short-lived lease around a commit.
 pub fn lease_ttl(secs: u64) -> Duration {
     Duration::from_secs(secs)
+}
+
+// ---------------------------------------------------------------------------
+// Reset
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResetMode {
+    /// Move the branch only; index and working tree stay.
+    Soft,
+    /// Move the branch and reset the index; working tree stays.
+    Mixed,
+    /// Move the branch, index and working tree.
+    Hard,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResetResult {
+    pub from: Option<ObjectId>,
+    pub to: ObjectId,
+    pub mode: ResetMode,
+    pub files_changed: usize,
+}
+
+/// Move the current branch (or detached HEAD) to `rev`. The previous position
+/// stays in the reflog (`agit reflog`), so a reset is always undoable with
+/// another reset.
+pub fn reset(repo: &Repository, rev: &str, mode: ResetMode) -> Result<ResetResult> {
+    let (to, commit) = repo.resolve_commit(rev)?;
+    let from = repo.head_commit()?;
+    let mut files_changed = 0;
+    match mode {
+        ResetMode::Soft => {}
+        ResetMode::Mixed => {
+            let mut index = crate::index::Index::from_tree(repo.store(), &commit.tree)?;
+            // keep stat info for files that are unchanged on disk
+            let st = worktree::status(repo, false)?;
+            let _ = st;
+            if let Ok(old) = repo.load_index() {
+                for e in old.iter() {
+                    if let Some(n) = index.get(&e.path).cloned() {
+                        if n.id == e.id && n.mode == e.mode {
+                            index.insert(IndexEntry {
+                                mtime_ns: e.mtime_ns,
+                                ino: e.ino,
+                                ..n
+                            });
+                        }
+                    }
+                }
+            }
+            repo.save_index(&index)?;
+        }
+        ResetMode::Hard => {
+            let current = worktree::snapshot_worktree(repo)?;
+            files_changed =
+                worktree::checkout_tree(repo, Some(&current), &commit.tree, true)?.len();
+        }
+    }
+    repo.set_merge_head(None)?;
+    match repo.head()? {
+        Head::Branch(b) => {
+            let expect = match from {
+                Some(id) => Expect::Is(id),
+                None => Expect::Absent,
+            };
+            repo.refs().update_with(
+                &format!("{HEADS_PREFIX}{b}"),
+                expect,
+                Some(to),
+                &format!("reset: moving to {rev}"),
+            )?;
+            crate::reflog::append(
+                repo.workspace_dir(),
+                "HEAD",
+                from,
+                Some(to),
+                &format!("reset: moving to {rev}"),
+            )?;
+        }
+        Head::Detached(_) => {
+            repo.set_head_with(&Head::Detached(to), &format!("reset: moving to {rev}"))?
+        }
+    }
+    repo.events().append(
+        "reset",
+        Some(repo.workspace()),
+        None,
+        serde_json::json!({ "from": from, "to": to, "mode": mode }),
+    )?;
+    Ok(ResetResult {
+        from,
+        to,
+        mode,
+        files_changed,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Garbage collection
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct GcOptions {
+    /// Objects younger than this are never deleted (protects writers that
+    /// have not published their refs yet).
+    pub grace_secs: u64,
+    /// Drop reflog entries older than this many seconds (None = keep all).
+    pub reflog_expire_secs: Option<u64>,
+    /// Drop checkpoints older than this many seconds (None = keep all).
+    pub checkpoint_expire_secs: Option<u64>,
+    /// Report only.
+    pub dry_run: bool,
+}
+
+impl Default for GcOptions {
+    fn default() -> Self {
+        GcOptions {
+            grace_secs: 120,
+            reflog_expire_secs: Some(90 * 86_400),
+            checkpoint_expire_secs: Some(30 * 86_400),
+            dry_run: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GcReport {
+    pub objects_total: usize,
+    pub objects_reachable: usize,
+    pub objects_removed: usize,
+    pub bytes_removed: u64,
+    pub objects_kept_young: usize,
+    pub reflog_entries_expired: usize,
+    pub checkpoints_expired: usize,
+    pub dry_run: bool,
+}
+
+fn mark_reachable(
+    store: &crate::store::ObjectStore,
+    roots: impl IntoIterator<Item = ObjectId>,
+    seen: &mut HashSet<ObjectId>,
+) -> Result<()> {
+    let mut stack: Vec<ObjectId> = roots.into_iter().collect();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        match store.read(&id) {
+            Ok(crate::object::Object::Commit(c)) => {
+                stack.push(c.tree);
+                stack.extend(c.parents);
+                if let Some(prev) = c
+                    .meta
+                    .get("agit.previous_checkpoint")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<ObjectId>().ok())
+                {
+                    stack.push(prev);
+                }
+            }
+            Ok(crate::object::Object::Tree(t)) => {
+                for e in t.entries() {
+                    if !e.mode.is_submodule() {
+                        stack.push(e.id);
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(Error::ObjectNotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Remove unreachable objects. Roots: all refs, all reflog entries, all
+/// workspace HEADs and indexes, MERGE_HEADs, and checkpoint chains.
+pub fn gc(repo: &Repository, opts: &GcOptions) -> Result<GcReport> {
+    let store = repo.store();
+    let now = now_ms();
+    let mut report = GcReport {
+        dry_run: opts.dry_run,
+        ..Default::default()
+    };
+    let common = repo.common_dir();
+
+    // 1. Expire checkpoints: cut each workspace's chain at the first entry
+    //    older than the cutoff and re-chain the kept ones so the expired
+    //    tail becomes unreachable.
+    if let Some(secs) = opts.checkpoint_expire_secs {
+        let cutoff = now - (secs as i64) * 1000;
+        for (name, tip) in repo.refs().list(CHECKPOINTS_PREFIX)? {
+            let mut chain: Vec<(ObjectId, Commit)> = Vec::new();
+            let mut cur = Some(tip);
+            while let Some(id) = cur {
+                let c = store.read_commit(&id)?;
+                cur = c
+                    .meta
+                    .get("agit.previous_checkpoint")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse().ok());
+                chain.push((id, c));
+            }
+            let Some(first_expired) = chain.iter().position(|(_, c)| c.time_ms < cutoff) else {
+                continue;
+            };
+            report.checkpoints_expired += chain.len() - first_expired;
+            if opts.dry_run {
+                continue;
+            }
+            if first_expired == 0 {
+                repo.refs()
+                    .update_with(&name, Expect::Is(tip), None, "gc: expire checkpoints")?;
+                continue;
+            }
+            let mut prev: Option<ObjectId> = None;
+            for (_, c) in chain[..first_expired].iter().rev() {
+                let mut c = c.clone();
+                match prev {
+                    Some(p) => {
+                        c.meta
+                            .insert("agit.previous_checkpoint".into(), serde_json::json!(p));
+                    }
+                    None => {
+                        c.meta.remove("agit.previous_checkpoint");
+                    }
+                }
+                prev = Some(store.write_commit(&c)?);
+            }
+            repo.refs()
+                .update_with(&name, Expect::Is(tip), prev, "gc: expire checkpoints")?;
+        }
+    }
+
+    // 2. Expire reflogs.
+    if let Some(secs) = opts.reflog_expire_secs {
+        let cutoff = now - (secs as i64) * 1000;
+        if !opts.dry_run {
+            for name in crate::reflog::list_logs(common)? {
+                report.reflog_entries_expired += crate::reflog::expire(common, &name, cutoff)?;
+            }
+            for ws in repo.list_workspaces()? {
+                let dir = if ws.name == crate::repo::PRIMARY_WORKSPACE {
+                    common.to_path_buf()
+                } else {
+                    common.join("workspaces").join(&ws.name)
+                };
+                report.reflog_entries_expired += crate::reflog::expire(&dir, "HEAD", cutoff)?;
+            }
+        }
+    }
+
+    // 3. Mark.
+    let mut roots: Vec<ObjectId> = repo
+        .refs()
+        .list("refs/")?
+        .into_iter()
+        .map(|(_, id)| id)
+        .collect();
+    for name in crate::reflog::list_logs(common)? {
+        for e in crate::reflog::read(common, &name)? {
+            roots.extend(e.old.into_iter().chain(e.new));
+        }
+    }
+    for ws in repo.list_workspaces()? {
+        let dir = if ws.name == crate::repo::PRIMARY_WORKSPACE {
+            common.to_path_buf()
+        } else {
+            common.join("workspaces").join(&ws.name)
+        };
+        for e in crate::reflog::read(&dir, "HEAD")? {
+            roots.extend(e.old.into_iter().chain(e.new));
+        }
+        if let Ok(s) = std::fs::read_to_string(dir.join("HEAD")) {
+            if let Ok(id) = s.trim().parse::<ObjectId>() {
+                roots.push(id);
+            }
+        }
+        if let Ok(s) = std::fs::read_to_string(dir.join("MERGE_HEAD")) {
+            if let Ok(id) = s.trim().parse::<ObjectId>() {
+                roots.push(id);
+            }
+        }
+        if let Ok(idx) = crate::index::Index::load(&dir.join("index")) {
+            roots.extend(idx.iter().map(|e| e.id));
+        }
+    }
+    let mut reachable = HashSet::new();
+    mark_reachable(store, roots, &mut reachable)?;
+
+    // 4. Sweep.
+    let all = store.iter_ids()?;
+    report.objects_total = all.len();
+    report.objects_reachable = all.iter().filter(|id| reachable.contains(id)).count();
+    for id in all {
+        if reachable.contains(&id) {
+            continue;
+        }
+        if store.age_secs(&id).is_none_or(|a| a < opts.grace_secs) {
+            report.objects_kept_young += 1;
+            continue;
+        }
+        report.bytes_removed += store.disk_size(&id);
+        report.objects_removed += 1;
+        if !opts.dry_run {
+            store.remove(&id)?;
+        }
+    }
+    repo.events().append(
+        "gc",
+        Some(repo.workspace()),
+        None,
+        serde_json::to_value(&report)?,
+    )?;
+    Ok(report)
 }

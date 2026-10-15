@@ -40,7 +40,7 @@ export interface Api {
   // Browsing
   commits(repo: string, q?: { rev?: string; limit?: number; agent?: string; task?: string; path?: string }): Promise<T.CommitListItem[]>;
   commit(repo: string, rev: string): Promise<T.CommitDetail>;
-  tree(repo: string, rev: string, path?: string): Promise<T.TreeResponse>;
+  tree(repo: string, rev: string, path?: string, signal?: AbortSignal): Promise<T.TreeResponse>;
   diff(repo: string, from: string, to: string): Promise<T.Diff>;
   branches(repo: string): Promise<T.Branch[]>;
   tags(repo: string): Promise<T.Tag[]>;
@@ -76,6 +76,14 @@ export interface Api {
   rules(repo: string): Promise<T.TagRule[]>;
   putRules(repo: string, rules: T.TagRule[]): Promise<T.TagRule[]>;
   context(repo: string, path: string, limit?: number): Promise<T.Context>;
+  // Policy
+  policy(repo: string): Promise<T.Policy>;
+  putPolicy(repo: string, policy: T.Policy): Promise<T.Policy>;
+  // Webhooks
+  webhooks(repo: string): Promise<T.Webhook[]>;
+  createWebhook(repo: string, body: T.WebhookCreateRequest): Promise<T.Webhook>;
+  deleteWebhook(repo: string, id: string): Promise<unknown>;
+  testWebhook(repo: string, id: string): Promise<{ queued: true }>;
   // Activity
   agents(repo: string): Promise<T.AgentActivity[]>;
 }
@@ -162,7 +170,7 @@ export const liveApi: Api = {
   objectJson: (repo, id) => request("GET", `${r(repo)}/objects/${enc(id)}/json`),
   commits: (repo, q = {}) => request("GET", `${r(repo)}/commits`, { query: q }),
   commit: (repo, rev) => request("GET", `${r(repo)}/commits/${enc(rev)}`),
-  tree: (repo, rev, path) => request("GET", `${r(repo)}/tree/${enc(rev)}`, { query: { path } }),
+  tree: (repo, rev, path, signal) => request("GET", `${r(repo)}/tree/${enc(rev)}`, { query: { path }, signal }),
   diff: (repo, from, to) => request("GET", `${r(repo)}/diff`, { query: { from, to } }),
   branches: (repo) => request("GET", `${r(repo)}/branches`),
   tags: (repo) => request("GET", `${r(repo)}/tags`),
@@ -193,6 +201,12 @@ export const liveApi: Api = {
   rules: (repo) => request("GET", `${r(repo)}/knowledge/rules`),
   putRules: (repo, rules) => request("PUT", `${r(repo)}/knowledge/rules`, { body: rules }),
   context: (repo, path, limit) => request("GET", `${r(repo)}/context`, { query: { path, limit } }),
+  policy: (repo) => request("GET", `${r(repo)}/policy`),
+  putPolicy: (repo, policy) => request("PUT", `${r(repo)}/policy`, { body: policy }),
+  webhooks: (repo) => request("GET", `${r(repo)}/webhooks`),
+  createWebhook: (repo, body) => request("POST", `${r(repo)}/webhooks`, { body }),
+  deleteWebhook: (repo, id) => request("DELETE", `${r(repo)}/webhooks/${enc(id)}`),
+  testWebhook: (repo, id) => request("POST", `${r(repo)}/webhooks/${enc(id)}/test`),
   agents: (repo) => request("GET", `${r(repo)}/agents`),
 };
 

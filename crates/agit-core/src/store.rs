@@ -51,6 +51,33 @@ impl ObjectStore {
         self.path_for(id).is_file()
     }
 
+    /// Seconds since the object file was last modified (written).
+    pub fn age_secs(&self, id: &ObjectId) -> Option<u64> {
+        let md = fs::metadata(self.path_for(id)).ok()?;
+        let m = md.modified().ok()?;
+        std::time::SystemTime::now()
+            .duration_since(m)
+            .ok()
+            .map(|d| d.as_secs())
+    }
+
+    /// Size of the stored (compressed) object file in bytes.
+    pub fn disk_size(&self, id: &ObjectId) -> u64 {
+        fs::metadata(self.path_for(id))
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
+    /// Delete an object. Only `gc` should call this.
+    pub fn remove(&self, id: &ObjectId) -> Result<()> {
+        let path = self.path_for(id);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(Error::IoAt { path, source: e }),
+        }
+    }
+
     /// Store `payload` as an object of `kind`. Idempotent.
     pub fn write(&self, kind: ObjectKind, payload: &[u8]) -> Result<ObjectId> {
         let id = hash_object(kind, payload);

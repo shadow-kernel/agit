@@ -96,6 +96,17 @@ impl RefStore {
 
     /// Atomically set `name` to `new` (or delete it when `new` is `None`).
     pub fn update(&self, name: &str, expect: Expect, new: Option<ObjectId>) -> Result<()> {
+        self.update_with(name, expect, new, "update")
+    }
+
+    /// Like [`update`](Self::update) with a reflog message.
+    pub fn update_with(
+        &self,
+        name: &str,
+        expect: Expect,
+        new: Option<ObjectId>,
+        message: &str,
+    ) -> Result<()> {
         Self::validate_name(name)?;
         let _guard = self.lock()?;
         let current = self.read(name)?;
@@ -116,24 +127,47 @@ impl RefStore {
         }
         let path = self.path_for(name);
         match new {
-            Some(id) => write_atomic(&path, format!("{id}\n").as_bytes()),
+            Some(id) => write_atomic(&path, format!("{id}\n").as_bytes())?,
             None => match fs::remove_file(&path) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(Error::IoAt { path, source: e }),
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Error::IoAt { path, source: e }),
             },
         }
+        if current != new {
+            crate::reflog::append(&self.dir, name, current, new, message)?;
+        }
+        Ok(())
+    }
+
+    /// Reflog of a ref, oldest first.
+    pub fn reflog(&self, name: &str) -> Result<Vec<crate::reflog::ReflogEntry>> {
+        crate::reflog::read(&self.dir, name)
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     /// Apply several CAS updates atomically: either all succeed or none do.
     pub fn update_many(&self, updates: &[(String, Expect, Option<ObjectId>)]) -> Result<()> {
+        self.update_many_with(updates, "update")
+    }
+
+    pub fn update_many_with(
+        &self,
+        updates: &[(String, Expect, Option<ObjectId>)],
+        message: &str,
+    ) -> Result<()> {
         for (name, _, _) in updates {
             Self::validate_name(name)?;
         }
         let _guard = self.lock()?;
+        let mut olds = Vec::with_capacity(updates.len());
         // Phase 1: validate all expectations under the lock.
         for (name, expect, _) in updates {
             let current = self.read(name)?;
+            olds.push(current);
             let ok = match expect {
                 Expect::Any => true,
                 Expect::Absent => current.is_none(),
@@ -151,7 +185,7 @@ impl RefStore {
             }
         }
         // Phase 2: apply.
-        for (name, _, new) in updates {
+        for ((name, _, new), old) in updates.iter().zip(olds) {
             let path = self.path_for(name);
             match new {
                 Some(id) => write_atomic(&path, format!("{id}\n").as_bytes())?,
@@ -162,6 +196,9 @@ impl RefStore {
                         }
                     }
                 }
+            }
+            if old != *new {
+                crate::reflog::append(&self.dir, name, old, *new, message)?;
             }
         }
         Ok(())
