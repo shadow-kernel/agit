@@ -240,20 +240,38 @@ adding it to `Api` (and to the mock) so the public-API audit stays trivial.
 ## Verified against the real server
 
 The UI was driven with headless Chromium (Playwright) against
-`agit-server --data-dir … --web-dir web/dist` holding a repository pushed with
-the CLI (five commits by four agents, a PR with a comment and an approval, a
-second branch, two notes): every route above, blame on a four-commit file,
-search (all tabs, `/` shortcut), compare → prefilled PR form, notifications
-(SSE delivery, mark-all-read persisted), policy save/reload, webhook
-create/test/delete, rules save, repository deletion, light and dark mode, with
-zero console errors apart from the browser's own log line for an intentional
-404. Things learned from the real responses and now reflected here: `ref.update`
-events carry `data.ref` (not `name`), the server emits `repo.create`,
-`pull.comment`, `policy.update`, `webhook.*` and `knowledge.rules` events,
-`GET /events?limit=` returns the *last* N events, the policy has a
-`require_signed` field, `NoteSummary` has no `body`/`commits`/`pulls`/`created_ms`,
-tree responses carry an `id`, `GET /context` returns `path` and
-`suggested_tags`, and repository names may not contain `/`.
+`agit-server --data-dir … --web-dir web/dist --token root-secret` holding a
+repository pushed with the CLI: eight commits by four agents (one signed with
+a registered key, one signed with an unregistered key, the rest unsigned), a
+PR approved and merged (which produced a draft note), a note that went stale
+after a later push, a file move, and two scoped tokens created through
+`POST /auth/tokens`. Covered, in light and dark mode with zero console errors
+apart from the browser's own log lines for intentional 403s before signing in
+and for the reader token: the sign-in flow from a cold start (global prompt →
+popover → header chip `root`, data hooks refetch after the token is saved),
+`/admin/tokens` (list, create with scope editor + TTL, one-time reveal, copy,
+delete), the Keys tab (register the unregistered signer's key → the commit
+flips to **Verified**, remove → back to **Valid, untrusted key**), signature
+badges, `require_signed` save/reload, server blame on a four-commit file,
+knowledge v2 (stale view with `changed_paths` + Validate, `drafts=1` with
+Accept/Discard, draft note page, BM25 `score` in search, context panel with
+`agents_active` and `include=files` incl. a truncated file at a small budget),
+a read-only token (hidden admin actions, "Admin access required", and a `403`
+on Validate raising the sign-in prompt), and a live `agit push` arriving in
+the bell as a `commit` event with summary and intent that opens the commit.
+The same script ran against the `VITE_AGIT_MOCK=1` build (renamed change
+with `67%`, invalid signature, mock tokens).
+
+Things learned from the real responses: unauthenticated requests get
+`403 forbidden` ("missing bearer token"), never 401; root `whoami` carries
+`scopes: []` with `root: true`; a blame of an unknown path is an enveloped
+`404 path_not_tracked` (the client-side fallback only triggers on a bare
+404); `GET /commits/{rev}` and `GET /diff` do not run rename detection (a move
+arrives as `deleted` + `added`; only the CLI emits `renamed`); `keys[].added_by`
+is `"anonymous"` when the root token registers a key; `ref.update` events from
+CLI pushes have actor `anonymous` while the matching `commit` events carry the
+commit's agent; `GET /context?include=files` omits `files` entirely when
+nothing fits the budget; `GET /keys` is readable with a read-only token.
 
 ## Screenshots
 

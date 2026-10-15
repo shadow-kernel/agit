@@ -44,6 +44,11 @@ impl<St: Send + Sync> FromRequestParts<St> for Agent {
         if let Some(ResolvedAgent(Some(a))) = parts.extensions.get::<ResolvedAgent>() {
             return Ok(Agent(a.clone()));
         }
+        if let Some(p) = parts.extensions.get::<crate::auth::Principal>() {
+            if p.root && p.id == "root" {
+                return Ok(Agent("root".into()));
+            }
+        }
         Ok(Agent(
             parts
                 .headers
@@ -694,7 +699,11 @@ async fn get_commit(
         Some(p) => Some(r.store.read_commit(p)?.tree),
         None => None,
     };
-    let changes = diff_trees(&r.store, parent_tree.as_ref(), Some(&c.tree))?;
+    let changes = agit_core::diff::detect_renames(
+        &r.store,
+        diff_trees(&r.store, parent_tree.as_ref(), Some(&c.tree))?,
+        50,
+    );
     let patch = render_patch(&r.store, &changes, 3)?;
     let signature = Some(crate::keys::KeyStore::new(&r).info(&c)?);
     let notes = NoteStore::new(&r).for_commit(id, &changes, 10)?;
@@ -777,7 +786,11 @@ fn diff_response(
         None => None,
     };
     let to_tree = r.store.read_commit(to)?.tree;
-    let changes = diff_trees(&r.store, from_tree.as_ref(), Some(&to_tree))?;
+    let changes = agit_core::diff::detect_renames(
+        &r.store,
+        diff_trees(&r.store, from_tree.as_ref(), Some(&to_tree))?,
+        50,
+    );
     let patch = render_patch(&r.store, &changes, 3)?;
     let stats = change_stats(&r.store, &changes)
         .into_iter()
@@ -1021,7 +1034,7 @@ async fn pull_diff(
     let r = st.get(&repo)?;
     let ps = PullStore::new(&r);
     let pr = ps.load(n)?;
-    let changes = ps.changes(&pr)?;
+    let changes = agit_core::diff::detect_renames(&r.store, ps.changes(&pr)?, 50);
     let patch = render_patch(&r.store, &changes, 3)?;
     let stats = change_stats(&r.store, &changes)
         .into_iter()
