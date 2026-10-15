@@ -184,3 +184,14 @@ AGIT_SERVER_URL=http://127.0.0.1:7878/api/v1 pytest -q -m integration
 Covers every endpoint in `docs/API.md` v1. The SDK follows the server's
 compatibility rule: additions are backwards compatible (unknown fields are
 ignored), removals do not happen without a release note.
+
+## Webhooks
+
+```python
+wh = client.create_webhook("demo", "https://ci.example/agit", kinds=["ref.*", "pull.*"], secret="s3cret")
+client.test_webhook("demo", wh.id)       # queues a `ping`
+client.delete_webhook("demo", wh.id)
+```
+
+Deliveries carry `X-Agit-Event`, `X-Agit-Repo`, `X-Agit-Delivery` and, with a secret,
+`X-Agit-Signature: blake3=<hex>` (keyed BLAKE3 over the body, see `docs/API.md`).

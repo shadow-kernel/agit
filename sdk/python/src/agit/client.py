@@ -48,6 +48,7 @@ from .types import (
     expect_absent,
     expect_any,
     expect_is,
+    Webhook,
 )
 
 __version__ = "0.1.0"
@@ -502,6 +503,32 @@ class Client:
         """``PUT`` the whole policy. Violations later surface as :class:`~agit.errors.PolicyViolation`."""
         body = policy.to_dict() if isinstance(policy, Policy) else dict(policy)
         return Policy.from_dict(self.request("PUT", f"/repos/{_seg(repo)}/policy", json_body=body))
+
+    # -- webhooks -----------------------------------------------------------
+
+    def webhooks(self, repo: str) -> list[Webhook]:
+        return [Webhook.from_dict(w) for w in self._get(f"/repos/{_seg(repo)}/webhooks")]
+
+    def create_webhook(
+        self,
+        repo: str,
+        url: str,
+        *,
+        kinds: Sequence[str] = (),
+        secret: str | None = None,
+    ) -> Webhook:
+        """Register a webhook. ``kinds`` are exact kinds or prefixes such as ``pull.*`` (empty = all)."""
+        body: dict[str, Any] = {"url": url, "kinds": list(kinds)}
+        if secret:
+            body["secret"] = secret
+        return Webhook.from_dict(self._post(f"/repos/{_seg(repo)}/webhooks", body))
+
+    def delete_webhook(self, repo: str, webhook_id: str) -> dict[str, Any]:
+        return self.request("DELETE", f"/repos/{_seg(repo)}/webhooks/{_seg(webhook_id)}")
+
+    def test_webhook(self, repo: str, webhook_id: str) -> dict[str, Any]:
+        """Queue a synthetic ``ping`` delivery."""
+        return self._post(f"/repos/{_seg(repo)}/webhooks/{_seg(webhook_id)}/test")
 
     # -- knowledge ----------------------------------------------------------
 

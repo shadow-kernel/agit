@@ -127,6 +127,7 @@ POLICY = {
 class FakeState:
     requests: list[Recorded] = field(default_factory=list)
     policy: dict = field(default_factory=lambda: dict(POLICY))
+    webhooks: list = field(default_factory=list)
     repos: dict[str, dict] = field(default_factory=dict)
     notes: dict[str, dict] = field(default_factory=dict)
     leases: dict[str, dict] = field(default_factory=dict)
@@ -393,6 +394,25 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, {**PR, "state": "closed"})
                 if tail == ["update"]:
                     return self._send(200, {**PR, **{k: v for k, v in rec.json.items()}})
+
+            if rest == ["webhooks"]:
+                if m == "GET":
+                    return self._send(200, st.webhooks)
+                if m == "POST":
+                    if not str(rec.json.get("url", "")).startswith(("http://", "https://")):
+                        return self._err(400, "invalid", "webhook url must be http(s)")
+                    wh = {"id": f"wh_{len(st.webhooks) + 1}", "url": rec.json["url"], "kinds": rec.json.get("kinds", []),
+                          "active": True, "has_secret": bool(rec.json.get("secret")), "created_ms": 1700000000000}
+                    st.webhooks.append(wh)
+                    return self._send(201, wh)
+            if len(rest) == 2 and rest[0] == "webhooks" and m == "DELETE":
+                before = len(st.webhooks)
+                st.webhooks = [w for w in st.webhooks if w["id"] != rest[1]]
+                if len(st.webhooks) == before:
+                    return self._err(404, "not_found", f"webhook {rest[1]}")
+                return self._send(200, {"deleted": rest[1]})
+            if len(rest) == 3 and rest[0] == "webhooks" and rest[2] == "test" and m == "POST":
+                return self._send(200, {"queued": True})
 
             if rest == ["policy"]:
                 if m == "GET":

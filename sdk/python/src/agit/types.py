@@ -402,6 +402,19 @@ class TagCount(Model):
 
 
 @dataclass
+class Webhook(Model):
+    """Event delivery target. Payloads are signed with ``X-Agit-Signature: blake3=<hex>`` when a secret is set."""
+
+    id: str = ""
+    url: str = ""
+    kinds: list[str] = field(default_factory=list)
+    active: bool = True
+    has_secret: bool = False
+    created_ms: int = 0
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+
+@dataclass
 class TagRule(Model):
     pattern: str = ""
     tags: list[str] = field(default_factory=list)
