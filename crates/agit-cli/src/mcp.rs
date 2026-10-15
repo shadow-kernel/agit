@@ -61,10 +61,11 @@ fn tools() -> Vec<Tool> {
         Tool { name: "agit_pr_review", description: "Submit a review: approve, request_changes or comment.", schema: obj(json!({ "number": {"type":"integer"}, "decision": {"type":"string","enum":["approve","request_changes","comment"]}, "body": {"type":"string"} }), &["number","decision"]) },
         Tool { name: "agit_pr_comment", description: "Comment on a pull request, optionally anchored to a path and line. kind: question, suggestion, blocker, note.", schema: obj(json!({ "number": {"type":"integer"}, "body": {"type":"string"}, "path": {"type":"string"}, "line": {"type":"integer"}, "kind": {"type":"string"} }), &["number","body"]) },
         Tool { name: "agit_pr_merge", description: "Merge a pull request on the server (strategy merge or ff).", schema: obj(json!({ "number": {"type":"integer"}, "strategy": {"type":"string","enum":["merge","ff"]}, "message": {"type":"string"} }), &["number"]) },
-        Tool { name: "agit_context", description: "Everything to read before touching a path: knowledge notes, suggested tags, recent commits, active leases, open pull requests touching it.", schema: obj(json!({ "path": {"type":"string"} }), &["path"]) },
+        Tool { name: "agit_context", description: "Everything to read before touching a path: knowledge notes, suggested tags, recent commits, active leases, open pull requests touching it, agents active there. Falls back to the local store when no server is reachable (result has source: server|local).", schema: obj(json!({ "path": {"type":"string"}, "limit": {"type":"integer","default":10}, "local": {"type":"boolean"} }), &["path"]) },
         Tool { name: "agit_know_search", description: "Search knowledge notes by tags (all must match), path coverage or text.", schema: obj(json!({ "tags": {"type":"array","items":{"type":"string"}}, "path": {"type":"string"}, "query": {"type":"string"}, "limit": {"type":"integer","default":20} }), &[]) },
         Tool { name: "agit_know_get", description: "Read one knowledge note in full.", schema: obj(json!({ "id": {"type":"string"} }), &["id"]) },
-        Tool { name: "agit_know_add", description: "Record knowledge: a titled markdown note with typed tags (namespace:value), the paths it applies to, related commits and confidence.", schema: obj(json!({ "title": {"type":"string"}, "body": {"type":"string"}, "tags": {"type":"array","items":{"type":"string"}}, "paths": {"type":"array","items":{"type":"string"}}, "commits": {"type":"array","items":{"type":"string"}}, "confidence": {"type":"number"} }), &["title","body"]) },
+        Tool { name: "agit_know_add", description: "Record knowledge: a titled markdown note with typed tags (namespace:value), the paths it applies to, related commits and confidence. Stored on the server, or locally in .agit/knowledge when no server is reachable (then agit_know_sync uploads it later).", schema: obj(json!({ "title": {"type":"string"}, "body": {"type":"string"}, "tags": {"type":"array","items":{"type":"string"}}, "paths": {"type":"array","items":{"type":"string"}}, "commits": {"type":"array","items":{"type":"string"}}, "confidence": {"type":"number"}, "local": {"type":"boolean","description":"force the local store"} }), &["title","body"]) },
+        Tool { name: "agit_know_sync", description: "Push local-only knowledge notes to the server and refresh the local cache of server notes and tag rules.", schema: obj(json!({}), &[]) },
     ]
 }
 
@@ -488,57 +489,60 @@ impl Server {
                 )?)?
             }
             "agit_context" => {
-                let (c, name) = self.client(&repo, args)?;
+                let k = self.knowledge(&repo, args);
                 let p = self.rel(&repo, &s(args, "path").unwrap_or_default())?;
-                serde_json::to_value(c.context(&name, &p)?)?
+                let (ctx, src) = k.context(&p, n(args, "limit", 10) as usize)?;
+                let mut v = serde_json::to_value(ctx)?;
+                v["source"] = serde_json::to_value(src)?;
+                v
             }
             "agit_know_search" => {
-                let (c, name) = self.client(&repo, args)?;
-                let mut q = format!("?limit={}", n(args, "limit", 20));
-                let tags = list(args, "tags");
-                if !tags.is_empty() {
-                    q.push_str(&format!("&tags={}", tags.join(",")));
-                }
-                if let Some(p) = s(args, "path") {
-                    q.push_str(&format!("&path={}", agit_protocol::client::urlencode(&p)));
-                }
-                if let Some(t) = s(args, "query") {
-                    q.push_str(&format!("&q={}", agit_protocol::client::urlencode(&t)));
-                }
-                serde_json::to_value(c.notes(&name, &q)?)?
+                let k = self.knowledge(&repo, args);
+                let (found, src) = k.search(
+                    &list(args, "tags"),
+                    s(args, "path").as_deref(),
+                    s(args, "query").as_deref(),
+                    n(args, "limit", 20) as usize,
+                )?;
+                json!({ "notes": found, "source": src })
             }
             "agit_know_get" => {
-                let (c, name) = self.client(&repo, args)?;
-                serde_json::to_value(c.note(&name, &s(args, "id").unwrap_or_default())?)?
+                let k = self.knowledge(&repo, args);
+                serde_json::to_value(k.get(&s(args, "id").unwrap_or_default())?.0)?
             }
             "agit_know_add" => {
-                let (c, name) = self.client(&repo, args)?;
+                let k = self.knowledge(&repo, args);
                 let commits = list(args, "commits")
                     .iter()
                     .map(|r| Ok(repo.resolve(r)?))
                     .collect::<Result<Vec<_>>>()?;
-                serde_json::to_value(
-                    c.create_note(
-                        &name,
-                        &NoteCreate {
-                            title: s(args, "title").unwrap_or_default(),
-                            body: s(args, "body").unwrap_or_default(),
-                            tags: list(args, "tags"),
-                            paths: list(args, "paths"),
-                            commits,
-                            pulls: vec![],
-                            confidence: args
-                                .get("confidence")
-                                .and_then(|x| x.as_f64())
-                                .map(|x| x as f32),
-                            ..Default::default()
-                        },
-                    )?,
-                )?
+                let (note, src) = k.add(NoteCreate {
+                    title: s(args, "title").unwrap_or_default(),
+                    body: s(args, "body").unwrap_or_default(),
+                    tags: list(args, "tags"),
+                    paths: list(args, "paths"),
+                    commits,
+                    pulls: vec![],
+                    confidence: args
+                        .get("confidence")
+                        .and_then(|x| x.as_f64())
+                        .map(|x| x as f32),
+                    ..Default::default()
+                })?;
+                json!({ "note": note, "source": src })
+            }
+            "agit_know_sync" => {
+                let k = self.knowledge(&repo, args);
+                serde_json::to_value(k.sync()?)?
             }
             other => return Err(anyhow!("unknown tool {other}")),
         };
         Ok(v)
+    }
+
+    fn knowledge<'r>(&self, repo: &'r Repository, args: &Value) -> crate::knowledge::Knowledge<'r> {
+        let agent = s(args, "agent").or_else(|| std::env::var("AGIT_AGENT").ok());
+        crate::knowledge::Knowledge::new(repo, &self.remote, agent.as_deref(), b(args, "local"))
     }
 
     fn client(&self, repo: &Repository, args: &Value) -> Result<(agit_protocol::Client, String)> {

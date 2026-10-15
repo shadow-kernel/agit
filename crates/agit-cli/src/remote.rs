@@ -123,6 +123,8 @@ pub enum KnowCmd {
     Context { path: String },
     /// List tags with counts.
     Tags,
+    /// Push local-only notes to the server and refresh the local cache.
+    Sync,
 }
 
 fn client_as(
@@ -471,8 +473,17 @@ pub fn run_know(
     remote: &str,
     cmd: KnowCmd,
     agent: Option<&str>,
+    local: bool,
 ) -> Result<()> {
-    let (c, name) = client_as(repo, remote, agent)?;
+    use crate::knowledge::{Knowledge, Source};
+    let k = Knowledge::new(repo, remote, agent, local);
+    let src_note = |src: Source| {
+        if src == Source::Local {
+            " (local store)"
+        } else {
+            ""
+        }
+    };
     match cmd {
         KnowCmd::Add {
             title,
@@ -496,20 +507,21 @@ pub fn run_know(
                 .iter()
                 .map(|r| Ok(repo.resolve(r)?))
                 .collect::<Result<Vec<_>>>()?;
-            let n = c.create_note(
-                &name,
-                &NoteCreate {
-                    title,
-                    body,
-                    tags,
-                    paths,
-                    commits,
-                    pulls: vec![],
-                    confidence,
-                    ..Default::default()
-                },
-            )?;
-            emit(json, &n, || println!("note {} created: {}", n.id, n.title));
+            let (n, src) = k.add(NoteCreate {
+                title,
+                body,
+                tags,
+                paths,
+                commits,
+                pulls: vec![],
+                confidence,
+                ..Default::default()
+            })?;
+            emit(
+                json,
+                &serde_json::json!({ "note": n, "source": src }),
+                || println!("note {} created: {}{}", n.id, n.title, src_note(src)),
+            );
         }
         KnowCmd::Search {
             tags,
@@ -517,31 +529,28 @@ pub fn run_know(
             query,
             limit,
         } => {
-            let mut q = format!("?limit={limit}");
-            if !tags.is_empty() {
-                q.push_str(&format!("&tags={}", tags.join(",")));
-            }
-            if let Some(p) = path {
-                q.push_str(&format!("&path={}", agit_protocol::client::urlencode(&p)));
-            }
-            if let Some(s) = query {
-                q.push_str(&format!("&q={}", agit_protocol::client::urlencode(&s)));
-            }
-            let list = c.notes(&name, &q)?;
-            emit(json, &list, || {
-                for n in &list {
-                    println!(
-                        "{} {:<40} [{}] {}",
-                        n.id,
-                        n.title,
-                        n.tags.join(", "),
-                        n.paths.join(" ")
-                    );
-                }
-            });
+            let (list, src) = k.search(&tags, path.as_deref(), query.as_deref(), limit)?;
+            emit(
+                json,
+                &serde_json::json!({ "notes": list, "source": src }),
+                || {
+                    for n in &list {
+                        println!(
+                            "{} {:<40} [{}] {}",
+                            n.id,
+                            n.title,
+                            n.tags.join(", "),
+                            n.paths.join(" ")
+                        );
+                    }
+                    if src == Source::Local {
+                        eprintln!("(local store)");
+                    }
+                },
+            );
         }
         KnowCmd::Get { id } => {
-            let n = c.note(&name, &id)?;
+            let (n, _) = k.get(&id)?;
             emit(json, &n, || {
                 println!("# {}\n", n.title);
                 println!(
@@ -555,45 +564,70 @@ pub fn run_know(
             });
         }
         KnowCmd::Context { path } => {
-            let ctx = c.context(&name, &path)?;
-            emit(json, &ctx, || {
-                println!("context for {}", ctx.path);
-                if !ctx.suggested_tags.is_empty() {
-                    println!("suggested tags: {}", ctx.suggested_tags.join(", "));
-                }
-                println!("\nnotes ({}):", ctx.notes.len());
-                for n in &ctx.notes {
-                    println!("  {} {} [{}]", n.id, n.title, n.tags.join(", "));
-                }
-                println!("\nrecent commits ({}):", ctx.recent_commits.len());
-                for cm in &ctx.recent_commits {
-                    println!(
-                        "  {} {} {}",
-                        cm.id.short(),
-                        cm.commit.summary(),
-                        cm.commit
-                            .agent
-                            .as_ref()
-                            .map(|a| format!("({})", a.id))
-                            .unwrap_or_default()
-                    );
-                }
-                println!("\nleases ({}):", ctx.leases.len());
-                for l in &ctx.leases {
-                    println!("  {} {} {}", l.id, l.holder, l.paths.join(" "));
-                }
-                println!("\nopen pull requests ({}):", ctx.open_pulls.len());
-                for p in &ctx.open_pulls {
-                    println!("  #{} {} ({})", p.number, p.title, p.author.id);
-                }
-            });
+            let rel = repo
+                .rel_path(&std::env::current_dir()?, std::path::Path::new(&path))
+                .unwrap_or(path);
+            let (ctx, src) = k.context(&rel, 10)?;
+            emit(
+                json,
+                &serde_json::json!({ "context": ctx, "source": src }),
+                || {
+                    println!("context for {}{}", ctx.path, src_note(src));
+                    if !ctx.suggested_tags.is_empty() {
+                        println!("suggested tags: {}", ctx.suggested_tags.join(", "));
+                    }
+                    println!("\nnotes ({}):", ctx.notes.len());
+                    for n in &ctx.notes {
+                        println!(
+                            "  {} {} [{}]{}",
+                            n.id,
+                            n.title,
+                            n.tags.join(", "),
+                            if n.stale { " (stale)" } else { "" }
+                        );
+                    }
+                    println!("\nrecent commits ({}):", ctx.recent_commits.len());
+                    for cm in &ctx.recent_commits {
+                        println!(
+                            "  {} {} {}",
+                            cm.id.short(),
+                            cm.commit.summary(),
+                            cm.commit
+                                .agent
+                                .as_ref()
+                                .map(|a| format!("({})", a.id))
+                                .unwrap_or_default()
+                        );
+                    }
+                    println!("\nleases ({}):", ctx.leases.len());
+                    for l in &ctx.leases {
+                        println!("  {} {} {}", l.id, l.holder, l.paths.join(" "));
+                    }
+                    println!("\nopen pull requests ({}):", ctx.open_pulls.len());
+                    for p in &ctx.open_pulls {
+                        println!("  #{} {} ({})", p.number, p.title, p.author.id);
+                    }
+                    if !ctx.agents_active.is_empty() {
+                        println!("\nagents active here: {}", ctx.agents_active.join(", "));
+                    }
+                },
+            );
         }
         KnowCmd::Tags => {
-            let list = c.tags(&name)?;
+            let (list, _) = k.tags()?;
             emit(json, &list, || {
                 for t in &list {
                     println!("{:<30} {}", t.tag, t.count);
                 }
+            });
+        }
+        KnowCmd::Sync => {
+            let r = k.sync()?;
+            emit(json, &r, || {
+                println!(
+                    "pushed {} local note(s), cached {} server note(s), {} tag rule(s)",
+                    r.pushed, r.pulled, r.rules_pulled
+                )
             });
         }
     }

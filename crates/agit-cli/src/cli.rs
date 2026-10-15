@@ -412,10 +412,13 @@ pub enum Cmd {
         #[arg(long, default_value = "origin")]
         remote: String,
     },
-    /// Knowledge base on the remote: notes, tags, context for a path.
+    /// Knowledge base: notes, tags, context for a path (server first, local `.agit/knowledge` when offline).
     Know {
         #[arg(long, default_value = "origin")]
         remote: String,
+        /// Use only the local store, never the server.
+        #[arg(long)]
+        local: bool,
         #[command(subcommand)]
         cmd: crate::remote::KnowCmd,
         #[command(flatten)]
@@ -1331,9 +1334,19 @@ pub fn run(cli: Cli) -> Result<()> {
         Cmd::Pr { remote, cmd, agent } => {
             crate::remote::run_pr(&open(&cli.dir)?, json, &remote, cmd, agent.agent.as_deref())?
         }
-        Cmd::Know { remote, cmd, agent } => {
-            crate::remote::run_know(&open(&cli.dir)?, json, &remote, cmd, agent.agent.as_deref())?
-        }
+        Cmd::Know {
+            remote,
+            local,
+            cmd,
+            agent,
+        } => crate::remote::run_know(
+            &open(&cli.dir)?,
+            json,
+            &remote,
+            cmd,
+            agent.agent.as_deref(),
+            local,
+        )?,
         Cmd::Mcp { remote } => crate::mcp::serve(cwd(&cli.dir)?, remote)?,
         Cmd::Key { cmd } => run_key(&cli.dir, json, cmd)?,
         Cmd::Verify { rev } => {

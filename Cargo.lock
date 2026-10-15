@@ -68,6 +68,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "ureq",
+ "uuid",
 ]
 
 [[package]]

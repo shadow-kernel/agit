@@ -1181,3 +1181,82 @@ async fn scoped_tokens_bind_identity_and_limit_access() {
     .await
     .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn local_knowledge_fallback_and_sync() {
+    use agit_protocol::local_knowledge::LocalNotes;
+    let tmp = tempfile::tempdir().unwrap();
+    let base = start_server(&tmp.path().join("data")).await;
+    let tmp_path = tmp.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let c = Client::new(&base).with_agent(Some("agent-a".into()));
+        c.create_repo("k2", Some("main")).unwrap();
+        let a = Repository::init(&tmp_path.join("a")).unwrap();
+        write(a.work_dir(), "src/x.rs", "x\n");
+        commit_all(&a, "one", "agent-a");
+
+        // Offline: notes land in .agit/knowledge and context works without a server.
+        let local = LocalNotes::open(&a);
+        let n = local
+            .create(
+                NoteCreate {
+                    title: "local wisdom".into(),
+                    body: "offline".into(),
+                    tags: vec!["kind:gotcha".into()],
+                    paths: vec!["src/**".into()],
+                    ..Default::default()
+                },
+                "agent-a",
+            )
+            .unwrap();
+        assert!(n.id.starts_with("n_local_"));
+        assert_eq!(n.valid_at, a.head_commit().unwrap());
+        local
+            .set_rules(&[TagRule {
+                pattern: "src/**".into(),
+                tags: vec!["area:core".into()],
+            }])
+            .unwrap();
+        let ctx = local.context("src/x.rs", 10).unwrap();
+        assert_eq!(ctx.notes.len(), 1);
+        assert_eq!(ctx.suggested_tags, vec!["area:core"]);
+        assert_eq!(ctx.recent_commits.len(), 1);
+        assert_eq!(ctx.agents_active, vec!["agent-a"]);
+        assert_eq!(
+            local
+                .query(&["kind:gotcha".into()], None, Some("OFFLINE"), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Sync pushes the local note (valid_at is dropped because the server
+        // does not have the commit) and caches server notes locally.
+        sync::add_remote(&a, "origin", &format!("{base}/repos/k2")).unwrap();
+        c.create_note(
+            "k2",
+            &NoteCreate {
+                title: "server wisdom".into(),
+                body: "online".into(),
+                tags: vec!["kind:decision".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let r = local.sync(&c, "k2").unwrap();
+        assert_eq!((r.pushed, r.pulled), (1, 2));
+        let all = local.all().unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all.iter().all(|n| !n.id.starts_with("n_local_")));
+        assert!(c
+            .notes("k2", "?q=local")
+            .unwrap()
+            .iter()
+            .any(|n| n.title == "local wisdom"));
+        // Second sync pushes nothing new.
+        let r = local.sync(&c, "k2").unwrap();
+        assert_eq!(r.pushed, 0);
+    })
+    .await
+    .unwrap();
+}

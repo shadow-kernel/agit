@@ -164,6 +164,11 @@ impl Client {
         r
     }
 
+    /// Generic GET for endpoints without a dedicated method.
+    pub fn get_json_public<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        self.get_json(path)
+    }
+
     fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let resp = self.req("GET", path).call().map_err(map_err)?;
         resp.into_json()
