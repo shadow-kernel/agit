@@ -45,9 +45,46 @@ describe.skipIf(!url)("integration against a live agit server", () => {
     const ctx = await session.context("src/auth/login.rs");
     expect(ctx.leases.map((l) => l.id)).toContain(lease.id);
     expect(ctx.notes.map((n) => n.id)).toContain(note.id);
+    expect(ctx.agents_active).toContain("sdk-ts-tester");
+    expect(ctx.files).toBeUndefined();
+    const pack = await session.contextPack("src/auth/login.rs", 1000);
+    expect(pack.files ?? []).toEqual([]); // empty repository: nothing to pack
+    expect(pack.notes.map((n) => n.id)).toContain(note.id);
+
+    // knowledge v2: ranked search, drafts, accept, validate, stale
+    const hits = await client.listNotes(repo, { q: "note" });
+    expect(hits.map((h) => h.id)).toEqual([note.id]);
+    expect(hits[0]?.score).toBeGreaterThan(0);
+    expect(hits[0]).toMatchObject({ draft: false, stale: false });
+    expect(await client.listNotes(repo, { pull: 7 })).toEqual([]);
+    const draft = await client.createNote(repo, { title: "draft from sdk", body: "b", draft: true, pulls: [7], paths: ["src/auth/**"] });
+    expect(draft.draft).toBe(true);
+    expect((await client.listNotes(repo, { path: "src/auth/x.rs" })).map((n) => n.id)).not.toContain(draft.id);
+    expect((await client.listNotes(repo, { drafts: true, pull: 7 })).map((n) => n.id)).toEqual([draft.id]);
+    const accepted = await session.acceptNote(draft, { title: "accepted from sdk" });
+    expect(accepted.draft).toBeUndefined();
+    expect(accepted.title).toBe("accepted from sdk");
+    expect((await client.listNotes(repo, { pull: 7 })).map((n) => n.id)).toEqual([accepted.id]);
+    expect(await session.staleNotes()).toEqual([]); // no commits yet
+    await client.deleteNote(repo, accepted.id);
+
+    // signing keys
+    const pk = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"; // RFC 8032 test key
+    expect(await client.listKeys(repo)).toEqual([]);
+    const key = await client.registerKey(repo, { agent: "sdk-ts-tester", public_key: pk });
+    expect(key).toMatchObject({ agent: "sdk-ts-tester", public_key: pk, added_by: "sdk-ts-tester" });
+    expect((await client.registerKey(repo, { agent: "sdk-ts-tester", public_key: pk })).key_id).toBe(key.key_id);
+    await expect(client.registerKey(repo, { agent: "sdk-ts-other", public_key: pk })).rejects.toMatchObject({ code: "already_exists", status: 409 });
+    await expect(client.registerKey(repo, { agent: "sdk-ts-tester", public_key: "zz" })).rejects.toMatchObject({ code: "invalid" });
+    expect((await client.listKeys(repo)).map((k) => k.key_id)).toEqual([key.key_id]);
+    const signedPolicy = await client.setPolicy(repo, { ...saved, require_signed: true });
+    expect(signedPolicy.require_signed).toBe(true);
+    expect(await client.deleteKey(repo, key.key_id)).toEqual({ deleted: key.key_id });
+    await expect(client.deleteKey(repo, key.key_id)).rejects.toBeInstanceOf(NotFoundError);
 
     const events = await client.listEvents(repo, { since: 0 });
     expect(events.some((e) => e.kind === "lease.claim")).toBe(true);
+    for (const kind of ["note.create", "note.accept", "key.add", "key.remove"]) expect(events.some((e) => e.kind === kind)).toBe(true);
 
     const streamed: string[] = [];
     const ctl = new AbortController();

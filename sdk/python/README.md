@@ -31,7 +31,7 @@ for repo in client.list_repos():
 
 main = client.refs("demo", prefix="refs/heads/main")[0]
 log = client.commits("demo", rev="main", limit=10, task="DEMO-7")
-ctx = client.context("demo", "src/auth/login.rs")      # notes, recent commits, leases, open PRs
+ctx = client.context("demo", "src/auth/login.rs")      # notes, recent commits, leases, open PRs, active agents
 
 # compare-and-swap ref update (atomic across all updates)
 client.update_refs("demo", [RefUpdate("refs/heads/main", expect_is(main.id), new_commit_id)],
@@ -50,8 +50,8 @@ client.set_policy("demo", pol)                           # violations raise Poli
 # knowledge
 note = client.create_note("demo", "x.txt is consumed by the importer",
                           tags=["kind:decision", "area:import"], paths=["x.txt"])
-for s in client.notes("demo", tags=["area:import"]):
-    print(s.id, s.title, s.excerpt)
+for s in client.notes("demo", q="importer", tags=["area:import"]):   # BM25-ranked, best first
+    print(s.id, s.title, s.excerpt, s.score, s.stale)
 
 # live events (Server-Sent Events)
 for event in client.stream_events("demo", since=0):
@@ -70,9 +70,12 @@ when your code raises.
 from agit import Client, AgentSession
 
 with AgentSession(Client(), "demo", agent_id="coder-1") as s:
-    ctx = s.context("src/auth/login.rs")          # ContextResponse
-    for note in ctx.notes:
-        print(note.title, note.excerpt)
+    ctx = s.context_pack("src/auth/login.rs", budget=6000)   # ContextResponse incl. file texts
+    for note in ctx.notes:                         # fresh notes first, then stale ones
+        print(note.title, note.excerpt, "(stale)" if note.stale else "")
+    for f in ctx.files:                            # the file plus up to 5 siblings, within the budget
+        print(f.path, len(f.text), f.truncated)
+    print("also working here:", ctx.agents_active)
 
     s.claim(["src/auth/**"], ttl_secs=1800, note="DEMO-7")   # LeaseConflict if someone else holds it
 
@@ -103,11 +106,12 @@ for event in stream(["events", "--follow"], cwd="."):           # one object per
 Responses are parsed into dataclasses from `agit.types` with the exact field
 names of `docs/API.md` (`RepoSummary`, `RefEntry`, `CommitEntry`, `CommitDetail`,
 `Change`, `DiffResponse`, `PullRequest`, `PullDetail`, `Review`, `Comment`,
-`Check`, `MergeResponse`, `Note`, `NoteSummary`, `TagCount`, `TagRule`, `Policy`,
-`Lease`, `Event`, `ContextResponse`, `AgentActivity`). Parsing is lenient: unknown fields
+`Check`, `MergeResponse`, `Note`, `NoteSummary`, `StaleNote`, `TagCount`, `TagRule`, `Policy`,
+`Lease`, `Event`, `ContextResponse`, `ContextFile`, `SignatureInfo`, `KeyEntry`, `Webhook`,
+`AgentActivity`). Parsing is lenient: unknown fields
 are ignored and the raw payload is kept on `.raw`. A few small responses are
 plain dicts: `tree()`, `delete_repo()`, `release_lease()`, `check_lease()`,
-`delete_note()`, `object_json()`. `fetch_objects()` returns the raw object
+`delete_note()`, `delete_key()`, `delete_webhook()`, `test_webhook()`, `object_json()`. `fetch_objects()` returns the raw object
 stream as `bytes`; `get_object()` returns `(kind, payload)`.
 
 Enum values are plain strings as on the wire: PR `state` `open|merged|closed`,
@@ -195,3 +199,70 @@ client.delete_webhook("demo", wh.id)
 
 Deliveries carry `X-Agit-Event`, `X-Agit-Repo`, `X-Agit-Delivery` and, with a secret,
 `X-Agit-Signature: blake3=<hex>` (keyed BLAKE3 over the body, see `docs/API.md`).
+`Webhook.has_secret` tells whether a secret is set; the secret itself is never returned.
+
+## Knowledge v2: search, validity, drafts, context packs
+
+Notes carry `valid_at` (the commit they were written or last validated against,
+default HEAD at creation), `stale` (computed on every read: a covered path changed
+between `valid_at` and HEAD) and `draft` (machine-generated, hidden until accepted).
+Summaries also carry `score` for ranked searches.
+
+```python
+# ranked full-text search (BM25 over title, body, tags, paths); filters are post-filters
+hits = client.notes("demo", q="session store", path="src/auth/login.rs", limit=5)
+for h in hits:
+    print(h.score, h.title, "stale" if h.stale else "fresh")
+client.notes("demo", commit="main", pull=3)                  # notes linking a commit / PR
+client.notes("demo", drafts=True, include_superseded=True)   # everything
+
+# validity
+client.create_note("demo", "Pinned", valid_at=commit_id)      # 412 object_not_found if unknown
+for s in client.stale_notes("demo", rev="HEAD"):              # StaleNote: summary + changed_paths
+    print(s.id, s.changed_paths)
+    client.validate_note("demo", s.id)                        # "still true at HEAD" -> valid_at = HEAD
+    # ...or fix the text: client.update_note("demo", s.id, body="...") then validate
+
+# drafts: every merged PR leaves a draft note (event `note.draft`)
+for d in client.notes("demo", drafts=True, pull=pr.number):
+    client.accept_note("demo", d.id, title="Cleaner title", tags=["kind:change", "area:auth"])
+    # or client.delete_note("demo", d.id) to discard it
+
+# context pack: context plus file texts, kept within ~budget tokens
+pack = client.context_pack("demo", "src/auth/login.rs", budget=6000)
+pack.agents_active        # agents holding a lease on the path or who committed to it in 24 h
+pack.fresh_notes, pack.stale_notes
+[(f.path, f.truncated) for f in pack.files]
+
+# commits link back to notes
+detail = client.commit("demo", "main")
+[n.title for n in detail.notes]                               # up to 10 related notes
+```
+
+Through `AgentSession`: `s.context_pack(path, budget)`, `s.stale_notes(rev)`,
+`s.validate_note(note_or_id, rev)`, `s.accept_note(draft_or_id, **patch)` and
+`s.remember(..., valid_at=...)`.
+
+## Signing keys
+
+Agents sign commits with Ed25519 (`agit key generate`, `agit commit --sign`); the
+public key travels inside the commit. The per-repository key registry decides which
+keys are trusted for which agent, and `Policy.require_signed` makes every commit
+reaching a protected branch need a valid signature from a registered key.
+
+```python
+key = client.register_key("demo", "coder-1", public_key_hex)   # KeyEntry(agent, key_id, public_key, added_ms, added_by)
+client.keys("demo")                                            # 409 AlreadyExists if the key belongs to another agent
+client.delete_key("demo", key.key_id)                          # {"deleted": key_id}
+
+sig = client.commit("demo", "main").signature                  # SignatureInfo or None
+sig.status            # "unsigned" | "valid" | "invalid"
+sig.key_id, sig.signer, sig.public_key   # for "valid"
+sig.reason            # for "invalid"
+sig.trusted           # key registered for the signer
+sig.is_trusted        # valid and trusted
+
+pol = client.policy("demo")
+pol.protected_branches, pol.require_signed = ["main"], True
+client.set_policy("demo", pol)
+```

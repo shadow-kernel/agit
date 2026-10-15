@@ -61,7 +61,27 @@ export const fixtures = {
     created_ms: 3,
     updated_ms: 3,
     superseded_by: null,
+    valid_at: ID_A,
+    stale: false,
   },
+  draft: {
+    id: "n_d1",
+    title: "Rotate session tokens",
+    body: "Intent: Close the fixation window\nChanged files:\n- src/auth/login.rs (M)",
+    tags: ["kind:change", "area:auth"],
+    paths: ["src/auth/**"],
+    commits: [ID_B],
+    pulls: [1],
+    author: "agent1",
+    confidence: 0.4,
+    created_ms: 5,
+    updated_ms: 5,
+    superseded_by: null,
+    valid_at: ID_B,
+    draft: true,
+    stale: false,
+  },
+  key: { agent: "agent1", key_id: "k_1", public_key: "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", added_ms: 1_700_000_000_000, added_by: "admin" },
   webhook: { id: "wh_1", url: "http://localhost:9/hook", kinds: ["ref.*"], active: true, has_secret: true, created_ms: 1_700_000_000_000 },
   policy: {
     protected_branches: ["main"],
@@ -74,10 +94,17 @@ export const fixtures = {
     allowed_merge_agents: [],
     allowed_push_agents: [],
     max_files_per_commit: 0,
+    require_signed: false,
   },
   lease: { id: "L1", holder: "agent1", paths: ["src/auth"], mode: "exclusive", created_ms: 4, expires_ms: 4000, note: "refactor" },
   ids: { A: ID_A, B: ID_B },
 };
+
+/** Note summary as the server builds it: no body, excerpt, `draft`/`stale` always present. */
+function summary(note: Record<string, unknown> & { body: string }, extra: Record<string, unknown> = {}) {
+  const { body: _b, ...rest } = note;
+  return { ...rest, excerpt: note.body.slice(0, 200), draft: Boolean(note.draft), stale: Boolean(note.stale), ...extra };
+}
 
 function json(res: ServerResponse, status: number, body: unknown) {
   res.writeHead(status, { "content-type": "application/json" });
@@ -105,6 +132,7 @@ function sseEvent(seq: number, kind: string, data: Record<string, unknown>): str
 export async function startFakeServer(): Promise<FakeServer> {
   const requests: SeenRequest[] = [];
   const state: FakeServer = { baseUrl: "", requests, sseConnections: 0, close: async () => {} };
+  let keys: (typeof fixtures.key)[] = [];
   const sockets = new Set<import("node:net").Socket>();
 
   const server: Server = createServer(async (req, res) => {
@@ -170,6 +198,53 @@ export async function startFakeServer(): Promise<FakeServer> {
         return res.end(Buffer.from("raw"));
       case route === "GET /api/v1/repos/demo/commits":
         return json(res, 200, [{ id: ID_A, tree: ID_B, parents: [], author: { name: "a", email: "a@x" }, time_ms: 1, message: "m" }]);
+      case route === `GET /api/v1/repos/demo/commits/${ID_A}`:
+      case route === "GET /api/v1/repos/demo/commits/unsigned":
+      case route === "GET /api/v1/repos/demo/commits/forged": {
+        const rev = url.pathname.split("/").pop();
+        const signature =
+          rev === "unsigned"
+            ? { status: "unsigned", trusted: false }
+            : rev === "forged"
+              ? { status: "invalid", reason: "signature does not verify", trusted: false }
+              : { status: "valid", key_id: "k_1", signer: "agent1", public_key: fixtures.key.public_key, trusted: keys.some((k) => k.key_id === "k_1") };
+        return json(res, 200, {
+          id: ID_A,
+          commit: { tree: ID_B, parents: [], author: { name: "a", email: "a@x" }, time_ms: 1, message: "m", agent: { id: "agent1" } },
+          changes: [{ path: "src/auth/login.rs", kind: "modified", old: { id: ID_B, mode: "file", size: 1 }, new: { id: ID_A, mode: "file", size: 2 } }],
+          patch: "+x",
+          signature,
+          notes: [summary(fixtures.draft), summary(fixtures.note)],
+        });
+      }
+      case route === "GET /api/v1/repos/demo/keys":
+        return json(res, 200, keys);
+      case route === "POST /api/v1/repos/demo/keys": {
+        const b = body as { agent?: string; public_key?: string };
+        const pk = String(b.public_key ?? "").trim().toLowerCase();
+        if (!/^[0-9a-f]{64}$/.test(pk)) return error(res, 400, "invalid", "public key must be 32 bytes of hex");
+        if (!b.agent) return error(res, 400, "invalid", "agent is required");
+        const keyId = `k_${pk.slice(0, 8)}`;
+        const existing = keys.find((k) => k.key_id === keyId);
+        if (existing) {
+          if (existing.agent === b.agent) return json(res, 201, existing);
+          return error(res, 409, "already_exists", `key ${keyId} is registered for ${existing.agent}`);
+        }
+        const entry = { agent: b.agent, key_id: keyId, public_key: pk, added_ms: 1_700_000_000_001, added_by: String(req.headers["x-agit-agent"] ?? "anonymous") };
+        keys.push(entry);
+        return json(res, 201, entry);
+      }
+      case /^DELETE \/api\/v1\/repos\/demo\/keys\/[^/]+$/.test(route): {
+        const id = decodeURIComponent(url.pathname.split("/").pop() ?? "");
+        if (id === "k_1") {
+          keys = keys.filter((k) => k.key_id !== "k_1");
+          return json(res, 200, { deleted: id });
+        }
+        const before = keys.length;
+        keys = keys.filter((k) => k.key_id !== id);
+        if (keys.length === before) return error(res, 404, "not_found", `key ${id} not found`);
+        return json(res, 200, { deleted: id });
+      }
       case route === "GET /api/v1/repos/demo/events":
         return json(res, 200, [{ seq: 1, time_ms: 1, kind: "commit", data: {} }]);
       case route === "GET /api/v1/repos/demo/events/stream": {
@@ -244,11 +319,47 @@ export async function startFakeServer(): Promise<FakeServer> {
       case route === "POST /api/v1/repos/demo/pulls/1/checks":
         return json(res, 200, { ...fixtures.pull, checks: [{ ...(body as object), time_ms: 8 }] });
       case route === "GET /api/v1/repos/demo/knowledge/notes": {
-        const { body: _b, ...summary } = fixtures.note;
-        return json(res, 200, [{ ...summary, excerpt: fixtures.note.body.slice(0, 200) }]);
+        const q = url.searchParams;
+        if (q.get("commit") === "nope") return error(res, 404, "unknown_revision", "unknown revision nope");
+        const all = [fixtures.note, fixtures.draft];
+        const flag = (k: string) => ["1", "true"].includes(q.get(k) ?? "");
+        const out = all
+          .filter((n) => !n.draft || flag("drafts"))
+          .filter((n) => !q.get("commit") || n.commits.includes(q.get("commit")!))
+          .filter((n) => !q.get("pull") || n.pulls.includes(Number(q.get("pull"))))
+          .filter((n) => !q.get("tags") || q.get("tags")!.split(",").every((t) => n.tags.includes(t)))
+          .map((n) => (q.get("q") ? summary(n, { score: n.title.toLowerCase().includes(q.get("q")!.toLowerCase()) ? 2.5 : 0.5 }) : summary(n)))
+          .filter((n) => !q.get("q") || n.score! > 0.5 || n.excerpt.toLowerCase().includes(q.get("q")!.toLowerCase()));
+        if (q.get("q")) out.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+        return json(res, 200, out);
       }
-      case route === "POST /api/v1/repos/demo/knowledge/notes":
-        return json(res, 201, { ...fixtures.note, id: "n_2", ...(body as object), author: req.headers["x-agit-agent"] ?? "anonymous" });
+      case route === "POST /api/v1/repos/demo/knowledge/notes": {
+        const b = body as { valid_at?: string; draft?: boolean };
+        if (b.valid_at === "c".repeat(64)) return error(res, 412, "object_not_found", "object not found");
+        const { draft: _d, ...base } = fixtures.note;
+        const created: Record<string, unknown> = { ...base, id: "n_2", ...(body as object), author: req.headers["x-agit-agent"] ?? "anonymous", stale: false };
+        if (!b.draft) delete created.draft; // the server omits `draft` when false
+        return json(res, 201, created);
+      }
+      case route === "GET /api/v1/repos/demo/knowledge/stale": {
+        if (url.searchParams.get("rev") === "nope") return error(res, 404, "unknown_revision", "unknown revision nope");
+        if (url.searchParams.get("rev") !== ID_B) return json(res, 200, []);
+        const out = [summary(fixtures.note, { stale: true, changed_paths: ["src/auth/login.rs"] })];
+        if (["1", "true"].includes(url.searchParams.get("drafts") ?? "")) out.push(summary(fixtures.draft, { stale: true, changed_paths: ["src/auth/session.rs"] }));
+        return json(res, 200, out);
+      }
+      case route === "POST /api/v1/repos/demo/knowledge/notes/n_1/validate": {
+        const rev = (body as { rev?: string } | undefined)?.rev;
+        if (rev === "nope") return error(res, 404, "unknown_revision", "unknown revision nope");
+        return json(res, 200, { ...fixtures.note, valid_at: rev && rev !== "HEAD" ? rev : ID_A, stale: false, updated_ms: fixtures.note.updated_ms + 1 });
+      }
+      case route === "POST /api/v1/repos/demo/knowledge/notes/n_d1/accept": {
+        const { draft: _d, ...rest } = fixtures.draft;
+        return json(res, 200, { ...rest, ...((body as object | undefined) ?? {}), updated_ms: fixtures.draft.updated_ms + 1 });
+      }
+      case route === "POST /api/v1/repos/demo/knowledge/notes/n_missing/accept":
+      case route === "POST /api/v1/repos/demo/knowledge/notes/n_missing/validate":
+        return error(res, 404, "not_found", "note n_missing not found");
       case route === "GET /api/v1/repos/demo/knowledge/notes/n_1":
         return json(res, 200, fixtures.note);
       case route === "PATCH /api/v1/repos/demo/knowledge/notes/n_1":
@@ -276,9 +387,31 @@ export async function startFakeServer(): Promise<FakeServer> {
         return json(res, 200, fixtures.policy);
       case route === "PUT /api/v1/repos/demo/policy":
         return json(res, 200, body);
-      case route === "GET /api/v1/repos/demo/context":
-        if (!url.searchParams.get("path")) return error(res, 400, "invalid", "missing `path`");
-        return json(res, 200, { path: url.searchParams.get("path"), notes: [], suggested_tags: ["area:auth"], recent_commits: [], leases: [fixtures.lease], open_pulls: [fixtures.pull] });
+      case route === "GET /api/v1/repos/demo/context": {
+        const path = url.searchParams.get("path");
+        if (!path) return error(res, 400, "invalid", "missing `path`");
+        const ctx: Record<string, unknown> = {
+          path,
+          notes: [summary(fixtures.note), summary(fixtures.note, { id: "n_old", stale: true })],
+          suggested_tags: ["area:auth"],
+          recent_commits: [],
+          leases: [fixtures.lease],
+          open_pulls: [fixtures.pull],
+          agents_active: ["agent1", "agent2"],
+        };
+        if ((url.searchParams.get("include") ?? "").split(",").includes("files")) {
+          const budget = Number(url.searchParams.get("budget") ?? 6000);
+          const text = "fn login() {}\n".repeat(10);
+          ctx.files =
+            budget * 4 < text.length
+              ? [{ path, text: text.slice(0, budget * 4), truncated: true }]
+              : [
+                  { path, text, truncated: false },
+                  { path: `${path.split("/").slice(0, -1).join("/")}/session.rs`, text: "// sibling\n", truncated: false },
+                ];
+        }
+        return json(res, 200, ctx);
+      }
       case route === "GET /api/v1/repos/demo/agents":
         return json(res, 200, [{ id: "agent1", model: null, commits: 3, last_seen_ms: 10, open_pulls: 1, leases: 1 }]);
       case route === "GET /api/v1/repos/demo/slow":

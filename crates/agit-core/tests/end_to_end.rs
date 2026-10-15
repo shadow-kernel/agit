@@ -6,7 +6,7 @@ use std::path::Path;
 use agit_core::lease::{LeaseMode, LeaseRequest};
 use agit_core::ops::{self, CommitOptions, LogOptions, MergeOptions, MergeResult};
 use agit_core::worktree;
-use agit_core::{AgentInfo, Error, Repository};
+use agit_core::{AgentInfo, Error, ObjectId, Repository};
 
 fn write(root: &Path, rel: &str, content: &str) {
     let p = root.join(rel);
@@ -525,4 +525,99 @@ fn reflog_reset_and_gc() {
     .unwrap();
     assert_eq!(r.checkpoints_expired, 1);
     assert_eq!(ops::list_checkpoints(&repo, 10).unwrap().len(), 0);
+}
+
+#[test]
+fn blame_revert_cherry_pick_stash_grep() {
+    use agit_core::history::{self, ApplyResult};
+    let (_d, repo) = fresh();
+    let root = repo.work_dir().to_path_buf();
+    write(&root, "f.txt", "one\ntwo\nthree\n");
+    let c1 = commit_all(&repo, "first", Some("a1"));
+    write(&root, "f.txt", "one\ntwo\nthree\nfour\n");
+    let c2 = commit_all(&repo, "second", Some("a2"));
+    write(&root, "f.txt", "zero\none\ntwo\nthree\nfour\n");
+    let c3 = commit_all(&repo, "third", Some("a3"));
+
+    // blame
+    let b = history::blame(repo.store(), c3.id, "f.txt", 100).unwrap();
+    let owners: Vec<ObjectId> = b.lines.iter().map(|l| l.commit).collect();
+    assert_eq!(owners, vec![c3.id, c1.id, c1.id, c1.id, c2.id]);
+    assert_eq!(b.commits[&c2.id].agent.as_deref(), Some("a2"));
+
+    // revert the middle commit: "four" disappears, rest stays
+    let r = history::revert(&repo, &c2.id.to_hex(), None).unwrap();
+    assert!(matches!(r, ApplyResult::Committed { .. }));
+    assert_eq!(
+        fs::read_to_string(root.join("f.txt")).unwrap(),
+        "zero\none\ntwo\nthree\n"
+    );
+    let head = repo
+        .store()
+        .read_commit(&repo.head_commit().unwrap().unwrap())
+        .unwrap();
+    assert!(head.message.starts_with("Revert \"second\""));
+    assert_eq!(head.meta["agit.reverts"], serde_json::json!(c2.id));
+
+    // cherry-pick it back on a branch
+    ops::switch(&repo, "pick", true, false).unwrap();
+    let r = history::cherry_pick(&repo, &c2.id.to_hex(), None).unwrap();
+    assert!(matches!(r, ApplyResult::Committed { .. }));
+    assert_eq!(
+        fs::read_to_string(root.join("f.txt")).unwrap(),
+        "zero\none\ntwo\nthree\nfour\n"
+    );
+    let head = repo
+        .store()
+        .read_commit(&repo.head_commit().unwrap().unwrap())
+        .unwrap();
+    assert_eq!(head.message, "second");
+    assert_eq!(
+        head.meta["agit.cherry_picked_from"],
+        serde_json::json!(c2.id)
+    );
+
+    // stash: dirty tree saved and restored
+    write(&root, "f.txt", "zero\none\ntwo\nthree\nfour\nfive\n");
+    write(&root, "new.txt", "untracked\n");
+    let e = history::stash_push(&repo, Some("wip".into())).unwrap();
+    assert_eq!(e.index, 0);
+    assert!(worktree::status(&repo, true).unwrap().is_clean());
+    assert!(!root.join("new.txt").exists());
+    assert_eq!(history::stash_list(&repo).unwrap().len(), 1);
+    let r = history::stash_apply(&repo, 0, true).unwrap();
+    assert!(matches!(r, ApplyResult::Committed { .. }));
+    assert_eq!(
+        fs::read_to_string(root.join("new.txt")).unwrap(),
+        "untracked\n"
+    );
+    assert!(fs::read_to_string(root.join("f.txt"))
+        .unwrap()
+        .ends_with("five\n"));
+    assert!(history::stash_list(&repo).unwrap().is_empty());
+    let st = worktree::status(&repo, true).unwrap();
+    assert!(!st.unstaged.is_empty() || !st.untracked.is_empty());
+
+    // grep in worktree and in a revision
+    let m = history::grep(&repo, "^f(our|ive)$", None, false, 1 << 20).unwrap();
+    assert_eq!(m.len(), 2);
+    let m = history::grep(&repo, "FOUR", Some(&c2.id.to_hex()), true, 1 << 20).unwrap();
+    assert_eq!((m[0].path.as_str(), m[0].line), ("f.txt", 4));
+
+    // rename detection
+    commit_all(&repo, "wip in", None);
+    fs::rename(root.join("f.txt"), root.join("g.txt")).unwrap();
+    commit_all(&repo, "rename", None);
+    let head = repo.head_commit().unwrap().unwrap();
+    let c = repo.store().read_commit(&head).unwrap();
+    let parent_tree = repo.store().read_commit(&c.parents[0]).unwrap().tree;
+    let changes = agit_core::diff::detect_renames(
+        repo.store(),
+        agit_core::diff::diff_trees(repo.store(), Some(&parent_tree), Some(&c.tree)).unwrap(),
+        50,
+    );
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].kind, agit_core::diff::ChangeKind::Renamed);
+    assert_eq!(changes[0].from.as_deref(), Some("f.txt"));
+    assert_eq!(changes[0].similarity, Some(100));
 }

@@ -31,6 +31,7 @@ from .types import (
     DiffResponse,
     Event,
     Health,
+    KeyEntry,
     Lease,
     MergeResponse,
     Note,
@@ -42,6 +43,7 @@ from .types import (
     RefUpdate,
     RefUpdateResponse,
     RepoSummary,
+    StaleNote,
     TagCount,
     TagRule,
     as_list,
@@ -87,6 +89,32 @@ def _query(params: Mapping[str, Any] | None) -> str:
 
 def _drop_none(d: Mapping[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in d.items() if v is not None}
+
+
+def _note_patch(
+    *,
+    title: str | None,
+    body: str | None,
+    tags: Sequence[str] | None,
+    paths: Sequence[str] | None,
+    commits: Sequence[str] | None,
+    pulls: Sequence[int] | None,
+    confidence: float | None,
+    superseded_by: str | None,
+) -> dict[str, Any]:
+    """Body of ``PATCH /knowledge/notes/{id}`` (also used by ``accept``): only the given fields."""
+    payload = _drop_none({
+        "title": title,
+        "body": body,
+        "tags": None if tags is None else as_list(tags),
+        "paths": None if paths is None else as_list(paths),
+        "commits": None if commits is None else as_list(commits),
+        "pulls": None if pulls is None else [int(p) for p in pulls],
+        "confidence": confidence,
+    })
+    if superseded_by is not _UNSET:
+        payload["superseded_by"] = superseded_by
+    return payload
 
 
 class Client:
@@ -504,6 +532,25 @@ class Client:
         body = policy.to_dict() if isinstance(policy, Policy) else dict(policy)
         return Policy.from_dict(self.request("PUT", f"/repos/{_seg(repo)}/policy", json_body=body))
 
+    # -- signing keys -------------------------------------------------------
+
+    def keys(self, repo: str) -> list[KeyEntry]:
+        """Public signing keys registered for agents (``GET /repos/{repo}/keys``)."""
+        return KeyEntry.list_from(self._get(f"/repos/{_seg(repo)}/keys"))
+
+    def register_key(self, repo: str, agent: str, public_key: str) -> KeyEntry:
+        """Trust ``public_key`` (hex Ed25519, as printed by ``agit key generate``) for ``agent``.
+
+        Registering the same key for the same agent again is idempotent; a key already
+        registered for another agent raises :class:`~agit.errors.AlreadyExists` (409).
+        """
+        body = {"agent": agent, "public_key": public_key}
+        return KeyEntry.from_dict(self._post(f"/repos/{_seg(repo)}/keys", body))
+
+    def delete_key(self, repo: str, key_id: str) -> dict[str, Any]:
+        """Revoke a key by its ``key_id``. Returns ``{"deleted": key_id}``."""
+        return self.request("DELETE", f"/repos/{_seg(repo)}/keys/{_seg(key_id)}") or {}
+
     # -- webhooks -----------------------------------------------------------
 
     def webhooks(self, repo: str) -> list[Webhook]:
@@ -540,13 +587,27 @@ class Client:
         q: str | None = None,
         limit: int | None = None,
         include_superseded: bool = False,
+        *,
+        commit: str | None = None,
+        pull: int | None = None,
+        drafts: bool = False,
     ) -> list[NoteSummary]:
-        """Search notes. ``tags`` must all match; ``path`` matches notes whose ``paths`` cover it."""
+        """Search notes.
+
+        ``q`` is a full-text query ranked by BM25 (best first, ``score`` set); without it
+        results are newest-updated first. ``tags`` must all match; ``path`` matches notes
+        whose ``paths`` cover it; ``commit`` (any revision syntax) and ``pull`` match notes
+        linking them. ``drafts=True`` includes unaccepted drafts, ``include_superseded=True``
+        superseded notes. ``limit`` defaults to 100 on the server.
+        """
         params = {
             "tags": as_list(tags) or None,
             "path": path,
             "q": q,
+            "commit": commit,
+            "pull": None if pull is None else int(pull),
             "limit": limit,
+            "drafts": "1" if drafts else None,
             "include_superseded": "1" if include_superseded else None,
         }
         return NoteSummary.list_from(self._get(f"/repos/{_seg(repo)}/knowledge/notes", params))
@@ -564,7 +625,16 @@ class Client:
         commits: Sequence[str] | str = (),
         pulls: Sequence[int] = (),
         confidence: float | None = None,
+        *,
+        valid_at: str | None = None,
+        draft: bool = False,
     ) -> Note:
+        """Create a note (201).
+
+        ``valid_at`` is the commit the note holds for; it defaults to HEAD of the default
+        branch and must be an object the server has (412 ``object_not_found`` otherwise).
+        ``draft=True`` creates a hidden draft to be :meth:`accept_note`-ed later.
+        """
         payload: dict[str, Any] = {
             "title": title,
             "body": body,
@@ -575,6 +645,10 @@ class Client:
         }
         if confidence is not None:
             payload["confidence"] = confidence
+        if valid_at is not None:
+            payload["valid_at"] = valid_at
+        if draft:
+            payload["draft"] = True
         return Note.from_dict(self._post(f"/repos/{_seg(repo)}/knowledge/notes", payload))
 
     def update_note(
@@ -592,21 +666,46 @@ class Client:
         superseded_by: str | None = _UNSET,
     ) -> Note:
         """``PATCH`` a note. Only the given fields change; ``superseded_by=None`` clears it."""
-        payload = _drop_none({
-            "title": title,
-            "body": body,
-            "tags": None if tags is None else as_list(tags),
-            "paths": None if paths is None else as_list(paths),
-            "commits": None if commits is None else as_list(commits),
-            "pulls": None if pulls is None else [int(p) for p in pulls],
-            "confidence": confidence,
-        })
-        if superseded_by is not _UNSET:
-            payload["superseded_by"] = superseded_by
+        payload = _note_patch(title=title, body=body, tags=tags, paths=paths, commits=commits, pulls=pulls,
+                              confidence=confidence, superseded_by=superseded_by)
         return Note.from_dict(self.request("PATCH", f"/repos/{_seg(repo)}/knowledge/notes/{_seg(note_id)}", json_body=payload))
 
     def delete_note(self, repo: str, note_id: str) -> dict[str, Any]:
+        """Delete a note (``{"deleted": id}``). Deleting a draft discards it."""
         return self.request("DELETE", f"/repos/{_seg(repo)}/knowledge/notes/{_seg(note_id)}") or {}
+
+    def validate_note(self, repo: str, note_id: str, rev: str | None = None) -> Note:
+        """Confirm a note still holds at ``rev`` (default HEAD): sets ``valid_at`` and bumps ``updated_ms``."""
+        body = {"rev": rev} if rev else {}
+        return Note.from_dict(self._post(f"/repos/{_seg(repo)}/knowledge/notes/{_seg(note_id)}/validate", body))
+
+    def accept_note(
+        self,
+        repo: str,
+        note_id: str,
+        *,
+        title: str | None = None,
+        body: str | None = None,
+        tags: Sequence[str] | None = None,
+        paths: Sequence[str] | None = None,
+        commits: Sequence[str] | None = None,
+        pulls: Sequence[int] | None = None,
+        confidence: float | None = None,
+        superseded_by: str | None = _UNSET,
+    ) -> Note:
+        """Accept a draft (clears ``draft``), optionally editing it with the same fields as :meth:`update_note` first."""
+        payload = _note_patch(title=title, body=body, tags=tags, paths=paths, commits=commits, pulls=pulls,
+                              confidence=confidence, superseded_by=superseded_by)
+        return Note.from_dict(self._post(f"/repos/{_seg(repo)}/knowledge/notes/{_seg(note_id)}/accept", payload))
+
+    def stale_notes(self, repo: str, rev: str | None = None, *, drafts: bool = False) -> list[StaleNote]:
+        """Notes whose covered paths changed between their ``valid_at`` and ``rev`` (default HEAD).
+
+        Each result is a summary with ``stale=True`` plus ``changed_paths``. Superseded
+        notes are skipped; drafts only appear with ``drafts=True``.
+        """
+        params = {"rev": rev, "drafts": "1" if drafts else None}
+        return StaleNote.list_from(self._get(f"/repos/{_seg(repo)}/knowledge/stale", params))
 
     def knowledge_tags(self, repo: str) -> list[TagCount]:
         """``GET /repos/{repo}/knowledge/tags`` -> ``[{tag, count}]``."""
@@ -622,9 +721,32 @@ class Client:
                 for r in rules]
         return TagRule.list_from(self.request("PUT", f"/repos/{_seg(repo)}/knowledge/rules", json_body=body))
 
-    def context(self, repo: str, path: str, limit: int | None = None) -> ContextResponse:
-        """Notes, recent commits, leases and open PRs relevant to ``path`` in one call."""
-        return ContextResponse.from_dict(self._get(f"/repos/{_seg(repo)}/context", {"path": path, "limit": limit}))
+    def context(
+        self,
+        repo: str,
+        path: str,
+        limit: int | None = None,
+        *,
+        include_files: bool = False,
+        budget: int | None = None,
+    ) -> ContextResponse:
+        """Notes, recent commits, leases, open PRs and active agents relevant to ``path`` in one call.
+
+        ``limit`` (default 10) caps notes and recent commits. ``include_files=True`` adds
+        ``files`` (the file plus up to 5 siblings, trimmed to ``budget`` approximate tokens,
+        default 6000); see :meth:`context_pack`.
+        """
+        params = {
+            "path": path,
+            "limit": limit,
+            "include": "files" if include_files else None,
+            "budget": budget,
+        }
+        return ContextResponse.from_dict(self._get(f"/repos/{_seg(repo)}/context", params))
+
+    def context_pack(self, repo: str, path: str, budget: int | None = None, limit: int | None = None) -> ContextResponse:
+        """:meth:`context` with ``include=files``: everything plus file texts within ``budget`` tokens."""
+        return self.context(repo, path, limit, include_files=True, budget=budget)
 
     # -- activity -----------------------------------------------------------
 

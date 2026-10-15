@@ -4,7 +4,7 @@ import pytest
 
 from agit import AgentSession, AgitError, Client, LeaseConflict, NotFound
 
-from conftest import ID_B
+from conftest import ID_A, ID_B
 
 
 def test_session_requires_agent(server, monkeypatch):
@@ -61,6 +61,35 @@ def test_release_tolerates_expired_and_does_not_mask_errors(server, client):
         with s:
             server.stop()  # releasing will fail with a transport error, but the user's error wins
             raise RuntimeError("boom")
+
+
+def test_session_knowledge_v2(server, client):
+    with AgentSession(client, "demo", "coder-1") as s:
+        pack = s.context_pack("src/auth/login.rs", budget=2000)
+        assert server.last.q("include") == "files" and server.last.q("budget") == "2000"
+        assert pack.files and pack.agents_active == ["coder-1", "reviewer-1"]
+
+        assert s.stale_notes() == []
+        stale = s.stale_notes(rev=ID_B)
+        assert server.last.q("rev") == ID_B and [n.id for n in stale] == ["n_1"] and stale[0].changed_paths == ["x.txt"]
+
+        note = s.remember("pinned", valid_at=ID_B)
+        assert server.last.json["valid_at"] == ID_B and note.valid_at == ID_B
+
+        validated = s.validate_note(stale[0])  # accepts a StaleNote, Note or id
+        assert server.last.path.endswith("/knowledge/notes/n_1/validate") and validated.valid_at == ID_A
+        s.validate_note("n_1", rev=ID_B)
+        assert server.last.json == {"rev": ID_B}
+
+        draft = client.create_note("demo", "Merged PR", draft=True, pulls=[1])
+        found = client.notes("demo", drafts=True, pull=1)
+        assert draft.id in [n.id for n in found]
+        accepted = s.accept_note(draft.id, title="Reviewed title")
+        assert server.last.json == {"title": "Reviewed title"}
+        assert accepted.draft is False and accepted.title == "Reviewed title" and accepted in s.notes
+        plain = s.accept_note(accepted)
+        assert server.last.json == {}
+        assert plain.id == draft.id
 
 
 def test_release_single(server, client):

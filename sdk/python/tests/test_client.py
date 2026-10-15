@@ -7,10 +7,13 @@ import pytest
 import agit
 from agit import (
     AgitError,
+    CommitDetail,
     AlreadyExists,
     Client,
+    ContextFile,
     ContextResponse,
     Event,
+    KeyEntry,
     Lease,
     LeaseConflict,
     MergeConflicts,
@@ -22,6 +25,8 @@ from agit import (
     PullRequest,
     RefConflict,
     RefUpdate,
+    SignatureInfo,
+    StaleNote,
     TransportError,
     expect_absent,
     expect_any,
@@ -343,7 +348,10 @@ def test_policy(server, client):
     assert server.last.method == "PUT" and server.last.path == "/api/v1/repos/demo/policy"
     assert server.last.json["protected_branches"] == ["main"] and server.last.json["require_approvals"] == 1
     assert set(server.last.json) == set(Policy().to_dict())  # the whole document is sent
-    assert saved.require_pull_request is True
+    assert saved.require_pull_request is True and saved.require_signed is False
+    pol.require_signed = True
+    assert client.set_policy("demo", pol).require_signed is True
+    assert server.last.json["require_signed"] is True
     client.set_policy("demo", {"protected_branches": ["main"]})  # plain dicts are accepted as-is
     assert server.last.json == {"protected_branches": ["main"]}
     with pytest.raises(PolicyViolation) as ei:
@@ -384,6 +392,136 @@ def test_notes(server, client):
     assert client.delete_note("demo", "n_2") == {"deleted": "n_2"}
     with pytest.raises(NotFound):
         client.note("demo", "n_2")
+
+
+def test_note_fields_v2_and_ranked_search(server, client):
+    note = client.note("demo", "n_1")
+    assert note.valid_at == ID_A and note.draft is False and note.stale is False
+
+    # q= returns ranked summaries with a score; filters are post-filters on the ranking
+    hits = client.notes("demo", q="importer", commit=ID_B, pull=1, drafts=True, include_superseded=True)
+    q = server.last
+    assert q.q("q") == "importer" and q.q("commit") == ID_B and q.q("pull") == "1"
+    assert q.q("drafts") == "1" and q.q("include_superseded") == "1"
+    assert [h.id for h in hits] == ["n_1"] and hits[0].score == 1.5 and hits[0].valid_at == ID_A
+    assert hits[0].draft is False and hits[0].stale is False
+    assert client.notes("demo", q="zzz-no-match") == []
+    plain = client.notes("demo")
+    assert plain[0].score is None and "drafts" not in server.last.query and "commit" not in server.last.query
+    with pytest.raises(NotFound):
+        client.notes("demo", commit="nope")
+
+
+def test_create_note_valid_at_and_draft(server, client):
+    n = client.create_note("demo", "Pinned", valid_at=ID_B)
+    assert server.last.json["valid_at"] == ID_B and "draft" not in server.last.json
+    assert n.valid_at == ID_B and n.draft is False
+    client.create_note("demo", "Default")  # valid_at defaults to HEAD server-side; nothing is sent
+    assert "valid_at" not in server.last.json
+    with pytest.raises(NotFound) as ei:
+        client.create_note("demo", "Bad", valid_at=ID_C)
+    assert ei.value.code == "object_not_found" and ei.value.status == 412
+
+    d = client.create_note("demo", "Draft", draft=True, pulls=[1])
+    assert server.last.json["draft"] is True and d.draft is True
+    assert d.id not in [x.id for x in client.notes("demo")]  # hidden from listings...
+    drafts = client.notes("demo", drafts=True, pull=1)
+    assert d.id in [x.id for x in drafts] and all(isinstance(x.draft, bool) for x in drafts)
+    assert next(x for x in drafts if x.id == d.id).draft is True
+
+
+def test_accept_and_validate_note(server, client):
+    d = client.create_note("demo", "Draft", "body", draft=True)
+    accepted = client.accept_note("demo", d.id)
+    assert server.last.method == "POST" and server.last.path.endswith(f"/knowledge/notes/{d.id}/accept")
+    assert server.last.json == {}  # no patch: plain accept
+    assert accepted.draft is False and accepted.id == d.id
+
+    d2 = client.create_note("demo", "Draft 2", draft=True)
+    edited = client.accept_note("demo", d2.id, title="Better title", tags=["kind:change"], superseded_by=None)
+    assert server.last.json == {"title": "Better title", "tags": ["kind:change"], "superseded_by": None}
+    assert edited.title == "Better title" and edited.draft is False
+
+    before = client.note("demo", d.id).updated_ms
+    v = client.validate_note("demo", d.id)
+    assert server.last.path.endswith(f"/knowledge/notes/{d.id}/validate") and server.last.json == {}
+    assert v.valid_at == ID_A and v.stale is False and v.updated_ms == before + 1
+    v2 = client.validate_note("demo", d.id, rev=ID_B)
+    assert server.last.json == {"rev": ID_B} and v2.valid_at == ID_B
+    with pytest.raises(NotFound):
+        client.validate_note("demo", d.id, rev="nope")
+    with pytest.raises(NotFound):
+        client.accept_note("demo", "n_missing")
+
+
+def test_stale_notes(server, client):
+    assert client.stale_notes("demo") == []
+    assert server.last.path == "/api/v1/repos/demo/knowledge/stale" and server.last.query == {}
+    stale = client.stale_notes("demo", rev=ID_B, drafts=True)
+    assert server.last.q("rev") == ID_B and server.last.q("drafts") == "1"
+    assert len(stale) == 1 and isinstance(stale[0], StaleNote)
+    s = stale[0]
+    assert s.id == "n_1" and s.stale is True and s.changed_paths == ["x.txt"]
+    assert s.excerpt == "Long body text" and s.valid_at == ID_A and not hasattr(s, "body")
+    with pytest.raises(NotFound):
+        client.stale_notes("demo", rev="nope")
+
+
+def test_context_pack_and_active_agents(server, client):
+    ctx = client.context("demo", "src/auth/login.rs")
+    assert "include" not in server.last.query and "budget" not in server.last.query
+    assert ctx.agents_active == ["coder-1", "reviewer-1"] and ctx.files == []
+    assert [n.id for n in ctx.fresh_notes] == ["n_1"] and [n.id for n in ctx.stale_notes] == ["n_old"]
+
+    pack = client.context_pack("demo", "src/auth/login.rs", budget=4000, limit=2)
+    q = server.last
+    assert q.q("include") == "files" and q.q("budget") == "4000" and q.q("limit") == "2"
+    assert [f.path for f in pack.files] == ["src/auth/login.rs", "src/auth/sibling.rs"]
+    assert isinstance(pack.files[0], ContextFile) and pack.files[0].truncated is False
+    assert pack.files[0].text.startswith("fn main()")
+
+    tight = client.context("demo", "src/auth/login.rs", include_files=True, budget=5)
+    assert len(tight.files) == 1 and tight.files[0].truncated is True and len(tight.files[0].text) == 20
+
+
+# -- signing keys -----------------------------------------------------------
+
+
+def test_keys_roundtrip_and_commit_signature(server, client):
+    assert client.keys("demo") == []
+    pk = "D75A980182B10AB7D54BFED3C964073A0EE172F3DAA62325AF021A68F707511A"
+    key = client.register_key("demo", "coder-1", pk)
+    assert server.last.method == "POST" and server.last.path == "/api/v1/repos/demo/keys"
+    assert server.last.json == {"agent": "coder-1", "public_key": pk}
+    assert isinstance(key, KeyEntry) and key.agent == "coder-1" and key.key_id == "k_d75a9801"
+    assert key.public_key == pk.lower() and key.added_by == "coder-1" and key.added_ms == 1000
+    assert client.register_key("demo", "coder-1", pk) == key  # idempotent for the same agent
+    with pytest.raises(AlreadyExists) as ei:
+        client.register_key("demo", "other-agent", pk)
+    assert ei.value.status == 409
+    with pytest.raises(AgitError) as ei:
+        client.register_key("demo", "coder-1", "not-hex")
+    assert ei.value.code == "invalid"
+    assert [k.key_id for k in client.keys("demo")] == [key.key_id]
+
+    server.state.keys[0]["key_id"] = "k_1"  # the commit fixture is signed with k_1
+    d = client.commit("demo", "main")
+    assert isinstance(d.signature, SignatureInfo)
+    assert d.signature.status == "valid" and d.signature.key_id == "k_1" and d.signature.signer == "coder-1"
+    assert d.signature.trusted is True and d.signature.is_valid and d.signature.is_trusted
+    assert [n.id for n in d.notes] == ["n_1"] and d.notes[0].excerpt == "Long body text"
+
+    assert client.delete_key("demo", "k_1") == {"deleted": "k_1"}
+    assert server.last.method == "DELETE" and server.last.path == "/api/v1/repos/demo/keys/k_1"
+    with pytest.raises(NotFound):
+        client.delete_key("demo", "k_1")
+    assert client.commit("demo", "main").signature.trusted is False  # valid but no longer registered
+
+    unsigned = client.commit("demo", "unsigned").signature
+    assert unsigned.status == "unsigned" and unsigned.key_id is None and not unsigned.is_valid
+    forged = client.commit("demo", "forged").signature
+    assert forged.status == "invalid" and forged.reason == "signature does not verify" and not forged.is_trusted
+    assert CommitDetail.from_dict({"id": ID_A}).signature is None  # older servers: field absent
 
 
 def test_tags_rules_context_agents(server, client):

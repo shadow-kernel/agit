@@ -105,6 +105,7 @@ pub fn router(state: Arc<AppState>, web_dir: Option<&std::path::Path>) -> Router
         .route("/repos/{repo}/commits/{rev}", get(get_commit))
         .route("/repos/{repo}/tree/{rev}", get(get_tree))
         .route("/repos/{repo}/diff", get(get_diff))
+        .route("/repos/{repo}/blame/{rev}", get(get_blame))
         .route("/repos/{repo}/events", get(list_events))
         .route("/repos/{repo}/events/stream", get(stream_events))
         .route("/repos/{repo}/leases", get(list_leases).post(create_lease))
@@ -646,6 +647,28 @@ async fn get_diff(
         None => None,
     };
     Ok(Json(diff_response(&r, from.as_ref(), &to)?))
+}
+
+async fn get_blame(
+    State(st): S,
+    Path((repo, rev)): Path<(String, String)>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Json<agit_core::history::Blame>> {
+    let r = st.get(&repo)?;
+    let id = r.resolve(&rev)?;
+    let path = q
+        .get("path")
+        .map(|p| p.trim_matches('/').to_string())
+        .ok_or_else(|| ApiErr::BadRequest("missing `path`".into()))?;
+    let max = q
+        .get("max_commits")
+        .and_then(|m| m.parse().ok())
+        .unwrap_or(500);
+    let b =
+        tokio::task::spawn_blocking(move || agit_core::history::blame(&r.store, id, &path, max))
+            .await
+            .map_err(|e| ApiErr::BadRequest(e.to_string()))??;
+    Ok(Json(b))
 }
 
 // ---------------------------------------------------------------------------

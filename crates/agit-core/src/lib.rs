@@ -12,6 +12,7 @@ pub mod durability;
 pub mod error;
 pub mod events;
 pub mod hash;
+pub mod history;
 pub mod index;
 pub mod lease;
 pub mod lock;

@@ -276,6 +276,10 @@ A checkpoint is a commit with `"checkpoint": true` whose tree is a snapshot of t
 
 Every state change appends one JSON line to `.agit/events.jsonl` with a monotonic `seq`: `repo.init`, `commit`, `checkpoint`, `restore`, `ref.update`, `head.switch`, `merge`, `lease.claim`, `lease.renew`, `lease.release`, `workspace.create`, `workspace.remove`. `agit events --since <seq>` returns everything after a sequence number; `--follow` tails; `--kind <prefix>` filters. On the platform (📋) the same log is exposed over SSE/WebSocket and webhooks.
 
+### Everyday git parity ✅
+
+Beyond add/commit/status/log/diff/branch/switch/merge/tag: `stash` (push/list/apply/pop/drop, including untracked files), `revert`, `cherry-pick`, `blame` (also as a server endpoint), `grep` over the working tree or any revision, `log --graph`, rename detection in `diff` and `show`, `reflog`, `reset --soft|--mixed|--hard`, `gc`, `submodule`, and `git import`/`export`.
+
 ### Signed commits and reflog ✅
 
 Commits can carry an Ed25519 signature over their canonical bytes (`agit key generate`, then `agit commit --sign`; signing is automatic once a key named after the agent exists). The public key travels inside the commit, so anyone can verify offline (`agit verify <rev>`); the server's key registry (`/repos/{repo}/keys`) decides which keys are trusted for which agent, and the policy `require_signed` refuses unsigned or untrusted commits on protected branches. Every ref and HEAD move is recorded in a reflog (`agit reflog`), `agit reset [--soft|--mixed|--hard]` moves a branch and is itself undoable, and `agit gc` removes unreachable objects with a grace period while expiring old checkpoints and reflog entries.

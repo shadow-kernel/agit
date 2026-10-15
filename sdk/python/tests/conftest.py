@@ -60,7 +60,27 @@ NOTE = {
     "created_ms": 10,
     "updated_ms": 11,
     "superseded_by": None,
+    "valid_at": ID_A,
+    "stale": False,
 }
+
+KEY = {
+    "agent": "coder-1",
+    "key_id": "k_1",
+    "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+    "added_ms": 1000,
+    "added_by": "admin",
+}
+
+
+def summary(note: dict, **extra: Any) -> dict:
+    """Note summary as the server builds it: no body, an excerpt, draft/stale always present."""
+    out = {k: v for k, v in note.items() if k != "body"}
+    out["excerpt"] = note.get("body", "")[:200]
+    out.setdefault("draft", False)
+    out.setdefault("stale", False)
+    out.update(extra)
+    return out
 
 LEASE = {
     "id": "l_1",
@@ -119,7 +139,7 @@ class Recorded:
 POLICY = {
     "protected_branches": [], "require_pull_request": False, "require_approvals": 0, "require_intent": False,
     "require_agent": False, "require_checks": False, "block_on_blockers": True, "allowed_merge_agents": [],
-    "allowed_push_agents": [], "max_files_per_commit": 0,
+    "allowed_push_agents": [], "max_files_per_commit": 0, "require_signed": False,
 }
 
 
@@ -130,6 +150,7 @@ class FakeState:
     webhooks: list = field(default_factory=list)
     repos: dict[str, dict] = field(default_factory=dict)
     notes: dict[str, dict] = field(default_factory=dict)
+    keys: list[dict] = field(default_factory=list)
     leases: dict[str, dict] = field(default_factory=dict)
     next_note: int = 1
     next_lease: int = 1
@@ -277,9 +298,18 @@ class Handler(BaseHTTPRequestHandler):
             if rest == ["commits"] and m == "GET":
                 return self._send(200, [COMMIT])
             if len(rest) == 2 and rest[0] == "commits" and m == "GET":
+                if rest[1] == "unsigned":
+                    signature: dict[str, Any] = {"status": "unsigned", "trusted": False}
+                elif rest[1] == "forged":
+                    signature = {"status": "invalid", "reason": "signature does not verify", "trusted": False}
+                else:
+                    signature = {"status": "valid", "key_id": "k_1", "signer": "coder-1",
+                                 "public_key": KEY["public_key"], "trusted": any(k["key_id"] == "k_1" for k in st.keys)}
                 return self._send(200, {"id": ID_B, "commit": {k: v for k, v in COMMIT.items() if k != "id"},
                                         "changes": [{"path": "x.txt", "kind": "added", "new": {"id": ID_C, "mode": "file"}}],
-                                        "patch": "+x"})
+                                        "patch": "+x", "signature": signature,
+                                        "notes": [summary(NOTE)] + [summary(n) for n in st.notes.values()
+                                                                     if ID_B in n.get("commits", [])]})
             if len(rest) == 2 and rest[0] == "tree" and m == "GET":
                 if rec.q("path"):
                     return self._send(200, {"kind": "blob", "path": rec.q("path"), "id": ID_C, "size": 2,
@@ -414,6 +444,31 @@ class Handler(BaseHTTPRequestHandler):
             if len(rest) == 3 and rest[0] == "webhooks" and rest[2] == "test" and m == "POST":
                 return self._send(200, {"queued": True})
 
+            if rest == ["keys"]:
+                if m == "GET":
+                    return self._send(200, st.keys)
+                if m == "POST":
+                    body = rec.json
+                    pk = str(body.get("public_key", "")).strip().lower()
+                    if len(pk) != 64 or any(c not in "0123456789abcdef" for c in pk):
+                        return self._err(400, "invalid", "public key must be 32 bytes of hex")
+                    key_id = "k_" + pk[:8]
+                    for k in st.keys:
+                        if k["key_id"] == key_id:
+                            if k["agent"] == body["agent"]:
+                                return self._send(201, k)
+                            return self._err(409, "already_exists", f"key {key_id} is registered for {k['agent']}")
+                    entry = {"agent": body["agent"], "key_id": key_id, "public_key": pk, "added_ms": 1000,
+                             "added_by": rec.headers.get("x-agit-agent", "anonymous")}
+                    st.keys.append(entry)
+                    return self._send(201, entry)
+            if len(rest) == 2 and rest[0] == "keys" and m == "DELETE":
+                before = len(st.keys)
+                st.keys = [k for k in st.keys if k["key_id"] != rest[1]]
+                if len(st.keys) == before:
+                    return self._err(404, "not_found", f"key {rest[1]} not found")
+                return self._send(200, {"deleted": rest[1]})
+
             if rest == ["policy"]:
                 if m == "GET":
                     return self._send(200, st.policy)
@@ -423,20 +478,62 @@ class Handler(BaseHTTPRequestHandler):
 
             if rest == ["knowledge", "notes"]:
                 if m == "GET":
+                    if rec.q("commit") == "nope":
+                        return self._err(404, "unknown_revision", "unknown revision nope")
                     out = []
                     for note in list(st.notes.values()) + [NOTE]:
                         if rec.q("tags") and not set(rec.q("tags").split(",")) <= set(note["tags"]):
                             continue
-                        out.append({k: v for k, v in note.items() if k != "body"} | {"excerpt": note["body"][:200]})
-                    return self._send(200, out)
+                        if rec.q("path") and not any(note_path.split("/**")[0] in rec.q("path") for note_path in note["paths"]):
+                            continue
+                        if rec.q("commit") and rec.q("commit") not in note.get("commits", []):
+                            continue
+                        if rec.q("pull") and int(rec.q("pull")) not in note.get("pulls", []):
+                            continue
+                        if note.get("draft") and rec.q("drafts") not in ("1", "true"):
+                            continue
+                        if note.get("superseded_by") and rec.q("include_superseded") not in ("1", "true"):
+                            continue
+                        q = rec.q("q")
+                        if q:
+                            hay = " ".join([note["title"], note["body"], *note["tags"], *note["paths"]]).lower()
+                            if q.lower() not in hay:
+                                continue
+                            out.append(summary(note, score=1.5 if q.lower() in note["title"].lower() else 0.5))
+                        else:
+                            out.append(summary(note))
+                    if rec.q("q"):
+                        out.sort(key=lambda n: -n["score"])
+                    return self._send(200, out[: int(rec.q("limit") or 100)])
                 if m == "POST":
                     body = rec.json
+                    if body.get("valid_at") == ID_C:
+                        return self._err(412, "object_not_found", f"object {ID_C} not found")
                     nid = f"n_{st.next_note + 1}"
                     st.next_note += 1
-                    note = {**NOTE, **body, "id": nid, "author": rec.headers.get("x-agit-agent", "anonymous")}
+                    note = {**NOTE, "pulls": [], "commits": [], **body, "id": nid,
+                            "author": rec.headers.get("x-agit-agent", "anonymous")}
                     note.setdefault("confidence", 1.0)
+                    note.setdefault("valid_at", ID_A)
+                    note["stale"] = False
+                    if not note.get("draft"):
+                        note.pop("draft", None)  # the server omits `draft` when false
                     st.notes[nid] = note
                     return self._send(201, note)
+            if rest == ["knowledge", "stale"] and m == "GET":
+                rev = rec.q("rev") or "HEAD"
+                if rev == "nope":
+                    return self._err(404, "unknown_revision", "unknown revision nope")
+                out = []
+                for note in [NOTE] + list(st.notes.values()):
+                    if note.get("superseded_by"):
+                        continue
+                    if note.get("draft") and rec.q("drafts") not in ("1", "true"):
+                        continue
+                    if note.get("valid_at") in (ID_A, None) and rev != ID_B:
+                        continue  # valid at HEAD: nothing changed
+                    out.append(summary(note, stale=True, changed_paths=[p.replace("**", "login.rs") for p in note["paths"]]))
+                return self._send(200, out)
             if len(rest) == 3 and rest[:2] == ["knowledge", "notes"]:
                 nid = rest[2]
                 note = st.notes.get(nid) or (NOTE if nid == "n_1" else None)
@@ -451,6 +548,25 @@ class Handler(BaseHTTPRequestHandler):
                 if m == "DELETE":
                     st.notes.pop(nid, None)
                     return self._send(200, {"deleted": nid})
+            if len(rest) == 4 and rest[:2] == ["knowledge", "notes"] and m == "POST":
+                nid, action = rest[2], rest[3]
+                note = st.notes.get(nid) or (NOTE if nid == "n_1" else None)
+                if note is None:
+                    return self._err(404, "not_found", f"note {nid} not found")
+                body = rec.json or {}
+                if action == "validate":
+                    rev = body.get("rev") or "HEAD"
+                    if rev == "nope":
+                        return self._err(404, "unknown_revision", "unknown revision nope")
+                    note = {**note, "valid_at": ID_A if rev == "HEAD" else rev, "stale": False,
+                            "updated_ms": note["updated_ms"] + 1}
+                    st.notes[nid] = note
+                    return self._send(200, note)
+                if action == "accept":
+                    note = {**note, **body, "updated_ms": note["updated_ms"] + 1}
+                    note.pop("draft", None)
+                    st.notes[nid] = note
+                    return self._send(200, note)
             if rest == ["knowledge", "tags"]:
                 return self._send(200, [{"tag": "area:import", "count": 1}, {"tag": "kind:decision", "count": 1}])
             if rest == ["knowledge", "rules"]:
@@ -461,14 +577,25 @@ class Handler(BaseHTTPRequestHandler):
             if rest == ["context"] and m == "GET":
                 if not rec.q("path"):
                     return self._err(400, "invalid", "missing `path`")
-                return self._send(200, {
-                    "path": rec.q("path"),
-                    "notes": [{k: v for k, v in NOTE.items() if k != "body"} | {"excerpt": "Long"}],
+                path = rec.q("path")
+                ctx = {
+                    "path": path,
+                    "notes": [summary(NOTE, excerpt="Long"), summary(NOTE, id="n_old", stale=True, excerpt="Old")],
                     "suggested_tags": ["area:import"],
                     "recent_commits": [COMMIT],
                     "leases": [LEASE],
                     "open_pulls": [PR],
-                })
+                    "agents_active": ["coder-1", "reviewer-1"],
+                }
+                if "files" in (rec.q("include") or "").split(","):
+                    budget = int(rec.q("budget") or 6000)
+                    text = "fn main() {}\n" * 10
+                    files = [{"path": path, "text": text, "truncated": False},
+                             {"path": path.rsplit("/", 1)[0] + "/sibling.rs", "text": "// sib\n", "truncated": False}]
+                    if budget * 4 < len(text):
+                        files = [{"path": path, "text": text[: budget * 4], "truncated": True}]
+                    ctx["files"] = files
+                return self._send(200, ctx)
             if rest == ["agents"]:
                 return self._send(200, [{"id": "coder-1", "model": "fable", "commits": 3, "last_seen_ms": 5,
                                          "open_pulls": 1, "leases": 1}])

@@ -504,10 +504,17 @@ export class AgitClient {
         tags: query.tags && query.tags.length ? query.tags.join(",") : undefined,
         path: query.path,
         q: query.q,
+        commit: query.commit,
+        pull: query.pull,
         limit: query.limit,
+        drafts: query.drafts ? true : undefined,
         include_superseded: query.include_superseded ? true : undefined,
       },
     });
+  }
+  /** Notes whose covered paths changed between their `valid_at` and `rev` (default HEAD), with the `changed_paths`. */
+  listStaleNotes(repo: string, query: T.ListStaleNotesQuery = {}, opts?: RequestOptions): Promise<T.StaleNote[]> {
+    return this.request("GET", `${repoPath(repo)}/knowledge/stale`, { ...opts, query: { rev: query.rev, drafts: query.drafts ? true : undefined } });
   }
   getNote(repo: string, id: string, opts?: RequestOptions): Promise<T.Note> {
     return this.request("GET", `${repoPath(repo)}/knowledge/notes/${enc(id)}`, opts);
@@ -518,8 +525,18 @@ export class AgitClient {
   updateNote(repo: string, id: string, body: T.NotePatchRequest, opts?: RequestOptions): Promise<T.Note> {
     return this.request("PATCH", `${repoPath(repo)}/knowledge/notes/${enc(id)}`, { ...opts, body });
   }
+  /** Delete a note; deleting a draft discards it. */
   deleteNote(repo: string, id: string, opts?: RequestOptions): Promise<T.DeleteNoteResponse> {
     return this.request("DELETE", `${repoPath(repo)}/knowledge/notes/${enc(id)}`, opts);
+  }
+  /** Confirm the note still holds at `rev` (default HEAD): sets `valid_at`, clears `stale`, bumps `updated_ms`. */
+  validateNote(repo: string, id: string, rev?: string, opts?: RequestOptions): Promise<T.Note> {
+    const body: T.ValidateNoteRequest = rev === undefined ? {} : { rev };
+    return this.request("POST", `${repoPath(repo)}/knowledge/notes/${enc(id)}/validate`, { ...opts, body });
+  }
+  /** Accept a draft (clears `draft`), applying `patch` first when given. */
+  acceptNote(repo: string, id: string, patch: T.NotePatchRequest = {}, opts?: RequestOptions): Promise<T.Note> {
+    return this.request("POST", `${repoPath(repo)}/knowledge/notes/${enc(id)}/accept`, { ...opts, body: patch });
   }
   /** Knowledge tags with usage counts (`GET /knowledge/tags`). */
   listNoteTags(repo: string, opts?: RequestOptions): Promise<T.TagCount[]> {
@@ -539,6 +556,9 @@ export class AgitClient {
     createNote: (repo: string, body: T.NoteCreateRequest, opts?: RequestOptions) => this.createNote(repo, body, opts),
     updateNote: (repo: string, id: string, body: T.NotePatchRequest, opts?: RequestOptions) => this.updateNote(repo, id, body, opts),
     deleteNote: (repo: string, id: string, opts?: RequestOptions) => this.deleteNote(repo, id, opts),
+    listStale: (repo: string, query?: T.ListStaleNotesQuery, opts?: RequestOptions) => this.listStaleNotes(repo, query, opts),
+    validateNote: (repo: string, id: string, rev?: string, opts?: RequestOptions) => this.validateNote(repo, id, rev, opts),
+    acceptNote: (repo: string, id: string, patch?: T.NotePatchRequest, opts?: RequestOptions) => this.acceptNote(repo, id, patch, opts),
     listTags: (repo: string, opts?: RequestOptions) => this.listNoteTags(repo, opts),
     getRules: (repo: string, opts?: RequestOptions) => this.getTagRules(repo, opts),
     setRules: (repo: string, rules: T.TagRule[], opts?: RequestOptions) => this.setTagRules(repo, rules, opts),
@@ -570,11 +590,49 @@ export class AgitClient {
     return this.request("PUT", `${repoPath(repo)}/policy`, { ...opts, body: policy });
   }
 
+  // ---- signing keys ---------------------------------------------------------
+
+  /** Public signing keys registered for agents in this repository. */
+  listKeys(repo: string, opts?: RequestOptions): Promise<T.KeyEntry[]> {
+    return this.request("GET", `${repoPath(repo)}/keys`, opts);
+  }
+  /**
+   * Trust an Ed25519 public key (hex, as printed by `agit key generate`) for an agent. Registering
+   * the same key for the same agent again returns the existing entry; a key already registered for
+   * another agent is a 409 `already_exists`.
+   */
+  registerKey(repo: string, key: T.KeyCreate, opts?: RequestOptions): Promise<T.KeyEntry> {
+    return this.request("POST", `${repoPath(repo)}/keys`, { ...opts, body: key });
+  }
+  /** Revoke a key by `key_id`. */
+  deleteKey(repo: string, keyId: string, opts?: RequestOptions): Promise<T.DeleteKeyResponse> {
+    return this.request("DELETE", `${repoPath(repo)}/keys/${enc(keyId)}`, opts);
+  }
+
+  /** Signing key operations grouped by resource (same calls as the flat methods). */
+  readonly keys = {
+    list: (repo: string, opts?: RequestOptions) => this.listKeys(repo, opts),
+    register: (repo: string, key: T.KeyCreate, opts?: RequestOptions) => this.registerKey(repo, key, opts),
+    delete: (repo: string, keyId: string, opts?: RequestOptions) => this.deleteKey(repo, keyId, opts),
+  };
+
   // ---- context & activity ---------------------------------------------------
 
-  /** One call returning what an agent should read before touching `path`. */
-  getContext(repo: string, path: string, limit?: number, opts?: RequestOptions): Promise<T.ContextResponse> {
-    return this.request("GET", `${repoPath(repo)}/context`, { ...opts, query: { path, limit } });
+  /**
+   * One call returning what an agent should read before touching `path`: notes (fresh first, then
+   * stale), suggested tags, recent commits, leases, open PRs and the agents active on it. Pass a
+   * number as `query` for just `limit`, or a `ContextQuery` to also request file texts.
+   */
+  getContext(repo: string, path: string, query?: number | T.ContextQuery, opts?: RequestOptions): Promise<T.ContextResponse> {
+    const q: T.ContextQuery = typeof query === "number" ? { limit: query } : (query ?? {});
+    return this.request("GET", `${repoPath(repo)}/context`, {
+      ...opts,
+      query: { path, limit: q.limit, include: q.include_files ? "files" : undefined, budget: q.include_files ? q.budget : undefined },
+    });
+  }
+  /** `getContext` with `include=files`: the context plus the file at `path` and its siblings, kept within `budget` approximate tokens (default 6000). */
+  getContextPack(repo: string, path: string, budget?: number, opts?: RequestOptions): Promise<T.ContextResponse> {
+    return this.getContext(repo, path, { include_files: true, budget }, opts);
   }
   listAgents(repo: string, opts?: RequestOptions): Promise<T.AgentActivity[]> {
     return this.request("GET", `${repoPath(repo)}/agents`, opts);

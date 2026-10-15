@@ -47,6 +47,8 @@ repeated frames `kind:u8 | len:u32 big-endian | payload`. kind 1 blob, 2 tree, 3
 - `GET /repos/{repo}/tree/{rev}?path=src/x` -> directory: `{kind:"tree", path, entries:[{name,mode,id,size}]}`
   or file: `{kind:"blob", path, id, size, binary, text?}`
 - `GET /repos/{repo}/diff?from=<rev>&to=<rev>` -> `{changes, patch, stats}`
+- `GET /repos/{repo}/blame/{rev}?path=&max_commits=500` -> `{path, rev, lines:[{line, commit, text}], commits:{<id>:{id, author, agent?, time_ms, summary, intent?}}, truncated}`
+- Change objects may carry `kind: "renamed"` with `from` and `similarity` when rename detection is applied (CLI `diff`/`show`).
 - `GET /repos/{repo}/branches` -> `[{name,id,ahead?,behind?}]`, `GET /repos/{repo}/tags`
 
 ## Events

@@ -38,10 +38,23 @@ export interface RememberOptions {
   commits?: T.ObjectId[];
   pulls?: number[];
   confidence?: number;
+  /** Commit the note holds for; defaults to HEAD of the default branch. */
+  validAt?: T.ObjectId;
+}
+
+export interface ContextPackOptions {
+  /** Approximate token budget for the whole response (default 6000 on the server). */
+  budget?: number;
+  /** Caps notes and recent commits (default 10). */
+  limit?: number;
 }
 
 function fullRef(name: string): string {
   return name.startsWith("refs/") ? name : `refs/heads/${name}`;
+}
+
+function noteId(note: string | Pick<T.NoteSummary, "id">): string {
+  return typeof note === "string" ? note : note.id;
 }
 
 export class AgentSession {
@@ -64,9 +77,20 @@ export class AgentSession {
     return Array.from(this.held.values());
   }
 
-  /** Notes, suggested tags, recent commits, leases and open PRs touching `path`. */
+  /** Notes (fresh first, then stale), suggested tags, recent commits, leases, open PRs and active agents touching `path`. */
   context(path: string, limit?: number): Promise<T.ContextResponse> {
     return this.client.getContext(this.repo, path, limit);
+  }
+
+  /** `context` plus the file at `path` and its siblings (`files`), trimmed to `budget` approximate tokens. */
+  contextPack(path: string, budget?: number | ContextPackOptions): Promise<T.ContextResponse> {
+    const o: ContextPackOptions = typeof budget === "number" ? { budget } : (budget ?? {});
+    return this.client.getContext(this.repo, path, { include_files: true, budget: o.budget, limit: o.limit });
+  }
+
+  /** Notes whose covered paths changed since they were last validated (against `rev`, default HEAD). */
+  staleNotes(rev?: string, drafts = false): Promise<T.StaleNote[]> {
+    return this.client.listStaleNotes(this.repo, { rev, drafts });
   }
 
   /** Claim `paths` for this agent. Throws `LeaseConflictError` when someone else holds them. */
@@ -151,7 +175,18 @@ export class AgentSession {
     if (opts.commits) body.commits = opts.commits;
     if (opts.pulls) body.pulls = opts.pulls;
     if (opts.confidence !== undefined) body.confidence = opts.confidence;
+    if (opts.validAt !== undefined) body.valid_at = opts.validAt;
     return this.client.createNote(this.repo, body);
+  }
+
+  /** Confirm a note still holds at `rev` (default HEAD); clears its `stale` flag. */
+  validateNote(note: string | Pick<T.NoteSummary, "id">, rev?: string): Promise<T.Note> {
+    return this.client.validateNote(this.repo, noteId(note), rev);
+  }
+
+  /** Accept a draft note (e.g. one drafted from a merged PR), optionally editing it on the way. */
+  acceptNote(note: string | Pick<T.NoteSummary, "id">, patch?: T.NotePatchRequest): Promise<T.Note> {
+    return this.client.acceptNote(this.repo, noteId(note), patch);
   }
 
   /** Live events of this repository (see `AgitClient.streamEvents`). */

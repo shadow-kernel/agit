@@ -19,7 +19,9 @@ from typing import Any, Iterator, Sequence
 
 from .client import Client
 from .errors import AgitError, NotFound
-from .types import ContextResponse, Event, Lease, Note, PullRequest
+from .types import ContextResponse, Event, Lease, Note, PullRequest, StaleNote
+
+_UNSET: Any = object()
 
 DEFAULT_TTL_SECS = 30 * 60
 
@@ -61,8 +63,18 @@ class AgentSession:
     # -- read before you write ---------------------------------------------
 
     def context(self, path: str, limit: int | None = None) -> ContextResponse:
-        """What to read before touching ``path``: notes, recent commits, leases, open PRs."""
+        """What to read before touching ``path``: notes (fresh first, then stale), recent commits,
+        leases, open PRs and the agents active on it."""
         return self.client.context(self.repo, path, limit=limit)
+
+    def context_pack(self, path: str, budget: int | None = None, limit: int | None = None) -> ContextResponse:
+        """:meth:`context` plus the file at ``path`` and its siblings (``files``), trimmed to
+        ``budget`` approximate tokens (server default 6000)."""
+        return self.client.context_pack(self.repo, path, budget=budget, limit=limit)
+
+    def stale_notes(self, rev: str | None = None, *, drafts: bool = False) -> list[StaleNote]:
+        """Notes whose covered paths changed since they were last validated (against ``rev``, default HEAD)."""
+        return self.client.stale_notes(self.repo, rev, drafts=drafts)
 
     def events(self, since: int = 0, limit: int | None = None) -> list[Event]:
         return self.client.events(self.repo, since=since, limit=limit)
@@ -156,13 +168,46 @@ class AgentSession:
         commits: Sequence[str] | str = (),
         pulls: Sequence[int] = (),
         confidence: float | None = None,
+        valid_at: str | None = None,
     ) -> Note:
-        """Record what you learned as a knowledge note (``create_note``)."""
+        """Record what you learned as a knowledge note (``create_note``).
+
+        ``valid_at`` is the commit the note holds for (default: HEAD of the default branch).
+        """
         note = self.client.create_note(
-            self.repo, title, body=body, tags=tags, paths=paths, commits=commits, pulls=pulls, confidence=confidence
+            self.repo, title, body=body, tags=tags, paths=paths, commits=commits, pulls=pulls, confidence=confidence,
+            valid_at=valid_at,
         )
         self.notes.append(note)
         return note
+
+    def validate_note(self, note: Note | StaleNote | str, rev: str | None = None) -> Note:
+        """Confirm ``note`` still holds at ``rev`` (default HEAD); clears its stale flag."""
+        return self.client.validate_note(self.repo, _note_id(note), rev)
+
+    def accept_note(
+        self,
+        note: Note | StaleNote | str,
+        *,
+        title: str | None = None,
+        body: str | None = None,
+        tags: Sequence[str] | None = None,
+        paths: Sequence[str] | None = None,
+        commits: Sequence[str] | None = None,
+        pulls: Sequence[int] | None = None,
+        confidence: float | None = None,
+        superseded_by: str | None = _UNSET,
+    ) -> Note:
+        """Accept a draft note (for example one drafted from a merged PR), optionally editing it first."""
+        kwargs: dict[str, Any] = {
+            "title": title, "body": body, "tags": tags, "paths": paths, "commits": commits,
+            "pulls": pulls, "confidence": confidence,
+        }
+        if superseded_by is not _UNSET:
+            kwargs["superseded_by"] = superseded_by
+        accepted = self.client.accept_note(self.repo, _note_id(note), **kwargs)
+        self.notes.append(accepted)
+        return accepted
 
     # -- context manager ----------------------------------------------------
 
@@ -176,6 +221,10 @@ class AgentSession:
             if exc_type is None:
                 raise
             # Do not mask the original exception with a release failure.
+
+
+def _note_id(note: Note | StaleNote | str) -> str:
+    return note if isinstance(note, str) else note.id
 
 
 __all__ = ["AgentSession", "DEFAULT_TTL_SECS"]

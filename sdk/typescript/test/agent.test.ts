@@ -78,6 +78,43 @@ describe("AgentSession", () => {
     const note = await s.remember({ title: "Gotcha", body: "details", tags: ["kind:gotcha"], paths: ["src/auth/**"], commits: ["a".repeat(64)], pulls: [pr.number] });
     expect(last().body).toEqual({ title: "Gotcha", body: "details", tags: ["kind:gotcha"], paths: ["src/auth/**"], commits: ["a".repeat(64)], pulls: [2] });
     expect(note.author).toBe("agent1");
+    const pinned = await s.remember({ title: "Pinned", body: "b", validAt: "b".repeat(64) });
+    expect(last().body).toEqual({ title: "Pinned", body: "b", valid_at: "b".repeat(64) });
+    expect(pinned.valid_at).toBe("b".repeat(64));
+  });
+
+  it("context packs, stale notes, validate and accept", async () => {
+    const s = new AgentSession(client, "demo", "agent1");
+    const pack = await s.contextPack("src/auth/login.rs", 2000);
+    expect(last().query.get("include")).toBe("files");
+    expect(last().query.get("budget")).toBe("2000");
+    expect(pack.files?.length).toBe(2);
+    expect(pack.agents_active).toEqual(["agent1", "agent2"]);
+    await s.contextPack("src/auth/login.rs", { limit: 3 });
+    expect(last().query.get("limit")).toBe("3");
+    expect(last().query.has("budget")).toBe(false);
+
+    expect(await s.staleNotes()).toEqual([]);
+    const stale = await s.staleNotes("b".repeat(64));
+    expect(last().query.get("rev")).toBe("b".repeat(64));
+    expect(stale.map((n) => n.id)).toEqual(["n_1"]);
+    expect(stale[0]?.changed_paths).toEqual(["src/auth/login.rs"]);
+    expect((await s.staleNotes("b".repeat(64), true)).map((n) => n.id)).toEqual(["n_1", "n_d1"]);
+
+    const validated = await s.validateNote(stale[0]!); // StaleNote, Note or id
+    expect(last().path).toBe("/api/v1/repos/demo/knowledge/notes/n_1/validate");
+    expect(last().body).toEqual({});
+    expect(validated.stale).toBe(false);
+    await s.validateNote("n_1", "b".repeat(64));
+    expect(last().body).toEqual({ rev: "b".repeat(64) });
+
+    const accepted = await s.acceptNote("n_d1", { title: "Reviewed title" });
+    expect(last().path).toBe("/api/v1/repos/demo/knowledge/notes/n_d1/accept");
+    expect(last().body).toEqual({ title: "Reviewed title" });
+    expect(accepted.title).toBe("Reviewed title");
+    expect(accepted.draft).toBeUndefined();
+    await s.acceptNote(accepted);
+    expect(last().body).toEqual({});
   });
 
   it("reuses the client when it already acts as the agent", () => {

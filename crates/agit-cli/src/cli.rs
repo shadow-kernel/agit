@@ -140,6 +140,42 @@ pub enum Cmd {
     Restore { rev: String },
     /// Print repository locations and state as JSON-friendly fields (works on an unborn branch).
     Root,
+    /// Line-by-line attribution of a file.
+    Blame {
+        path: PathBuf,
+        #[arg(default_value = "HEAD")]
+        rev: String,
+        #[arg(long, default_value_t = 500)]
+        max_commits: usize,
+    },
+    /// Undo a commit's changes with a new commit.
+    Revert {
+        rev: String,
+        #[command(flatten)]
+        agent: AgentArgs,
+    },
+    /// Apply a commit's changes on top of HEAD.
+    CherryPick {
+        rev: String,
+        #[command(flatten)]
+        agent: AgentArgs,
+    },
+    /// Shelve working tree changes (tracked and untracked) and restore HEAD.
+    Stash {
+        #[command(subcommand)]
+        cmd: Option<StashCmd>,
+    },
+    /// Regex search over the working tree or a revision.
+    Grep {
+        pattern: String,
+        #[arg(long)]
+        rev: Option<String>,
+        #[arg(short = 'i', long)]
+        ignore_case: bool,
+        /// Skip files larger than this many bytes.
+        #[arg(long, default_value_t = 1_048_576)]
+        max_file_bytes: u64,
+    },
     /// Show where a ref (default: HEAD) pointed over time, newest first.
     Reflog {
         #[arg(default_value = "HEAD")]
@@ -181,6 +217,9 @@ pub enum Cmd {
         first_parent: bool,
         #[arg(long)]
         oneline: bool,
+        /// Draw an ASCII graph of the history.
+        #[arg(long)]
+        graph: bool,
     },
     /// Show a commit (metadata + diff) or any object.
     Show {
@@ -381,6 +420,30 @@ pub enum Cmd {
         cmd: crate::remote::KnowCmd,
         #[command(flatten)]
         agent: AgentArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum StashCmd {
+    /// Save changes and reset to HEAD (default when no subcommand is given).
+    Push {
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    List,
+    /// Re-apply and drop an entry (default: the newest).
+    Pop {
+        #[arg(default_value_t = 0)]
+        index: usize,
+    },
+    /// Re-apply an entry, keeping it.
+    Apply {
+        #[arg(default_value_t = 0)]
+        index: usize,
+    },
+    Drop {
+        #[arg(default_value_t = 0)]
+        index: usize,
     },
 }
 
@@ -647,6 +710,102 @@ pub fn run(cli: Cli) -> Result<()> {
                 });
             }
         }
+        Cmd::Blame {
+            path,
+            rev,
+            max_commits,
+        } => {
+            let repo = open(&cli.dir)?;
+            let rel = repo.rel_path(&cwd(&cli.dir)?, &path)?;
+            let id = repo.resolve(&rev)?;
+            let b = agit_core::history::blame(repo.store(), id, &rel, max_commits)?;
+            emit(json, &b, || {
+                for l in &b.lines {
+                    let c = &b.commits[&l.commit];
+                    let who = c.agent.clone().unwrap_or_else(|| c.author.clone());
+                    println!(
+                        "{} ({:<12} {}) {:>4}: {}",
+                        l.commit.short(),
+                        truncate(&who, 12),
+                        fmt_time(c.time_ms),
+                        l.line,
+                        l.text
+                    );
+                }
+            });
+        }
+        Cmd::Revert { rev, agent } => {
+            let repo = open(&cli.dir)?;
+            let r = agit_core::history::revert(&repo, &rev, agent.info())?;
+            print_apply(json, &r, "Reverted")?;
+        }
+        Cmd::CherryPick { rev, agent } => {
+            let repo = open(&cli.dir)?;
+            let r = agit_core::history::cherry_pick(&repo, &rev, agent.info())?;
+            print_apply(json, &r, "Cherry-picked")?;
+        }
+        Cmd::Stash { cmd } => {
+            let repo = open(&cli.dir)?;
+            use agit_core::history as h;
+            match cmd.unwrap_or(StashCmd::Push { message: None }) {
+                StashCmd::Push { message } => {
+                    let e = h::stash_push(&repo, message)?;
+                    emit(json, &e, || {
+                        println!("Saved working tree as stash@{{0}}: {}", e.message)
+                    });
+                }
+                StashCmd::List => {
+                    let l = h::stash_list(&repo)?;
+                    emit(json, &l, || {
+                        for e in &l {
+                            println!(
+                                "stash@{{{}}}: {} ({})",
+                                e.index,
+                                e.message,
+                                fmt_time(e.time_ms)
+                            );
+                        }
+                    });
+                }
+                StashCmd::Pop { index } => {
+                    let r = h::stash_apply(&repo, index, true)?;
+                    print_apply(json, &r, "Applied and dropped")?;
+                }
+                StashCmd::Apply { index } => {
+                    let r = h::stash_apply(&repo, index, false)?;
+                    print_apply(json, &r, "Applied")?;
+                }
+                StashCmd::Drop { index } => {
+                    let id = h::stash_drop(&repo, index)?;
+                    emit(json, &serde_json::json!({ "dropped": id }), || {
+                        println!("Dropped stash@{{{index}}} ({})", id.short())
+                    });
+                }
+            }
+        }
+        Cmd::Grep {
+            pattern,
+            rev,
+            ignore_case,
+            max_file_bytes,
+        } => {
+            let repo = open(&cli.dir)?;
+            let m = agit_core::history::grep(
+                &repo,
+                &pattern,
+                rev.as_deref(),
+                ignore_case,
+                max_file_bytes,
+            )?;
+            emit(json, &m, || {
+                for x in &m {
+                    println!("{}:{}:{}", x.path, x.line, x.text);
+                }
+            });
+            if m.is_empty() {
+                std::process::exit(1);
+            }
+        }
         Cmd::Root => {
             let repo = open(&cli.dir)?;
             let head = repo.head_commit()?;
@@ -816,6 +975,7 @@ pub fn run(cli: Cli) -> Result<()> {
             path,
             first_parent,
             oneline,
+            graph,
         } => {
             let repo = open(&cli.dir)?;
             let start = match repo.resolve(&rev) {
@@ -839,12 +999,40 @@ pub fn run(cli: Cli) -> Result<()> {
                 },
             )?;
             emit(json, &entries, || {
-                for e in &entries {
-                    if oneline {
-                        println!("{} {}", e.id.short(), e.commit.summary());
+                let prefixes = if graph {
+                    agit_core::history::graph_prefixes(
+                        &entries
+                            .iter()
+                            .map(|e| (e.id, e.commit.parents.clone()))
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    vec![]
+                };
+                for (i, e) in entries.iter().enumerate() {
+                    let (prefix, connectors) = prefixes.get(i).cloned().unwrap_or_default();
+                    let pad = if graph {
+                        format!("{prefix} ")
+                    } else {
+                        String::new()
+                    };
+                    if oneline || graph {
+                        println!(
+                            "{pad}{} {}{}",
+                            e.id.short(),
+                            e.commit.summary(),
+                            e.commit
+                                .agent
+                                .as_ref()
+                                .map(|a| format!(" [{}]", a.id))
+                                .unwrap_or_default()
+                        );
                     } else {
                         print_commit_header(&e.id, &e.commit);
                         println!();
+                    }
+                    for c in connectors {
+                        println!("{c}");
                     }
                 }
             });
@@ -937,7 +1125,7 @@ pub fn run(cli: Cli) -> Result<()> {
                     }
                     _ => bail!("diff takes at most two revisions"),
                 };
-            let changes = diff::diff_maps(&old, &new);
+            let changes = diff::detect_renames(repo.store(), diff::diff_maps(&old, &new), 50);
             let from_worktree = revs.len() <= 1 && !staged;
             let patch = if name_only || stat {
                 None
@@ -1857,6 +2045,7 @@ fn label(k: ChangeKind) -> &'static str {
         ChangeKind::Modified => "modified:",
         ChangeKind::Deleted => "deleted:",
         ChangeKind::TypeChanged => "typechange:",
+        ChangeKind::Renamed => "renamed:",
     }
 }
 
@@ -1979,6 +2168,34 @@ fn run_key(dir: &Option<PathBuf>, json: bool, cmd: KeyCmd) -> Result<()> {
                 println!("deleted key {name}")
             });
         }
+    }
+    Ok(())
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        s.to_string()
+    } else {
+        s.chars().take(n.saturating_sub(1)).collect::<String>() + "…"
+    }
+}
+
+fn print_apply(json: bool, r: &agit_core::history::ApplyResult, verb: &str) -> Result<()> {
+    use agit_core::history::ApplyResult;
+    emit(json, r, || match r {
+        ApplyResult::Committed {
+            commit,
+            files_changed,
+        } => println!("{verb} as {} ({files_changed} file(s))", commit.short()),
+        ApplyResult::Conflicts { conflicts, .. } => {
+            for c in conflicts {
+                println!("CONFLICT ({:?}): {}", c.kind, c.path);
+            }
+            println!("Resolve the conflicts, `agit add` the files and commit.");
+        }
+    });
+    if let ApplyResult::Conflicts { conflicts, .. } = r {
+        return Err(agit_core::Error::MergeConflicts(conflicts.len()).into());
     }
     Ok(())
 }

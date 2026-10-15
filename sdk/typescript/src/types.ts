@@ -190,6 +190,41 @@ export interface CommitDetail {
   commit: Commit;
   changes: Change[];
   patch: string;
+  /** Signature verdict plus whether the key is registered for the signer; absent on older servers. */
+  signature?: SignatureInfo;
+  /** Up to 10 notes: those linking the commit (drafts included) first, then accepted notes covering a changed path. */
+  notes: NoteSummary[];
+}
+
+// ---- Signing keys -----------------------------------------------------------
+
+/** Outcome of verifying a commit's Ed25519 signature (`agit_core::sign::SignatureStatus`, tagged by `status`). */
+export type SignatureStatus =
+  | { status: "unsigned" }
+  | { status: "valid"; key_id: string; signer: string; public_key: string }
+  | { status: "invalid"; reason: string };
+
+/** `CommitDetail.signature`: the status flattened with `trusted` (key registered for the signer in `/keys`). */
+export type SignatureInfo = SignatureStatus & { trusted: boolean };
+
+/** A public signing key registered for an agent (`GET /repos/{repo}/keys`). */
+export interface KeyEntry {
+  agent: string;
+  key_id: string;
+  /** Hex-encoded Ed25519 public key (32 bytes). */
+  public_key: string;
+  added_ms: number;
+  added_by: string;
+}
+
+export interface KeyCreate {
+  agent: string;
+  /** Hex-encoded Ed25519 public key, as printed by `agit key generate`. */
+  public_key: string;
+}
+
+export interface DeleteKeyResponse {
+  deleted: string;
 }
 
 export interface FileStat {
@@ -451,6 +486,8 @@ export interface Policy {
   allowed_push_agents: string[];
   /** 0 = unlimited. */
   max_files_per_commit: number;
+  /** Every commit reaching a protected branch needs a valid signature with a key registered for its signer. */
+  require_signed: boolean;
 }
 
 // ---- Knowledge notes --------------------------------------------------------
@@ -471,9 +508,15 @@ export interface Note {
   created_ms: number;
   updated_ms: number;
   superseded_by?: string | null;
+  /** Commit the note was written or last validated against (HEAD of the default branch at creation by default). */
+  valid_at?: ObjectId | null;
+  /** Machine-generated (e.g. from a merged PR) and hidden until accepted. Omitted when false. */
+  draft?: boolean;
+  /** Computed on every read: a path covered by `paths` changed between `valid_at` and HEAD. */
+  stale: boolean;
 }
 
-/** Note without `body`, plus `excerpt`. */
+/** Note without `body`, plus `excerpt`, `valid_at`, `draft`, `stale` and (for `q=` searches) `score`. */
 export interface NoteSummary {
   id: string;
   title: string;
@@ -482,8 +525,20 @@ export interface NoteSummary {
   author: string;
   confidence: number;
   updated_ms: number;
+  /** First 200 characters of the body. */
   excerpt: string;
   superseded_by?: string | null;
+  valid_at?: ObjectId | null;
+  draft: boolean;
+  stale: boolean;
+  /** BM25 relevance; only present for full-text (`q=`) queries. */
+  score?: number;
+}
+
+/** `GET /repos/{repo}/knowledge/stale`: a summary (`stale: true`) plus the covered paths that changed since `valid_at`. */
+export interface StaleNote extends NoteSummary {
+  stale: true;
+  changed_paths: string[];
 }
 
 export interface NoteCreateRequest {
@@ -494,6 +549,16 @@ export interface NoteCreateRequest {
   commits?: ObjectId[];
   pulls?: number[];
   confidence?: number;
+  /** Must be an object the server has (412 `object_not_found`); defaults to HEAD of the default branch. */
+  valid_at?: ObjectId;
+  /** Create a hidden draft to be accepted later. */
+  draft?: boolean;
+}
+
+/** Body of `POST /knowledge/notes/{id}/validate`. */
+export interface ValidateNoteRequest {
+  /** Revision the note was checked against; default HEAD. */
+  rev?: string;
 }
 
 export interface NotePatchRequest {
@@ -513,10 +578,24 @@ export interface ListNotesQuery {
   tags?: string[];
   /** Notes whose `paths` cover this path. */
   path?: string;
-  /** Full-text query. */
+  /** Full-text query (BM25 over title, tags, body and paths); results come best first with `score` set. */
   q?: string;
+  /** Notes listing this commit (any revision syntax). */
+  commit?: string;
+  /** Notes listing this pull request number. */
+  pull?: number;
+  /** Default 100. */
   limit?: number;
+  /** Include unaccepted drafts. */
+  drafts?: boolean;
   include_superseded?: boolean;
+}
+
+export interface ListStaleNotesQuery {
+  /** Revision to compare against; default HEAD. */
+  rev?: string;
+  /** Include drafts. */
+  drafts?: boolean;
 }
 
 export interface DeleteNoteResponse {
@@ -533,14 +612,36 @@ export interface TagRule {
   tags: string[];
 }
 
+export interface ContextQuery {
+  /** Caps `notes` and `recent_commits`; default 10. */
+  limit?: number;
+  /** Add `files` (the file at `path` plus up to 5 siblings) to the response. */
+  include_files?: boolean;
+  /** Approximate token budget for the whole response (4 chars per token); default 6000. Only with `include_files`. */
+  budget?: number;
+}
+
+/** One file of a context pack (`include=files`). */
+export interface ContextFile {
+  path: string;
+  text: string;
+  /** The text was cut to fit the budget. */
+  truncated: boolean;
+}
+
 /** `GET /repos/{repo}/context?path=`: everything an agent should read before touching a path. */
 export interface ContextResponse {
   path: string;
+  /** Fresh notes first, then stale ones (`stale: true`); drafts excluded. */
   notes: NoteSummary[];
   suggested_tags: string[];
   recent_commits: CommitEntry[];
   leases: Lease[];
   open_pulls: PullRequest[];
+  /** Sorted agent ids holding a lease overlapping the path or who committed to it in the last 24 hours. */
+  agents_active: string[];
+  /** Only present with `include=files`; most recently touched first, binary files skipped. */
+  files?: ContextFile[];
 }
 
 // ---- Activity ---------------------------------------------------------------

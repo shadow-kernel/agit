@@ -2,7 +2,8 @@
 
 TypeScript client for the [agit](https://github.com/agit-vcs/agit) server HTTP API
 (`docs/API.md`): repositories, compare-and-swap refs, objects, pull requests and reviews,
-leases, knowledge notes, policies and the live event stream. Built for AI agents and the
+leases, knowledge notes (ranked search, validity, drafts, context packs), policies, signing
+keys, webhooks and the live event stream. Built for AI agents and the
 orchestrators that run them.
 
 - Zero runtime dependencies. Needs only a WHATWG `fetch`: Node 18+, Deno, Bun, browsers.
@@ -33,9 +34,11 @@ const client = new AgitClient({
 
 const me = new AgentSession(client, "demo", "coder-1");
 
-// 1. Read before you touch: notes, suggested tags, recent commits, leases, open PRs.
-const ctx = await me.context("src/auth/login.rs");
-console.log(ctx.notes.map((n) => n.title), ctx.suggested_tags);
+// 1. Read before you touch: notes (fresh first, then stale), suggested tags, recent commits,
+//    leases, open PRs, the agents active on the path and, with contextPack, the file texts.
+const ctx = await me.contextPack("src/auth/login.rs", 6000); // budget in approximate tokens
+console.log(ctx.notes.map((n) => [n.title, n.stale]), ctx.suggested_tags, ctx.agents_active);
+for (const f of ctx.files ?? []) console.log(f.path, f.text.length, f.truncated);
 
 // 2. Claim what you will change; the lease is released even if the work throws.
 try {
@@ -78,8 +81,87 @@ await reviewer.reviewPull("demo", pr.number, { decision: "approve", body: "LGTM"
 const { merged_commit } = await reviewer.mergePull("demo", pr.number, { strategy: "merge" });
 ```
 
-Resource groups are also available as `client.pulls.*`, `client.leases.*` and
-`client.knowledge.*` (`client.pulls.merge(...)`, `client.knowledge.listTags(...)`).
+Resource groups are also available as `client.pulls.*`, `client.leases.*`,
+`client.knowledge.*` and `client.keys.*` (`client.pulls.merge(...)`, `client.knowledge.listTags(...)`).
+
+### Knowledge v2: search, validity, drafts, context packs
+
+Notes carry `valid_at` (the commit they were written or last validated against, HEAD at
+creation by default), `stale` (computed on every read: a covered path changed between
+`valid_at` and HEAD) and `draft` (machine-generated, hidden until accepted; omitted when
+false on full notes). Summaries also carry `score` for ranked searches.
+
+```ts
+// ranked full-text search (BM25 over title, tags, body, paths); other filters apply in rank order
+const hits = await client.listNotes("demo", { q: "session store", path: "src/auth/login.rs", limit: 5 });
+hits.map((h) => [h.score, h.title, h.stale]);
+await client.listNotes("demo", { commit: "main", pull: 3 });                  // notes linking a commit / PR
+await client.listNotes("demo", { drafts: true, include_superseded: true });   // everything
+
+// validity
+await client.createNote("demo", { title: "Pinned", valid_at: commitId });     // 412 object_not_found if unknown
+for (const s of await client.listStaleNotes("demo", { rev: "HEAD" })) {       // StaleNote: summary + changed_paths
+  console.log(s.id, s.changed_paths);
+  await client.validateNote("demo", s.id);                                    // "still true at HEAD" -> valid_at = HEAD
+  // ...or fix the text first: client.updateNote("demo", s.id, { body }) then validate
+}
+
+// drafts: every merged PR leaves a draft note (event `note.draft`)
+for (const d of await client.listNotes("demo", { drafts: true, pull: pr.number })) {
+  await client.acceptNote("demo", d.id, { title: "Cleaner title", tags: ["kind:change", "area:auth"] });
+  // or client.deleteNote("demo", d.id) to discard it
+}
+
+// context pack: context plus file texts, kept within ~budget tokens
+const pack = await client.getContextPack("demo", "src/auth/login.rs", 6000);
+pack.agents_active;        // agents holding a lease on the path or who committed to it in 24 h
+pack.files;                // [{ path, text, truncated }], undefined without include=files
+await client.getContext("demo", "src/auth/login.rs", { limit: 5, include_files: true, budget: 2000 });
+
+// commits link back to notes
+const detail = await client.getCommit("demo", "main");
+detail.notes.map((n) => n.title);                                            // up to 10 related notes
+```
+
+Through `AgentSession`: `me.contextPack(path, budget)`, `me.staleNotes(rev)`,
+`me.validateNote(noteOrId, rev)`, `me.acceptNote(draftOrId, patch)` and
+`me.remember({ ..., validAt })`.
+
+### Signing keys
+
+Agents sign commits with Ed25519 (`agit key generate`, `agit commit --sign`); the public key
+travels inside the commit. The per-repository key registry decides which keys are trusted for
+which agent, and `Policy.require_signed` makes every commit reaching a protected branch need a
+valid signature from a registered key.
+
+```ts
+const key = await client.registerKey("demo", { agent: "coder-1", public_key: publicKeyHex });
+// KeyEntry { agent, key_id, public_key, added_ms, added_by }; 409 already_exists if the key belongs to another agent
+await client.listKeys("demo");
+await client.deleteKey("demo", key.key_id);                                  // { deleted: key_id }
+
+const { signature } = await client.getCommit("demo", "main");                // SignatureInfo | undefined
+switch (signature?.status) {
+  case "valid":    console.log(signature.signer, signature.key_id, signature.trusted); break;
+  case "invalid":  console.log(signature.reason); break;
+  case "unsigned": break;
+}
+
+const policy = await client.getPolicy("demo");
+await client.setPolicy("demo", { ...policy, protected_branches: ["main"], require_signed: true });
+```
+
+### Webhooks
+
+```ts
+const wh = await client.createWebhook("demo", { url: "https://ci.example/agit", kinds: ["ref.*", "pull.*"], secret: "s3cret" });
+wh.has_secret;                                   // the secret itself is never returned
+await client.testWebhook("demo", wh.id);         // queues a `ping`
+await client.deleteWebhook("demo", wh.id);
+```
+
+Deliveries carry `X-Agit-Event`, `X-Agit-Repo`, `X-Agit-Delivery`, `X-Agit-Webhook` and, with
+a secret, `X-Agit-Signature: blake3=<hex>` (keyed BLAKE3 over the body, see `docs/API.md`).
 
 ### Compare-and-swap refs
 

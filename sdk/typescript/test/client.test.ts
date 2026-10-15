@@ -106,12 +106,56 @@ describe("query encoding", () => {
     const notes = await client.listNotes("demo", { tags: ["area:auth", "kind:gotcha"], path: "src/auth/login.rs", q: "", limit: 5 });
     expect(notes[0]?.excerpt).toBe(fixtures.note.body);
     expect((notes[0] as unknown as Record<string, unknown>).body).toBeUndefined();
+    expect(notes[0]).toMatchObject({ valid_at: fixtures.ids.A, draft: false, stale: false });
+    expect(notes[0]?.score).toBeUndefined();
     const q = last().query;
     expect(q.get("tags")).toBe("area:auth,kind:gotcha");
     expect(q.get("path")).toBe("src/auth/login.rs");
     expect(q.has("q")).toBe(false);
     expect(q.get("limit")).toBe("5");
-    expect(q.has("include_superseded")).toBe(false);
+    for (const k of ["include_superseded", "drafts", "commit", "pull"]) expect(q.has(k)).toBe(false);
+  });
+
+  it("ranked search, commit/pull filters and drafts for notes", async () => {
+    const hits = await client.listNotes("demo", { q: "session", commit: fixtures.ids.A, pull: 1, drafts: true, include_superseded: true });
+    const q = last().query;
+    expect(q.get("q")).toBe("session");
+    expect(q.get("commit")).toBe(fixtures.ids.A);
+    expect(q.get("pull")).toBe("1");
+    expect(q.get("drafts")).toBe("1");
+    expect(q.get("include_superseded")).toBe("1");
+    expect(hits.map((h) => h.id)).toEqual(["n_1"]);
+    expect(hits[0]?.score).toBe(2.5);
+
+    const drafts = await client.listNotes("demo", { drafts: true, pull: 1 });
+    expect(drafts.map((d) => [d.id, d.draft])).toEqual([["n_1", false], ["n_d1", true]]);
+    expect((await client.listNotes("demo", { pull: 1 })).map((d) => d.id)).toEqual(["n_1"]); // drafts hidden by default
+    expect((await client.listNotes("demo", { commit: fixtures.ids.B })).length).toBe(0);
+    await expect(client.listNotes("demo", { commit: "nope" })).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it("context pack sends include=files and budget; plain context does not", async () => {
+    const ctx = await client.getContext("demo", "src/auth/login.rs");
+    expect(last().query.has("include")).toBe(false);
+    expect(last().query.has("budget")).toBe(false);
+    expect(ctx.agents_active).toEqual(["agent1", "agent2"]);
+    expect(ctx.files).toBeUndefined();
+    expect(ctx.notes.map((n) => n.stale)).toEqual([false, true]); // fresh first, then stale
+
+    const pack = await client.getContextPack("demo", "src/auth/login.rs", 4000);
+    expect(last().query.get("include")).toBe("files");
+    expect(last().query.get("budget")).toBe("4000");
+    expect(pack.files?.map((f) => f.path)).toEqual(["src/auth/login.rs", "src/auth/session.rs"]);
+    expect(pack.files?.[0]?.truncated).toBe(false);
+
+    const tight = await client.getContext("demo", "src/auth/login.rs", { include_files: true, budget: 5, limit: 2 });
+    expect(last().query.get("limit")).toBe("2");
+    expect(tight.files).toHaveLength(1);
+    expect(tight.files?.[0]).toMatchObject({ truncated: true });
+    expect(tight.files?.[0]?.text).toHaveLength(20);
+
+    await client.getContext("demo", "src/auth/login.rs", { budget: 99 }); // budget without files is meaningless: not sent
+    expect(last().query.has("budget")).toBe(false);
   });
 
   it("passes commit filters and omits undefined", async () => {
@@ -206,6 +250,11 @@ describe("repos, pulls, knowledge, policy, leases", () => {
     const n = await client.createNote("demo", { title: "x", body: "y", tags: ["area:auth"], paths: ["src/**"] });
     expect(n.id).toBe("n_2");
     expect(n.author).toBe("agent1");
+    expect(n.stale).toBe(false);
+    expect(n.draft).toBeUndefined(); // omitted when false
+    expect(n.valid_at).toBe(fixtures.ids.A);
+    const full = await client.getNote("demo", "n_1");
+    expect(full).toMatchObject({ valid_at: fixtures.ids.A, stale: false });
     const patched = await client.updateNote("demo", "n_1", { superseded_by: null, confidence: 0.5 });
     expect(last().method).toBe("PATCH");
     expect(last().body).toEqual({ superseded_by: null, confidence: 0.5 });
@@ -221,6 +270,83 @@ describe("repos, pulls, knowledge, policy, leases", () => {
     expect(last().method).toBe("PUT");
   });
 
+  it("creates pinned notes and drafts; validates and accepts", async () => {
+    const pinned = await client.createNote("demo", { title: "p", body: "b", valid_at: fixtures.ids.B });
+    expect(last().body).toEqual({ title: "p", body: "b", valid_at: fixtures.ids.B });
+    expect(pinned.valid_at).toBe(fixtures.ids.B);
+    await expect(client.createNote("demo", { title: "bad", valid_at: "c".repeat(64) })).rejects.toMatchObject({ code: "object_not_found", status: 412 });
+    const draft = await client.createNote("demo", { title: "d", draft: true, pulls: [1] });
+    expect(last().body).toEqual({ title: "d", draft: true, pulls: [1] });
+    expect(draft.draft).toBe(true);
+
+    const validated = await client.validateNote("demo", "n_1");
+    expect(last().path).toBe("/api/v1/repos/demo/knowledge/notes/n_1/validate");
+    expect(last().body).toEqual({});
+    expect(validated.valid_at).toBe(fixtures.ids.A);
+    expect(validated.updated_ms).toBe(fixtures.note.updated_ms + 1);
+    const at = await client.validateNote("demo", "n_1", fixtures.ids.B);
+    expect(last().body).toEqual({ rev: fixtures.ids.B });
+    expect(at.valid_at).toBe(fixtures.ids.B);
+    await expect(client.validateNote("demo", "n_1", "nope")).rejects.toBeInstanceOf(NotFoundError);
+
+    const accepted = await client.acceptNote("demo", "n_d1");
+    expect(last().path).toBe("/api/v1/repos/demo/knowledge/notes/n_d1/accept");
+    expect(last().body).toEqual({});
+    expect(accepted.draft).toBeUndefined();
+    expect(accepted.id).toBe("n_d1");
+    const edited = await client.knowledge.acceptNote("demo", "n_d1", { title: "Reviewed", tags: ["kind:change"], superseded_by: null });
+    expect(last().body).toEqual({ title: "Reviewed", tags: ["kind:change"], superseded_by: null });
+    expect(edited.title).toBe("Reviewed");
+    await expect(client.acceptNote("demo", "n_missing")).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it("lists stale notes with rev and drafts", async () => {
+    expect(await client.listStaleNotes("demo")).toEqual([]);
+    expect(last().path).toBe("/api/v1/repos/demo/knowledge/stale");
+    expect([...last().query.keys()]).toEqual([]);
+    const stale = await client.knowledge.listStale("demo", { rev: fixtures.ids.B });
+    expect(last().query.get("rev")).toBe(fixtures.ids.B);
+    expect(last().query.has("drafts")).toBe(false);
+    expect(stale).toHaveLength(1);
+    expect(stale[0]).toMatchObject({ id: "n_1", stale: true, changed_paths: ["src/auth/login.rs"], excerpt: fixtures.note.body, valid_at: fixtures.ids.A });
+    expect((stale[0] as unknown as Record<string, unknown>).body).toBeUndefined();
+    const withDrafts = await client.listStaleNotes("demo", { rev: fixtures.ids.B, drafts: true });
+    expect(last().query.get("drafts")).toBe("1");
+    expect(withDrafts.map((s) => [s.id, s.draft])).toEqual([["n_1", false], ["n_d1", true]]);
+    await expect(client.listStaleNotes("demo", { rev: "nope" })).rejects.toBeInstanceOf(NotFoundError);
+  });
+
+  it("signing keys: list, register, conflicts, delete; commit signatures and notes", async () => {
+    expect(await client.listKeys("demo")).toEqual([]);
+    const pk = fixtures.key.public_key.toUpperCase();
+    const key = await client.registerKey("demo", { agent: "agent1", public_key: pk });
+    expect(last().method).toBe("POST");
+    expect(last().path).toBe("/api/v1/repos/demo/keys");
+    expect(last().body).toEqual({ agent: "agent1", public_key: pk });
+    expect(key).toMatchObject({ agent: "agent1", key_id: "k_d75a9801", public_key: fixtures.key.public_key, added_by: "agent1" });
+    expect(await client.keys.register("demo", { agent: "agent1", public_key: pk })).toEqual(key); // idempotent
+    const dup = await client.registerKey("demo", { agent: "agent2", public_key: pk }).catch((e: unknown) => e);
+    expect(dup).toMatchObject({ code: "already_exists", status: 409 });
+    await expect(client.registerKey("demo", { agent: "agent1", public_key: "nope" })).rejects.toMatchObject({ code: "invalid", status: 400 });
+    expect((await client.keys.list("demo")).map((k) => k.key_id)).toEqual([key.key_id]);
+    expect(await client.deleteKey("demo", key.key_id)).toEqual({ deleted: key.key_id });
+    expect(last().method).toBe("DELETE");
+    expect(last().path).toBe(`/api/v1/repos/demo/keys/${key.key_id}`);
+    await expect(client.keys.delete("demo", key.key_id)).rejects.toBeInstanceOf(NotFoundError);
+
+    // commit detail: signature verdict depends on the registry, notes link back
+    await client.registerKey("demo", { agent: "agent1", public_key: "1".repeat(64) }); // hashes to k_11111111, not k_1
+    let detail = await client.getCommit("demo", fixtures.ids.A);
+    expect(detail.signature).toEqual({ status: "valid", key_id: "k_1", signer: "agent1", public_key: fixtures.key.public_key, trusted: false });
+    expect(detail.notes.map((n) => [n.id, n.draft])).toEqual([["n_d1", true], ["n_1", false]]);
+    if (detail.signature?.status === "valid") expect(detail.signature.signer).toBe("agent1"); // narrowing works
+    await client.deleteKey("demo", "k_11111111");
+    detail = await client.getCommit("demo", "unsigned");
+    expect(detail.signature).toEqual({ status: "unsigned", trusted: false });
+    detail = await client.getCommit("demo", "forged");
+    expect(detail.signature).toEqual({ status: "invalid", reason: "signature does not verify", trusted: false });
+  });
+
   it("webhooks: list, create, test, delete and 404", async () => {
     expect(await client.listWebhooks("demo")).toEqual([fixtures.webhook]);
     const wh = await client.createWebhook("demo", { url: "http://localhost:9/hook", kinds: ["pull.*"], secret: "s" });
@@ -234,7 +360,8 @@ describe("repos, pulls, knowledge, policy, leases", () => {
 
   it("policy GET and PUT round-trip", async () => {
     expect(await client.getPolicy("demo")).toEqual(fixtures.policy);
-    const next = { ...fixtures.policy, require_approvals: 2 };
+    expect((await client.getPolicy("demo")).require_signed).toBe(false);
+    const next = { ...fixtures.policy, require_approvals: 2, require_signed: true };
     expect(await client.setPolicy("demo", next)).toEqual(next);
     expect(last().method).toBe("PUT");
     expect(last().body).toEqual(next);

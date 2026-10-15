@@ -17,6 +17,8 @@ pub enum ChangeKind {
     Modified,
     Deleted,
     TypeChanged,
+    /// Produced by [`detect_renames`]: `path` is the new name, `from` the old.
+    Renamed,
 }
 
 impl ChangeKind {
@@ -26,6 +28,7 @@ impl ChangeKind {
             ChangeKind::Modified => 'M',
             ChangeKind::Deleted => 'D',
             ChangeKind::TypeChanged => 'T',
+            ChangeKind::Renamed => 'R',
         }
     }
 }
@@ -55,6 +58,131 @@ pub struct Change {
     pub old: Option<Side>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub new: Option<Side>,
+    /// Previous path for renames (see [`detect_renames`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// Similarity in percent for renames (100 = identical content).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub similarity: Option<u8>,
+}
+
+/// Pair deletions with additions that look like the same file moved.
+/// Exact matches (same blob id) first; then content similarity over lines
+/// (Jaccard, at least `min_similarity` percent) for text files, considering
+/// at most 1,000 candidate pairs so large tree moves stay cheap.
+pub fn detect_renames(
+    store: &ObjectStore,
+    changes: Vec<Change>,
+    min_similarity: u8,
+) -> Vec<Change> {
+    let mut deleted: Vec<Change> = Vec::new();
+    let mut added: Vec<Change> = Vec::new();
+    let mut rest: Vec<Change> = Vec::new();
+    for c in changes {
+        match c.kind {
+            ChangeKind::Deleted => deleted.push(c),
+            ChangeKind::Added => added.push(c),
+            _ => rest.push(c),
+        }
+    }
+    if deleted.is_empty() || added.is_empty() {
+        rest.extend(deleted);
+        rest.extend(added);
+        rest.sort_by(|a, b| a.path.cmp(&b.path));
+        return rest;
+    }
+    let mut used_del = vec![false; deleted.len()];
+    let mut used_add = vec![false; added.len()];
+    let mut renames: Vec<Change> = Vec::new();
+    // 1. exact
+    for (ai, a) in added.iter().enumerate() {
+        if let Some(di) = deleted.iter().enumerate().position(|(di, d)| {
+            !used_del[di] && d.old.as_ref().map(|s| s.id) == a.new.as_ref().map(|s| s.id)
+        }) {
+            used_del[di] = true;
+            used_add[ai] = true;
+            renames.push(Change {
+                path: a.path.clone(),
+                kind: ChangeKind::Renamed,
+                old: deleted[di].old.clone(),
+                new: a.new.clone(),
+                from: Some(deleted[di].path.clone()),
+                similarity: Some(100),
+            });
+        }
+    }
+    // 2. similar content
+    let mut pairs = 0usize;
+    let lines_of = |side: &Option<Side>| -> Option<std::collections::HashSet<String>> {
+        let s = side.as_ref()?;
+        if s.size > 2 * 1024 * 1024 {
+            return None;
+        }
+        let bytes = store.read_blob(&s.id).ok()?;
+        if is_binary(&bytes) {
+            return None;
+        }
+        Some(
+            String::from_utf8_lossy(&bytes)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect(),
+        )
+    };
+    let del_lines: Vec<Option<std::collections::HashSet<String>>> = deleted
+        .iter()
+        .enumerate()
+        .map(|(i, d)| if used_del[i] { None } else { lines_of(&d.old) })
+        .collect();
+    for (ai, a) in added.iter().enumerate() {
+        if used_add[ai] {
+            continue;
+        }
+        let Some(al) = lines_of(&a.new) else { continue };
+        let mut best: Option<(usize, u8)> = None;
+        for (di, dl) in del_lines.iter().enumerate() {
+            if used_del[di] {
+                continue;
+            }
+            let Some(dl) = dl else { continue };
+            pairs += 1;
+            if pairs > 1000 {
+                break;
+            }
+            let inter = al.intersection(dl).count();
+            let union = al.union(dl).count().max(1);
+            let sim = (inter * 100 / union) as u8;
+            if sim >= min_similarity && best.is_none_or(|(_, b)| sim > b) {
+                best = Some((di, sim));
+            }
+        }
+        if let Some((di, sim)) = best {
+            used_del[di] = true;
+            used_add[ai] = true;
+            renames.push(Change {
+                path: a.path.clone(),
+                kind: ChangeKind::Renamed,
+                old: deleted[di].old.clone(),
+                new: a.new.clone(),
+                from: Some(deleted[di].path.clone()),
+                similarity: Some(sim),
+            });
+        }
+    }
+    for (i, d) in deleted.into_iter().enumerate() {
+        if !used_del[i] {
+            rest.push(d);
+        }
+    }
+    for (i, a) in added.into_iter().enumerate() {
+        if !used_add[i] {
+            rest.push(a);
+        }
+    }
+    rest.extend(renames);
+    rest.sort_by(|a, b| a.path.cmp(&b.path));
+    rest
 }
 
 /// Diff two flattened path maps.
@@ -71,6 +199,8 @@ pub fn diff_maps(old: &BTreeMap<String, Side>, new: &BTreeMap<String, Side>) -> 
                     kind: ChangeKind::Deleted,
                     old: Some((*os).clone()),
                     new: None,
+                    from: None,
+                    similarity: None,
                 });
                 oi.next();
             }
@@ -80,6 +210,8 @@ pub fn diff_maps(old: &BTreeMap<String, Side>, new: &BTreeMap<String, Side>) -> 
                     kind: ChangeKind::Added,
                     old: None,
                     new: Some((*ns).clone()),
+                    from: None,
+                    similarity: None,
                 });
                 ni.next();
             }
@@ -90,6 +222,8 @@ pub fn diff_maps(old: &BTreeMap<String, Side>, new: &BTreeMap<String, Side>) -> 
                         kind: ChangeKind::Deleted,
                         old: Some((*os).clone()),
                         new: None,
+                        from: None,
+                        similarity: None,
                     });
                     oi.next();
                 }
@@ -99,6 +233,8 @@ pub fn diff_maps(old: &BTreeMap<String, Side>, new: &BTreeMap<String, Side>) -> 
                         kind: ChangeKind::Added,
                         old: None,
                         new: Some((*ns).clone()),
+                        from: None,
+                        similarity: None,
                     });
                     ni.next();
                 }
@@ -116,6 +252,8 @@ pub fn diff_maps(old: &BTreeMap<String, Side>, new: &BTreeMap<String, Side>) -> 
                             kind,
                             old: Some((*os).clone()),
                             new: Some((*ns).clone()),
+                            from: None,
+                            similarity: None,
                         });
                     }
                     oi.next();
@@ -183,6 +321,8 @@ fn emit_subtree(
                     kind: ChangeKind::Deleted,
                     old: side,
                     new: None,
+                    from: None,
+                    similarity: None,
                 }
             } else {
                 Change {
@@ -190,6 +330,8 @@ fn emit_subtree(
                     kind: ChangeKind::Added,
                     old: None,
                     new: side,
+                    from: None,
+                    similarity: None,
                 }
             });
         }
@@ -237,6 +379,8 @@ fn diff_tree_rec(
                         kind: ChangeKind::Deleted,
                         old: Some(Side::from(e)),
                         new: None,
+                        from: None,
+                        similarity: None,
                     });
                 }
                 i += 1;
@@ -252,6 +396,8 @@ fn diff_tree_rec(
                         kind: ChangeKind::Added,
                         old: None,
                         new: Some(Side::from(e)),
+                        from: None,
+                        similarity: None,
                     });
                 }
                 j += 1;
@@ -272,6 +418,8 @@ fn diff_tree_rec(
                             kind: ChangeKind::Added,
                             old: None,
                             new: Some(Side::from(b)),
+                            from: None,
+                            similarity: None,
                         });
                     }
                     (false, true) => {
@@ -280,6 +428,8 @@ fn diff_tree_rec(
                             kind: ChangeKind::Deleted,
                             old: Some(Side::from(a)),
                             new: None,
+                            from: None,
+                            similarity: None,
                         });
                         emit_subtree(store, &path, &b.id, false, out)?;
                     }
@@ -297,6 +447,8 @@ fn diff_tree_rec(
                                 kind,
                                 old: Some(Side::from(a)),
                                 new: Some(Side::from(b)),
+                                from: None,
+                                similarity: None,
                             });
                         }
                     }

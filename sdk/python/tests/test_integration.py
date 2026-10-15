@@ -54,10 +54,50 @@ def test_roundtrip_against_real_server(server_url):
             assert [n.id for n in ctx.notes] == [note.id]
             assert [l.id for l in ctx.leases] == [lease.id]
             assert "area:core" in ctx.suggested_tags
+            assert "sdk-it" in ctx.agents_active  # holds a lease on the path
+            assert ctx.files == []  # not requested
+            pack = s.context_pack("src/lib.rs", budget=1000)
+            assert pack.files == [] and pack.notes[0].id == note.id  # empty repository: nothing to pack
+
+            # knowledge v2: ranked search, drafts, accept, validate, stale
+            hits = client.notes(name, q="integration")
+            assert [h.id for h in hits] == [note.id] and hits[0].score is not None and hits[0].score > 0
+            assert hits[0].draft is False and hits[0].stale is False
+            assert client.notes(name, pull=1) == []
+            draft = client.create_note(name, "draft from sdk", "body", draft=True, pulls=[1], paths=["src/**"])
+            assert draft.draft is True
+            assert draft.id not in [n.id for n in client.notes(name, path="src/x.rs")]
+            assert [n.id for n in client.notes(name, drafts=True, pull=1)] == [draft.id]
+            assert client.knowledge_tags(name)[0].count == 1  # drafts do not count
+            accepted = s.accept_note(draft, title="accepted from sdk")
+            assert accepted.draft is False and accepted.title == "accepted from sdk"
+            assert accepted.id in [n.id for n in client.notes(name, pull=1)]
+            assert s.stale_notes() == []  # no commits yet, nothing can be stale
+            assert client.delete_note(name, accepted.id) == {"deleted": accepted.id}
+
+            # signing keys
+            pk = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"  # RFC 8032 test key
+            assert client.keys(name) == []
+            key = client.register_key(name, "sdk-it", pk)
+            assert key.agent == "sdk-it" and key.public_key == pk and key.added_by == "sdk-it" and key.key_id
+            assert client.register_key(name, "sdk-it", pk).key_id == key.key_id
+            with pytest.raises(AlreadyExists):
+                client.register_key(name, "sdk-other", pk)
+            with pytest.raises(AgitError) as ei:
+                client.register_key(name, "sdk-it", "zz")
+            assert ei.value.code == "invalid"
+            assert [k.key_id for k in client.keys(name)] == [key.key_id]
+            pol = client.policy(name)
+            assert pol.require_signed is False
+            pol.require_signed = True
+            assert client.set_policy(name, pol).require_signed is True
+            assert client.delete_key(name, key.key_id) == {"deleted": key.key_id}
+            with pytest.raises(NotFound):
+                client.delete_key(name, key.key_id)
 
             events = client.events(name, since=0)
             kinds = {e.kind for e in events}
-            assert {"lease.claim", "note.create"} <= kinds
+            assert {"lease.claim", "note.create", "note.accept", "key.add", "key.remove"} <= kinds
             last_seq = events[-1].seq
 
             gen = client.stream_events(name, since=last_seq - 1, timeout=10)
