@@ -38,6 +38,42 @@ Local core (`agit`, `crates/agit-core`, `crates/agit-cli`):
 - Append-only event log `events.jsonl` with sequence numbers and
   `agit events --follow`.
 - Submodules via `.agitmodules`.
+Added later on 2026-10-15 (still unreleased):
+
+- Reflog for every ref and HEAD move, `agit reflog`, `agit reset
+  [--soft|--mixed|--hard]`, `agit gc` with grace period, checkpoint and
+  reflog expiry.
+- Ed25519 commit signatures (`agit key`, `commit --sign`, `verify`), a
+  per-repository key registry and the policy `require_signed`.
+- Pack segments (`AGP1` segments with `AGX1` indexes) with publish-on-flush;
+  index format `AGI2` with a tree cache; `refs.journal` with group commit.
+- Server: scoped tokens bound to agent identities, authorization per
+  request, audit log, `/auth/*`; signed webhooks; policies; blame endpoint;
+  `commit` events on push; knowledge v2 (BM25 search, staleness and
+  validation, drafts from merged pull requests, context packs, linking).
+- Local knowledge store in `.agit/knowledge` with offline context and
+  `agit know sync`.
+- `stash`, `revert`, `cherry-pick`, `blame`, `grep`, `log --graph`, rename
+  detection, `push --tags`, `HEAD@{n}` revisions, `agit root`.
+- Submodules: `agit submodule add|update|status|remove`, local-path remotes.
+- Git bridge: `agit git import` and `agit git export` (round trip verified
+  on agit's own history).
+- MCP server `agit mcp` with 33 tools; Claude Code hooks and installer in
+  `integrations/claude-code`.
+- Python SDK (`agit-sdk`) and TypeScript SDK (`@agit/sdk`).
+- Web UI: code browsing, commits, pull requests, agents, leases, knowledge,
+  settings (policy, webhooks, rules, keys), blame, search, compare,
+  notifications.
+- Handbook under `docs/handbook` (20 chapters, German overview) published
+  as an mdBook site; load test `examples/load.rs`; benchmarks.
+
+### Changed
+
+- Loose objects (`AGO1`) are still read but new objects go into segments.
+- Index files are written as `AGI2`; `AGI1` indexes are still loaded.
+- `GET /health` is public; every other route needs a token when a root
+  token is configured.
+
 - `agit mcp`: a Model Context Protocol server exposing the CLI to agents.
 
 Server (`agit-server`, `crates/agit-server`, `crates/agit-protocol`):
