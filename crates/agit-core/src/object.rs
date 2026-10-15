@@ -469,3 +469,130 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod format_fuzz {
+    use super::*;
+
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 11
+        }
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n.max(1)
+        }
+    }
+
+    fn random_tree(rng: &mut Lcg) -> Tree {
+        let n = rng.below(40) as usize;
+        let mut entries = Vec::new();
+        for i in 0..n {
+            let len = 1 + rng.below(30) as usize;
+            let name: String = (0..len)
+                .map(|_| char::from(b'a' + rng.below(26) as u8))
+                .collect();
+            let mut id = [0u8; 32];
+            for b in id.iter_mut() {
+                *b = rng.below(256) as u8;
+            }
+            let mode = match rng.below(5) {
+                0 => EntryMode::Dir,
+                1 => EntryMode::Executable,
+                2 => EntryMode::Symlink,
+                3 => EntryMode::Submodule,
+                _ => EntryMode::File,
+            };
+            entries.push(TreeEntry {
+                name: format!("{name}{i}"),
+                mode,
+                id: ObjectId::from_bytes(id),
+                size: rng.next(),
+            });
+        }
+        Tree::from_entries(entries)
+    }
+
+    #[test]
+    fn tree_roundtrip_random() {
+        let mut rng = Lcg(42);
+        for _ in 0..200 {
+            let t = random_tree(&mut rng);
+            let bytes = t.encode();
+            let back = Tree::decode(ObjectId::ZERO, &bytes).unwrap();
+            assert_eq!(t, back);
+            assert_eq!(back.encode(), bytes);
+        }
+    }
+
+    #[test]
+    fn tree_decode_never_panics_on_garbage() {
+        let mut rng = Lcg(7);
+        for _ in 0..300 {
+            let t = random_tree(&mut rng);
+            let mut bytes = t.encode();
+            match rng.below(3) {
+                0 => {
+                    let cut = rng.below(bytes.len() as u64 + 1) as usize;
+                    bytes.truncate(cut);
+                }
+                1 => {
+                    if !bytes.is_empty() {
+                        let i = rng.below(bytes.len() as u64) as usize;
+                        bytes[i] ^= 1 << rng.below(8);
+                    }
+                }
+                _ => {
+                    bytes.extend_from_slice(b"junk");
+                }
+            }
+            // Either decodes to something consistent or errors; never panics.
+            if let Ok(d) = Tree::decode(ObjectId::ZERO, &bytes) {
+                let _ = d.encode();
+            }
+        }
+    }
+
+    #[test]
+    fn commit_roundtrip_random_unicode() {
+        let mut rng = Lcg(99);
+        for _ in 0..100 {
+            let len = rng.below(200) as usize;
+            let msg: String = (0..len)
+                .map(|_| char::from_u32(0x20 + rng.below(0x2000) as u32).unwrap_or('x'))
+                .collect();
+            let c = Commit {
+                tree: ObjectId::ZERO,
+                parents: (0..rng.below(4))
+                    .map(|i| ObjectId::from_bytes([i as u8; 32]))
+                    .collect(),
+                author: Signature {
+                    name: msg.chars().take(10).collect(),
+                    email: "e@x".into(),
+                },
+                time_ms: rng.next() as i64,
+                message: msg.clone(),
+                intent: if rng.below(2) == 0 {
+                    Some(msg.chars().rev().collect())
+                } else {
+                    None
+                },
+                task: None,
+                agent: None,
+                checkpoint: rng.below(2) == 0,
+                meta: [("k".to_string(), serde_json::json!({ "s": msg }))]
+                    .into_iter()
+                    .collect(),
+                signature: None,
+            };
+            let bytes = c.encode();
+            let back = Commit::decode(ObjectId::ZERO, &bytes).unwrap();
+            assert_eq!(c, back);
+            assert_eq!(back.encode(), bytes);
+        }
+    }
+}

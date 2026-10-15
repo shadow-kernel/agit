@@ -621,3 +621,116 @@ fn blame_revert_cherry_pick_stash_grep() {
     assert_eq!(changes[0].from.as_deref(), Some("f.txt"));
     assert_eq!(changes[0].similarity, Some(100));
 }
+
+#[test]
+fn concurrent_workspaces_and_leases_stress() {
+    use std::sync::{Arc, Barrier};
+    let (_d, repo) = fresh();
+    let root = repo.work_dir().to_path_buf();
+    write(&root, "README.md", "base\n");
+    commit_all(&repo, "base", None);
+
+    const AGENTS: usize = 8;
+    const COMMITS: usize = 15;
+    let mut paths = Vec::new();
+    for i in 0..AGENTS {
+        let (_, meta) = repo
+            .create_workspace(&format!("w{i}"), None, None, Some(&format!("agent-{i}")))
+            .unwrap();
+        paths.push(meta.path);
+    }
+    let barrier = Arc::new(Barrier::new(AGENTS));
+    let handles: Vec<_> = (0..AGENTS)
+        .map(|i| {
+            let path = paths[i].clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                let ws = Repository::discover(&path).unwrap();
+                barrier.wait();
+                let mut lease_wins = 0;
+                for j in 0..COMMITS {
+                    write(
+                        ws.work_dir(),
+                        &format!("agent{i}/file{j}.txt"),
+                        &format!("{i}-{j}\n"),
+                    );
+                    worktree::add(&ws, &[], false).unwrap();
+                    ops::commit(
+                        &ws,
+                        CommitOptions {
+                            message: format!("agent {i} commit {j}"),
+                            agent: Some(AgentInfo {
+                                id: format!("agent-{i}"),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                    // Everyone fights for the same path; exactly one holder at a time.
+                    if let Ok(l) = ws.leases().claim(agit_core::lease::LeaseRequest {
+                        holder: format!("agent-{i}"),
+                        paths: vec!["shared/hot.rs".into()],
+                        mode: agit_core::lease::LeaseMode::Exclusive,
+                        ttl: Some(std::time::Duration::from_secs(60)),
+                        note: None,
+                        workspace: None,
+                    }) {
+                        lease_wins += 1;
+                        let holders: Vec<String> = ws
+                            .leases()
+                            .list()
+                            .unwrap()
+                            .into_iter()
+                            .filter(|x| x.paths[0] == "shared/hot.rs")
+                            .map(|x| x.holder)
+                            .collect();
+                        assert_eq!(
+                            holders.len(),
+                            1,
+                            "two exclusive holders at once: {holders:?}"
+                        );
+                        ws.leases().release(&l.id).unwrap();
+                    }
+                }
+                (ws.head_commit().unwrap().unwrap(), lease_wins)
+            })
+        })
+        .collect();
+    let results: Vec<(ObjectId, usize)> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+    assert!(results.iter().map(|(_, w)| *w).sum::<usize>() > 0);
+
+    // Integrate everything into main; every file must be there and the store intact.
+    for i in 0..AGENTS {
+        let r = ops::merge(&repo, &format!("ws/w{i}"), MergeOptions::default()).unwrap();
+        assert!(!matches!(r, MergeResult::Conflicts { .. }));
+    }
+    for i in 0..AGENTS {
+        for j in 0..COMMITS {
+            assert_eq!(
+                fs::read_to_string(root.join(format!("agent{i}/file{j}.txt"))).unwrap(),
+                format!("{i}-{j}\n")
+            );
+        }
+    }
+    let f = ops::fsck(&repo).unwrap();
+    assert!(f.corrupt.is_empty() && f.missing.is_empty(), "{f:?}");
+    let log = ops::log(
+        &repo,
+        &[repo.head_commit().unwrap().unwrap()],
+        &LogOptions::default(),
+    )
+    .unwrap();
+    assert!(log.len() > AGENTS * COMMITS);
+    // Reflog recorded every branch move; gc keeps everything reachable.
+    let r = ops::gc(
+        &repo,
+        &ops::GcOptions {
+            grace_secs: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(r.objects_removed, 0);
+    assert!(ops::fsck(&repo).unwrap().missing.is_empty());
+}

@@ -174,7 +174,13 @@ impl LeaseStore {
         for entry in rd.flatten() {
             let p = entry.path();
             if p.extension().is_some_and(|e| e == "json") {
-                let bytes = fs::read(&p).map_err(io_at(&p))?;
+                // A concurrent release may delete the file between listing
+                // and reading; that lease is simply gone.
+                let bytes = match fs::read(&p) {
+                    Ok(b) => b,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(Error::IoAt { path: p, source: e }),
+                };
                 if let Ok(l) = serde_json::from_slice::<Lease>(&bytes) {
                     out.push(l);
                 }

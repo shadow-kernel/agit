@@ -927,3 +927,63 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod segment_fuzz {
+    use super::*;
+
+    #[test]
+    fn random_blobs_roundtrip_across_handles_and_repack() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = ObjectStore::init(dir.path().join("objects")).unwrap();
+        let mut state = 12345u64;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            state >> 11
+        };
+        let mut blobs: Vec<(ObjectId, Vec<u8>)> = Vec::new();
+        for i in 0..1500 {
+            let len = match i % 7 {
+                0 => 0,
+                1 => 1,
+                2 => next() as usize % 64,
+                3 => next() as usize % 4096,
+                4 => 70_000 + next() as usize % 1000,
+                _ => next() as usize % 300,
+            };
+            let data: Vec<u8> = (0..len).map(|_| (next() & 0xff) as u8).collect();
+            let id = a.write(ObjectKind::Blob, &data).unwrap();
+            blobs.push((id, data));
+        }
+        a.flush().unwrap();
+        // Segments rolled (1500 > 1024) and everything reads back from a fresh handle.
+        std::thread::sleep(RESCAN_INTERVAL);
+        let b = ObjectStore::open(dir.path().join("objects"));
+        for (id, data) in &blobs {
+            assert_eq!(&b.read_blob(id).unwrap(), data);
+        }
+        assert_eq!(
+            b.iter_ids().unwrap().len(),
+            blobs
+                .iter()
+                .map(|(i, _)| *i)
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        );
+        // Repack keeping half; the kept half still reads, the rest is gone.
+        let live: std::collections::HashSet<ObjectId> =
+            blobs.iter().step_by(2).map(|(i, _)| *i).collect();
+        let (dropped, segs) = b.repack(&live).unwrap();
+        assert!(segs >= 1);
+        assert!(dropped > 0);
+        for (k, (id, data)) in blobs.iter().enumerate() {
+            if k % 2 == 0 {
+                assert_eq!(&b.read_blob(id).unwrap(), data);
+            } else if !live.contains(id) {
+                assert!(!b.contains(id));
+            }
+        }
+    }
+}
