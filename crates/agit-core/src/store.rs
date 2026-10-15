@@ -83,7 +83,12 @@ impl ObjectStore {
                 // Lost a race with a concurrent writer of the same object.
                 drop(e);
             }
-            Err(e) => return Err(Error::IoAt { path, source: e.error }),
+            Err(e) => {
+                return Err(Error::IoAt {
+                    path,
+                    source: e.error,
+                })
+            }
         }
         Ok(id)
     }
@@ -225,12 +230,18 @@ impl ObjectStore {
     /// All object ids in the store (slow; for fsck/gc/debugging).
     pub fn iter_ids(&self) -> Result<Vec<ObjectId>> {
         let mut out = Vec::new();
-        for shard in fs::read_dir(&self.root).map_err(io_at(&self.root))?.flatten() {
+        for shard in fs::read_dir(&self.root)
+            .map_err(io_at(&self.root))?
+            .flatten()
+        {
             let shard_name = shard.file_name().to_string_lossy().to_string();
             if shard_name.len() != 2 {
                 continue;
             }
-            for obj in fs::read_dir(shard.path()).map_err(io_at(shard.path()))?.flatten() {
+            for obj in fs::read_dir(shard.path())
+                .map_err(io_at(shard.path()))?
+                .flatten()
+            {
                 let name = obj.file_name().to_string_lossy().to_string();
                 if name.len() == 62 {
                     if let Ok(id) = format!("{shard_name}{name}").parse() {
@@ -266,7 +277,10 @@ mod tests {
         let id = store.write(ObjectKind::Blob, b"hello world").unwrap();
         let other = store.write(ObjectKind::Blob, b"evil").unwrap();
         fs::copy(store.path_for(&other), store.path_for(&id)).unwrap();
-        assert!(matches!(store.read_blob(&id), Err(Error::HashMismatch { .. })));
+        assert!(matches!(
+            store.read_blob(&id),
+            Err(Error::HashMismatch { .. })
+        ));
     }
 
     #[test]

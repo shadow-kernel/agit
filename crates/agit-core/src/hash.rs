@@ -109,7 +109,10 @@ mod serde_bytes_compat {
             fn visit_byte_buf<E>(self, v: Vec<u8>) -> Result<Vec<u8>, E> {
                 Ok(v)
             }
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<u8>, A::Error> {
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Vec<u8>, A::Error> {
                 let mut out = Vec::with_capacity(seq.size_hint().unwrap_or(32));
                 while let Some(b) = seq.next_element::<u8>()? {
                     out.push(b);

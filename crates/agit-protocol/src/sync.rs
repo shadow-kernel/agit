@@ -62,7 +62,12 @@ pub fn add_remote(repo: &Repository, name: &str, url: &str) -> Result<()> {
     if cfg.remotes.contains_key(name) {
         return Err(Error::AlreadyExists(name.into()));
     }
-    cfg.remotes.insert(name.to_string(), RemoteConfig { url: url.to_string() });
+    cfg.remotes.insert(
+        name.to_string(),
+        RemoteConfig {
+            url: url.to_string(),
+        },
+    );
     repo.save_config(&cfg)
 }
 
@@ -84,14 +89,25 @@ pub fn client_for(repo: &Repository, name: &str) -> Result<(Client, String)> {
 }
 
 fn local_tips(repo: &Repository) -> Result<Vec<ObjectId>> {
-    let mut v: Vec<ObjectId> = repo.refs().list("refs/")?.into_iter().map(|(_, id)| id).collect();
+    let mut v: Vec<ObjectId> = repo
+        .refs()
+        .list("refs/")?
+        .into_iter()
+        .map(|(_, id)| id)
+        .collect();
     v.sort();
     v.dedup();
     Ok(v)
 }
 
 /// Upload every object reachable from `tip` that the server does not have.
-fn upload_missing(repo: &Repository, client: &Client, remote_repo: &str, tip: ObjectId, haves: &[ObjectId]) -> Result<usize> {
+fn upload_missing(
+    repo: &Repository,
+    client: &Client,
+    remote_repo: &str,
+    tip: ObjectId,
+    haves: &[ObjectId],
+) -> Result<usize> {
     let store = repo.store();
     let ids = walk::objects_to_send(store, &[tip], haves)?;
     let mut missing: Vec<ObjectId> = Vec::new();
@@ -100,7 +116,10 @@ fn upload_missing(repo: &Repository, client: &Client, remote_repo: &str, tip: Ob
     }
     let missing_set: HashSet<ObjectId> = missing.iter().copied().collect();
     // Keep original order (trees/blobs before commits).
-    let ordered: Vec<ObjectId> = ids.into_iter().filter(|i| missing_set.contains(i)).collect();
+    let ordered: Vec<ObjectId> = ids
+        .into_iter()
+        .filter(|i| missing_set.contains(i))
+        .collect();
     let mut buf = Vec::new();
     let mut sent = 0;
     for id in &ordered {
@@ -118,7 +137,13 @@ fn upload_missing(repo: &Repository, client: &Client, remote_repo: &str, tip: Ob
     Ok(sent)
 }
 
-pub fn push(repo: &Repository, remote_name: &str, branch: &str, force: bool, create_repo: bool) -> Result<PushResult> {
+pub fn push(
+    repo: &Repository,
+    remote_name: &str,
+    branch: &str,
+    force: bool,
+    create_repo: bool,
+) -> Result<PushResult> {
     let (client, remote_repo) = client_for(repo, remote_name)?;
     let local_ref = format!("{HEADS_PREFIX}{branch}");
     let local = repo
@@ -130,11 +155,21 @@ pub fn push(repo: &Repository, remote_name: &str, branch: &str, force: bool, cre
         client.create_repo(&remote_repo, Some(branch))?;
     }
     let remote_refs = client.refs(&remote_repo, HEADS_PREFIX)?;
-    let remote_old = remote_refs.iter().find(|r| r.name == local_ref).map(|r| r.id);
+    let remote_old = remote_refs
+        .iter()
+        .find(|r| r.name == local_ref)
+        .map(|r| r.id);
     let tracking = format!("{REMOTES_PREFIX}{remote_name}/{branch}");
     if remote_old == Some(local) {
         repo.refs().update(&tracking, Expect::Any, Some(local))?;
-        return Ok(PushResult { remote: remote_name.into(), branch: branch.into(), old: remote_old, new: local, objects_sent: 0, up_to_date: true });
+        return Ok(PushResult {
+            remote: remote_name.into(),
+            branch: branch.into(),
+            old: remote_old,
+            new: local,
+            objects_sent: 0,
+            up_to_date: true,
+        });
     }
     if let Some(old) = remote_old {
         if !force {
@@ -149,14 +184,22 @@ pub fn push(repo: &Repository, remote_name: &str, branch: &str, force: bool, cre
         }
     }
     // Objects the server definitely has: its branch tips that we also have.
-    let haves: Vec<ObjectId> = remote_refs.iter().map(|r| r.id).filter(|id| repo.store().contains(id)).collect();
+    let haves: Vec<ObjectId> = remote_refs
+        .iter()
+        .map(|r| r.id)
+        .filter(|id| repo.store().contains(id))
+        .collect();
     let objects_sent = upload_missing(repo, &client, &remote_repo, local, &haves)?;
     client.update_refs(
         &remote_repo,
         &RefUpdateRequest {
             updates: vec![RefUpdate {
                 name: local_ref.clone(),
-                expect: if force { ExpectSpec::Any(true) } else { ExpectSpec::from_old(remote_old) },
+                expect: if force {
+                    ExpectSpec::Any(true)
+                } else {
+                    ExpectSpec::from_old(remote_old)
+                },
                 new: Some(local),
             }],
             message: None,
@@ -169,12 +212,23 @@ pub fn push(repo: &Repository, remote_name: &str, branch: &str, force: bool, cre
         std::env::var("AGIT_AGENT").ok().as_deref(),
         serde_json::json!({ "remote": remote_name, "branch": branch, "old": remote_old, "new": local, "objects": objects_sent }),
     )?;
-    Ok(PushResult { remote: remote_name.into(), branch: branch.into(), old: remote_old, new: local, objects_sent, up_to_date: false })
+    Ok(PushResult {
+        remote: remote_name.into(),
+        branch: branch.into(),
+        old: remote_old,
+        new: local,
+        objects_sent,
+        up_to_date: false,
+    })
 }
 
 /// Fetch branches (all when `branches` is None) and tags into
 /// `refs/remotes/<remote>/*` and `refs/tags/*`.
-pub fn fetch(repo: &Repository, remote_name: &str, branches: Option<&[String]>) -> Result<FetchResult> {
+pub fn fetch(
+    repo: &Repository,
+    remote_name: &str,
+    branches: Option<&[String]>,
+) -> Result<FetchResult> {
     let (client, remote_repo) = client_for(repo, remote_name)?;
     let heads = client.refs(&remote_repo, HEADS_PREFIX)?;
     let tags = client.refs(&remote_repo, TAGS_PREFIX)?;
@@ -189,7 +243,11 @@ pub fn fetch(repo: &Repository, remote_name: &str, branches: Option<&[String]>) 
         targets.push((r.name.clone(), r.id));
     }
     let wants: Vec<ObjectId> = {
-        let mut w: Vec<ObjectId> = targets.iter().map(|(_, id)| *id).filter(|id| !repo.store().contains(id)).collect();
+        let mut w: Vec<ObjectId> = targets
+            .iter()
+            .map(|(_, id)| *id)
+            .filter(|id| !repo.store().contains(id))
+            .collect();
         w.sort();
         w.dedup();
         w
@@ -224,15 +282,23 @@ pub fn fetch(repo: &Repository, remote_name: &str, branches: Option<&[String]>) 
         std::env::var("AGIT_AGENT").ok().as_deref(),
         serde_json::json!({ "remote": remote_name, "refs": out.len(), "objects": received }),
     )?;
-    Ok(FetchResult { remote: remote_name.into(), refs: out, objects_received: received })
+    Ok(FetchResult {
+        remote: remote_name.into(),
+        refs: out,
+        objects_received: received,
+    })
 }
 
 /// Fetch the current branch and merge its remote-tracking ref.
-pub fn pull(repo: &Repository, remote_name: &str, opts: agit_core::ops::MergeOptions) -> Result<(FetchResult, agit_core::ops::MergeResult)> {
+pub fn pull(
+    repo: &Repository,
+    remote_name: &str,
+    opts: agit_core::ops::MergeOptions,
+) -> Result<(FetchResult, agit_core::ops::MergeResult)> {
     let branch = repo
         .current_branch()?
         .ok_or_else(|| Error::Invalid("not on a branch; switch to a branch to pull".into()))?;
-    let f = fetch(repo, remote_name, Some(&[branch.clone()]))?;
+    let f = fetch(repo, remote_name, Some(std::slice::from_ref(&branch)))?;
     let tracking = format!("{REMOTES_PREFIX}{remote_name}/{branch}");
     if repo.refs().read(&tracking)?.is_none() {
         return Err(Error::RefNotFound(tracking));
@@ -247,7 +313,12 @@ pub fn clone_local(src_dir: &Path, dir: &Path) -> Result<(Repository, FetchResul
     let src = Repository::discover(src_dir)?;
     let repo = Repository::init(dir)?;
     let mut cfg = repo.config()?;
-    cfg.remotes.insert("origin".into(), RemoteConfig { url: src.work_dir().display().to_string() });
+    cfg.remotes.insert(
+        "origin".into(),
+        RemoteConfig {
+            url: src.work_dir().display().to_string(),
+        },
+    );
     repo.save_config(&cfg)?;
     let heads = src.refs().list(HEADS_PREFIX)?;
     let wants: Vec<ObjectId> = heads.iter().map(|(_, id)| *id).collect();
@@ -259,16 +330,28 @@ pub fn clone_local(src_dir: &Path, dir: &Path) -> Result<(Repository, FetchResul
         let short = &name[HEADS_PREFIX.len()..];
         let tracking = format!("{REMOTES_PREFIX}origin/{short}");
         repo.refs().update(&tracking, Expect::Any, Some(*id))?;
-        refs.push(FetchedRef { name: tracking, old: None, new: *id });
+        refs.push(FetchedRef {
+            name: tracking,
+            old: None,
+            new: *id,
+        });
     }
     let branch = src.current_branch()?.unwrap_or_else(|| "main".into());
     repo.set_head(&agit_core::Head::Branch(branch.clone()))?;
     if let Some(id) = src.refs().read(&format!("{HEADS_PREFIX}{branch}"))? {
-        repo.refs().update(&format!("{HEADS_PREFIX}{branch}"), Expect::Absent, Some(id))?;
+        repo.refs()
+            .update(&format!("{HEADS_PREFIX}{branch}"), Expect::Absent, Some(id))?;
         let tree = repo.store().read_commit(&id)?.tree;
         agit_core::worktree::checkout_tree(&repo, None, &tree, true)?;
     }
-    Ok((repo, FetchResult { remote: "origin".into(), refs, objects_received: stored }))
+    Ok((
+        repo,
+        FetchResult {
+            remote: "origin".into(),
+            refs,
+            objects_received: stored,
+        },
+    ))
 }
 
 /// Is `url` a local directory rather than a server URL?

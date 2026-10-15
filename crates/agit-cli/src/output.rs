@@ -65,7 +65,9 @@ pub fn fmt_time(ms: i64) -> String {
 pub fn parse_duration(s: &str) -> anyhow::Result<std::time::Duration> {
     let s = s.trim();
     let (num, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
-    let n: u64 = num.parse().map_err(|_| anyhow::anyhow!("invalid duration {s:?}"))?;
+    let n: u64 = num
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid duration {s:?}"))?;
     let mult = match unit.trim() {
         "" | "s" | "sec" => 1,
         "m" | "min" => 60,

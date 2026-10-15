@@ -317,6 +317,7 @@ impl Commit {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum Object {
     Blob(Vec<u8>),
     Tree(Tree),

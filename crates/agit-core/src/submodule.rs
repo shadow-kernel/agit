@@ -45,7 +45,8 @@ pub fn read_modules(repo: &Repository) -> Result<Vec<Submodule>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
         Err(e) => return Err(Error::IoAt { path: p, source: e }),
     };
-    let f: ModulesFile = toml::from_str(&text).map_err(|e| Error::Invalid(format!("bad {MODULES_FILE}: {e}")))?;
+    let f: ModulesFile =
+        toml::from_str(&text).map_err(|e| Error::Invalid(format!("bad {MODULES_FILE}: {e}")))?;
     let mut v: Vec<Submodule> = f.submodule.into_values().collect();
     v.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(v)
@@ -53,7 +54,10 @@ pub fn read_modules(repo: &Repository) -> Result<Vec<Submodule>> {
 
 pub fn write_modules(repo: &Repository, modules: &[Submodule]) -> Result<()> {
     let f = ModulesFile {
-        submodule: modules.iter().map(|m| (m.path.clone(), m.clone())).collect(),
+        submodule: modules
+            .iter()
+            .map(|m| (m.path.clone(), m.clone()))
+            .collect(),
     };
     let text = toml::to_string_pretty(&f).map_err(|e| Error::Invalid(e.to_string()))?;
     let p = repo.work_dir().join(MODULES_FILE);
@@ -98,7 +102,10 @@ pub fn status(repo: &Repository) -> Result<Vec<SubmoduleStatus>> {
     let index = repo.load_index()?;
     let mut out = Vec::new();
     for m in read_modules(repo)? {
-        let pinned = index.get(&m.path).filter(|e| e.mode.is_submodule()).map(|e| e.id);
+        let pinned = index
+            .get(&m.path)
+            .filter(|e| e.mode.is_submodule())
+            .map(|e| e.id);
         let actual = nested_head(repo, &m.path)?;
         let state = match (pinned, actual) {
             (_, None) => "missing",
@@ -106,7 +113,13 @@ pub fn status(repo: &Repository) -> Result<Vec<SubmoduleStatus>> {
             (Some(p), Some(a)) if p == a => "ok",
             _ => "modified",
         };
-        out.push(SubmoduleStatus { path: m.path, url: m.url, pinned, actual, state: state.into() });
+        out.push(SubmoduleStatus {
+            path: m.path,
+            url: m.url,
+            pinned,
+            actual,
+            state: state.into(),
+        });
     }
     Ok(out)
 }

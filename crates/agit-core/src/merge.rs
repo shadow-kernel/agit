@@ -150,16 +150,27 @@ fn resolve(
         (Some(o), None) => Ok(conflict(ConflictKind::DeleteModify, Some(o))),
         (None, Some(t)) => Ok(conflict(ConflictKind::DeleteModify, Some(t))),
         (Some(o), Some(t)) => {
-            if o.mode != t.mode && base.map(|b| b.mode) != Some(o.mode) && base.map(|b| b.mode) != Some(t.mode) {
+            if o.mode != t.mode
+                && base.map(|b| b.mode) != Some(o.mode)
+                && base.map(|b| b.mode) != Some(t.mode)
+            {
                 return Ok(conflict(ConflictKind::Mode, Some(o)));
             }
             if o.mode == EntryMode::Symlink || t.mode == EntryMode::Symlink {
                 return Ok(conflict(ConflictKind::Content, Some(o)));
             }
             // Mode: prefer whichever side changed it.
-            let mode = if base.map(|b| b.mode) == Some(o.mode) { t.mode } else { o.mode };
+            let mode = if base.map(|b| b.mode) == Some(o.mode) {
+                t.mode
+            } else {
+                o.mode
+            };
             if o.id == t.id {
-                return Ok(Resolution::Keep(Some(Side { id: o.id, mode, size: o.size })));
+                return Ok(Resolution::Keep(Some(Side {
+                    id: o.id,
+                    mode,
+                    size: o.size,
+                })));
             }
             let ob = store.read_blob(&o.id)?;
             let tb = store.read_blob(&t.id)?;
@@ -178,15 +189,30 @@ fn resolve(
             match opts.merge(&bs, &os, &ts) {
                 Ok(merged) => {
                     let id = store.write(ObjectKind::Blob, merged.as_bytes())?;
-                    Ok(Resolution::Merged(Side { id, mode, size: merged.len() as u64 }))
+                    Ok(Resolution::Merged(Side {
+                        id,
+                        mode,
+                        size: merged.len() as u64,
+                    }))
                 }
                 Err(with_markers) => {
                     let text = with_markers
                         .replace("<<<<<<< ours", &format!("<<<<<<< {}", labels.ours))
                         .replace(">>>>>>> theirs", &format!(">>>>>>> {}", labels.theirs));
                     let id = store.write(ObjectKind::Blob, text.as_bytes())?;
-                    let kind = if base.is_none() { ConflictKind::AddAdd } else { ConflictKind::Content };
-                    Ok(conflict(kind, Some(&Side { id, mode, size: text.len() as u64 })))
+                    let kind = if base.is_none() {
+                        ConflictKind::AddAdd
+                    } else {
+                        ConflictKind::Content
+                    };
+                    Ok(conflict(
+                        kind,
+                        Some(&Side {
+                            id,
+                            mode,
+                            size: text.len() as u64,
+                        }),
+                    ))
                 }
             }
         }
@@ -241,7 +267,7 @@ pub fn merge_base(store: &ObjectStore, a: &ObjectId, b: &ObjectId) -> Result<Opt
         if !candidates.is_empty() && qa.is_empty() && qb.is_empty() {
             break;
         }
-        if candidates.len() >= 1 && (qa.len() + qb.len()) > 64 {
+        if !candidates.is_empty() && (qa.len() + qb.len()) > 64 {
             break;
         }
     }
@@ -289,8 +315,15 @@ pub fn is_ancestor(store: &ObjectStore, anc: &ObjectId, desc: &ObjectId) -> Resu
 
 /// Convenience: all paths touched between two trees, used to pre-check
 /// leases before a merge.
-pub fn changed_paths(store: &ObjectStore, from: Option<&ObjectId>, to: &ObjectId) -> Result<Vec<String>> {
+pub fn changed_paths(
+    store: &ObjectStore,
+    from: Option<&ObjectId>,
+    to: &ObjectId,
+) -> Result<Vec<String>> {
     let a: BTreeMap<String, Side> = tree_to_sides(store, from)?;
     let b = tree_to_sides(store, Some(to))?;
-    Ok(crate::diff::diff_maps(&a, &b).into_iter().map(|c| c.path).collect())
+    Ok(crate::diff::diff_maps(&a, &b)
+        .into_iter()
+        .map(|c| c.path)
+        .collect())
 }

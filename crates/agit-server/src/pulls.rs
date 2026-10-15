@@ -31,7 +31,8 @@ impl<'a> PullStore<'a> {
     }
 
     pub fn load(&self, n: u64) -> Result<PullRequest> {
-        let bytes = fs::read(self.path(n)).map_err(|_| Error::Invalid(format!("pull request #{n} not found")))?;
+        let bytes =
+            fs::read(self.path(n)).map_err(|_| Error::NotFound(format!("pull request #{n}")))?;
         Ok(serde_json::from_slice(&bytes)?)
     }
 
@@ -51,13 +52,17 @@ impl<'a> PullStore<'a> {
                 }
             }
         }
-        out.sort_by(|a, b| b.number.cmp(&a.number));
+        out.sort_by_key(|pr| std::cmp::Reverse(pr.number));
         Ok(out)
     }
 
     fn next_number(&self) -> Result<u64> {
         let counter = self.dir().join("counter");
-        let n: u64 = fs::read_to_string(&counter).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0) + 1;
+        let n: u64 = fs::read_to_string(&counter)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+            + 1;
         write_atomic(&counter, n.to_string().as_bytes())?;
         Ok(n)
     }
@@ -65,12 +70,24 @@ impl<'a> PullStore<'a> {
     pub fn create(&self, req: PullCreate, actor: Actor) -> Result<PullRequest> {
         let _g = self.repo.write_lock.lock().unwrap();
         let source = self.repo.full_ref(&req.source);
-        let target = self.repo.full_ref(req.target.as_deref().unwrap_or(&self.repo.meta.default_branch));
+        let target = self.repo.full_ref(
+            req.target
+                .as_deref()
+                .unwrap_or(&self.repo.meta.default_branch),
+        );
         if source == target {
             return Err(Error::Invalid("source and target are the same ref".into()));
         }
-        let source_id = self.repo.refs.read(&source)?.ok_or_else(|| Error::RefNotFound(source.clone()))?;
-        let target_id = self.repo.refs.read(&target)?.ok_or_else(|| Error::RefNotFound(target.clone()))?;
+        let source_id = self
+            .repo
+            .refs
+            .read(&source)?
+            .ok_or_else(|| Error::RefNotFound(source.clone()))?;
+        let target_id = self
+            .repo
+            .refs
+            .read(&target)?
+            .ok_or_else(|| Error::RefNotFound(target.clone()))?;
         let base_id = merge_base(&self.repo.store, &source_id, &target_id)?;
         let now = now_ms();
         let pr = PullRequest {
@@ -118,11 +135,21 @@ impl<'a> PullStore<'a> {
         // the base (not the target) keeps the list stable after the PR merged.
         let stop = pr.base_id.unwrap_or(pr.target_id);
         let have = agit_protocol::walk::commit_closure(&self.repo.store, &[stop], Some(20_000))?;
-        let entries = log_store(&self.repo.store, &[pr.source_id], &LogOptions { limit: Some(500), ..Default::default() })?;
+        let entries = log_store(
+            &self.repo.store,
+            &[pr.source_id],
+            &LogOptions {
+                limit: Some(500),
+                ..Default::default()
+            },
+        )?;
         Ok(entries
             .into_iter()
             .filter(|e| !have.contains(&e.id))
-            .map(|e| CommitEntry { id: e.id, commit: e.commit })
+            .map(|e| CommitEntry {
+                id: e.id,
+                commit: e.commit,
+            })
             .collect())
     }
 
@@ -144,7 +171,16 @@ impl<'a> PullStore<'a> {
         };
         let ours = store.read_commit(&pr.target_id)?.tree;
         let theirs = store.read_commit(&pr.source_id)?.tree;
-        merge_trees(store, base_tree.as_ref(), &ours, &theirs, &MergeLabels { ours: pr.target.clone(), theirs: pr.source.clone() })
+        merge_trees(
+            store,
+            base_tree.as_ref(),
+            &ours,
+            &theirs,
+            &MergeLabels {
+                ours: pr.target.clone(),
+                theirs: pr.source.clone(),
+            },
+        )
     }
 
     pub fn detail(&self, n: u64) -> Result<PullDetail> {
@@ -162,19 +198,37 @@ impl<'a> PullStore<'a> {
         } else {
             (false, vec![])
         };
-        Ok(PullDetail { pr, commits, changes, mergeable, conflicts })
+        Ok(PullDetail {
+            pr,
+            commits,
+            changes,
+            mergeable,
+            conflicts,
+        })
     }
 
     pub fn update(&self, n: u64, patch: PullUpdate, actor: &str) -> Result<PullRequest> {
         let _g = self.repo.write_lock.lock().unwrap();
         let mut pr = self.load(n)?;
-        if let Some(t) = patch.title { pr.title = t; }
-        if let Some(b) = patch.body { pr.body = b; }
-        if patch.intent.is_some() { pr.intent = patch.intent; }
-        if patch.task.is_some() { pr.task = patch.task; }
+        if let Some(t) = patch.title {
+            pr.title = t;
+        }
+        if let Some(b) = patch.body {
+            pr.body = b;
+        }
+        if patch.intent.is_some() {
+            pr.intent = patch.intent;
+        }
+        if patch.task.is_some() {
+            pr.task = patch.task;
+        }
         pr.updated_ms = now_ms();
         self.save(&pr)?;
-        self.repo.emit("pull.update", Some(actor), serde_json::json!({ "number": n }))?;
+        self.repo.emit(
+            "pull.update",
+            Some(actor),
+            serde_json::json!({ "number": n }),
+        )?;
         Ok(pr)
     }
 
@@ -182,22 +236,43 @@ impl<'a> PullStore<'a> {
         let _g = self.repo.write_lock.lock().unwrap();
         let mut pr = self.load(n)?;
         let id = pr.comments.iter().map(|c| c.id).max().unwrap_or(0) + 1;
-        let c = Comment { id, author: actor.to_string(), path: req.path, line: req.line, kind: req.kind, body: req.body, resolved: false, time_ms: now_ms() };
+        let c = Comment {
+            id,
+            author: actor.to_string(),
+            path: req.path,
+            line: req.line,
+            kind: req.kind,
+            body: req.body,
+            resolved: false,
+            time_ms: now_ms(),
+        };
         pr.comments.push(c.clone());
         pr.updated_ms = now_ms();
         self.save(&pr)?;
-        self.repo.emit("pull.comment", Some(actor), serde_json::json!({ "number": n, "comment": id, "path": c.path, "kind": c.kind }))?;
+        self.repo.emit(
+            "pull.comment",
+            Some(actor),
+            serde_json::json!({ "number": n, "comment": id, "path": c.path, "kind": c.kind }),
+        )?;
         Ok(c)
     }
 
     pub fn resolve_comment(&self, n: u64, id: u64, actor: &str) -> Result<PullRequest> {
         let _g = self.repo.write_lock.lock().unwrap();
         let mut pr = self.load(n)?;
-        let c = pr.comments.iter_mut().find(|c| c.id == id).ok_or_else(|| Error::Invalid(format!("comment {id} not found")))?;
+        let c = pr
+            .comments
+            .iter_mut()
+            .find(|c| c.id == id)
+            .ok_or_else(|| Error::NotFound(format!("comment {id}")))?;
         c.resolved = true;
         pr.updated_ms = now_ms();
         self.save(&pr)?;
-        self.repo.emit("pull.comment.resolve", Some(actor), serde_json::json!({ "number": n, "comment": id }))?;
+        self.repo.emit(
+            "pull.comment.resolve",
+            Some(actor),
+            serde_json::json!({ "number": n, "comment": id }),
+        )?;
         Ok(pr)
     }
 
@@ -207,10 +282,19 @@ impl<'a> PullStore<'a> {
         if pr.state != PullState::Open {
             return Err(Error::Invalid("pull request is not open".into()));
         }
-        pr.reviews.push(Review { reviewer: actor.to_string(), decision: req.decision, body: req.body, time_ms: now_ms() });
+        pr.reviews.push(Review {
+            reviewer: actor.to_string(),
+            decision: req.decision,
+            body: req.body,
+            time_ms: now_ms(),
+        });
         pr.updated_ms = now_ms();
         self.save(&pr)?;
-        self.repo.emit("pull.review", Some(actor), serde_json::json!({ "number": n, "decision": req.decision }))?;
+        self.repo.emit(
+            "pull.review",
+            Some(actor),
+            serde_json::json!({ "number": n, "decision": req.decision }),
+        )?;
         Ok(pr)
     }
 
@@ -218,10 +302,19 @@ impl<'a> PullStore<'a> {
         let _g = self.repo.write_lock.lock().unwrap();
         let mut pr = self.load(n)?;
         pr.checks.retain(|c| c.name != req.name);
-        pr.checks.push(Check { name: req.name.clone(), status: req.status, url: req.url, time_ms: now_ms() });
+        pr.checks.push(Check {
+            name: req.name.clone(),
+            status: req.status,
+            url: req.url,
+            time_ms: now_ms(),
+        });
         pr.updated_ms = now_ms();
         self.save(&pr)?;
-        self.repo.emit("pull.check", Some(actor), serde_json::json!({ "number": n, "name": req.name, "status": req.status }))?;
+        self.repo.emit(
+            "pull.check",
+            Some(actor),
+            serde_json::json!({ "number": n, "name": req.name, "status": req.status }),
+        )?;
         Ok(pr)
     }
 
@@ -234,7 +327,11 @@ impl<'a> PullStore<'a> {
         pr.state = PullState::Closed;
         pr.updated_ms = now_ms();
         self.save(&pr)?;
-        self.repo.emit("pull.close", Some(actor), serde_json::json!({ "number": n }))?;
+        self.repo.emit(
+            "pull.close",
+            Some(actor),
+            serde_json::json!({ "number": n }),
+        )?;
         Ok(pr)
     }
 
@@ -248,13 +345,17 @@ impl<'a> PullStore<'a> {
         crate::policy::PolicyStore::new(self.repo).check_merge(&pr, &actor.id)?;
         let store = &self.repo.store;
         if is_ancestor(store, &pr.source_id, &pr.target_id)? {
-            return Err(Error::Invalid("source is already contained in target; nothing to merge".into()));
+            return Err(Error::Invalid(
+                "source is already contained in target; nothing to merge".into(),
+            ));
         }
         let ff_possible = pr.base_id == Some(pr.target_id);
         let merged_commit = match req.strategy {
             MergeStrategy::Ff => {
                 if !ff_possible {
-                    return Err(Error::Invalid("not fast-forwardable; use strategy=merge".into()));
+                    return Err(Error::Invalid(
+                        "not fast-forwardable; use strategy=merge".into(),
+                    ));
                 }
                 pr.source_id
             }
@@ -268,19 +369,34 @@ impl<'a> PullStore<'a> {
                 let commit = Commit {
                     tree: outcome.tree,
                     parents: vec![pr.target_id, pr.source_id],
-                    author: Signature { name: actor.id.clone(), email: format!("{}@agents", actor.id) },
+                    author: Signature {
+                        name: actor.id.clone(),
+                        email: format!("{}@agents", actor.id),
+                    },
                     time_ms: now_ms(),
-                    message: req.message.clone().unwrap_or_else(|| format!("Merge pull request #{} from {}\n\n{}", pr.number, pr.source, pr.title)),
+                    message: req.message.clone().unwrap_or_else(|| {
+                        format!(
+                            "Merge pull request #{} from {}\n\n{}",
+                            pr.number, pr.source, pr.title
+                        )
+                    }),
                     intent: pr.intent.clone(),
                     task: pr.task.clone(),
-                    agent: Some(AgentInfo { id: actor.id.clone(), model: actor.model.clone(), run_id: None, on_behalf_of: None }),
+                    agent: Some(AgentInfo {
+                        id: actor.id.clone(),
+                        model: actor.model.clone(),
+                        run_id: None,
+                        on_behalf_of: None,
+                    }),
                     checkpoint: false,
                     meta,
                 };
                 store.write_commit(&commit)?
             }
         };
-        self.repo.refs.update(&pr.target, Expect::Is(pr.target_id), Some(merged_commit))?;
+        self.repo
+            .refs
+            .update(&pr.target, Expect::Is(pr.target_id), Some(merged_commit))?;
         pr.state = PullState::Merged;
         pr.merged_commit = Some(merged_commit);
         pr.target_id = merged_commit;
@@ -296,7 +412,10 @@ impl<'a> PullStore<'a> {
         let mut out = Vec::new();
         for mut pr in self.list(Some(PullState::Open))? {
             self.refresh(&mut pr)?;
-            let touches = self.changes(&pr)?.iter().any(|c| c.path == path || c.path.starts_with(&format!("{path}/")));
+            let touches = self
+                .changes(&pr)?
+                .iter()
+                .any(|c| c.path == path || c.path.starts_with(&format!("{path}/")));
             if touches {
                 out.push(pr);
             }

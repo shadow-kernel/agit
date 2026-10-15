@@ -34,10 +34,16 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,tower_http=info".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,tower_http=info".into()),
+        )
         .init();
     let args = Args::parse();
-    let state = Arc::new(state::AppState::open(args.data_dir.clone(), args.token.clone())?);
+    let state = Arc::new(state::AppState::open(
+        args.data_dir.clone(),
+        args.token.clone(),
+    )?);
     let app = api::router(state, args.web_dir.as_deref());
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
     tracing::info!(addr = %args.listen, data_dir = %args.data_dir.display(), auth = args.token.is_some(), web = args.web_dir.as_ref().map(|p| p.display().to_string()), "agit-server listening");

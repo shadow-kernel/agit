@@ -56,7 +56,8 @@ impl StoredWebhook {
                     k == kind
                         || k == "*"
                         || k.strip_suffix('*').is_some_and(|p| kind.starts_with(p))
-                        || k.strip_suffix('.').is_some_and(|p| kind.starts_with(&format!("{p}.")))
+                        || k.strip_suffix('.')
+                            .is_some_and(|p| kind.starts_with(&format!("{p}.")))
                 }))
     }
 }
@@ -148,7 +149,11 @@ impl<'a> WebhookStore<'a> {
         };
         all.push(w.clone());
         self.save(&all)?;
-        self.repo.emit("webhook.create", Some(actor), serde_json::json!({ "id": w.id, "url": w.url, "kinds": w.kinds }))?;
+        self.repo.emit(
+            "webhook.create",
+            Some(actor),
+            serde_json::json!({ "id": w.id, "url": w.url, "kinds": w.kinds }),
+        )?;
         Ok(w.public())
     }
 
@@ -158,10 +163,14 @@ impl<'a> WebhookStore<'a> {
         let before = all.len();
         all.retain(|w| w.id != id);
         if all.len() == before {
-            return Err(Error::Invalid(format!("webhook {id} not found")));
+            return Err(Error::NotFound(format!("webhook {id}")));
         }
         self.save(&all)?;
-        self.repo.emit("webhook.delete", Some(actor), serde_json::json!({ "id": id }))?;
+        self.repo.emit(
+            "webhook.delete",
+            Some(actor),
+            serde_json::json!({ "id": id }),
+        )?;
         Ok(())
     }
 
@@ -171,47 +180,78 @@ impl<'a> WebhookStore<'a> {
             Ok(h) => h,
             Err(_) => return,
         };
-        let matching: Vec<&StoredWebhook> = hooks.iter().filter(|w| w.matches(&event.kind)).collect();
+        let matching: Vec<&StoredWebhook> =
+            hooks.iter().filter(|w| w.matches(&event.kind)).collect();
         if matching.is_empty() {
             return;
         }
-        let body = match serde_json::to_vec(&serde_json::json!({ "repo": self.repo.meta.name, "event": event })) {
+        let body = match serde_json::to_vec(
+            &serde_json::json!({ "repo": self.repo.meta.name, "event": event }),
+        ) {
             Ok(b) => b,
             Err(_) => return,
         };
         for w in matching {
             let mut headers = vec![
                 ("Content-Type".to_string(), "application/json".to_string()),
-                ("User-Agent".to_string(), format!("agit-server/{}", env!("CARGO_PKG_VERSION"))),
+                (
+                    "User-Agent".to_string(),
+                    format!("agit-server/{}", env!("CARGO_PKG_VERSION")),
+                ),
                 ("X-Agit-Event".to_string(), event.kind.clone()),
                 ("X-Agit-Repo".to_string(), self.repo.meta.name.clone()),
-                ("X-Agit-Delivery".to_string(), uuid::Uuid::new_v4().simple().to_string()),
+                (
+                    "X-Agit-Delivery".to_string(),
+                    uuid::Uuid::new_v4().simple().to_string(),
+                ),
                 ("X-Agit-Webhook".to_string(), w.id.clone()),
             ];
             if let Some(secret) = &w.secret {
                 headers.push(("X-Agit-Signature".to_string(), sign(secret, &body)));
             }
-            let _ = sender().lock().unwrap().send(Delivery { url: w.url.clone(), body: body.clone(), headers });
+            let _ = sender().lock().unwrap().send(Delivery {
+                url: w.url.clone(),
+                body: body.clone(),
+                headers,
+            });
         }
     }
 
     /// Send a synthetic `ping` event to one webhook.
     pub fn test(&self, id: &str) -> Result<()> {
-        let ev = Event { seq: 0, time_ms: now_ms(), kind: "ping".into(), workspace: None, actor: None, data: serde_json::json!({ "webhook": id }) };
+        let ev = Event {
+            seq: 0,
+            time_ms: now_ms(),
+            kind: "ping".into(),
+            workspace: None,
+            actor: None,
+            data: serde_json::json!({ "webhook": id }),
+        };
         let hooks = self.load()?;
-        let w = hooks.iter().find(|w| w.id == id).ok_or_else(|| Error::Invalid(format!("webhook {id} not found")))?;
-        let body = serde_json::to_vec(&serde_json::json!({ "repo": self.repo.meta.name, "event": ev }))?;
+        let w = hooks
+            .iter()
+            .find(|w| w.id == id)
+            .ok_or_else(|| Error::NotFound(format!("webhook {id}")))?;
+        let body =
+            serde_json::to_vec(&serde_json::json!({ "repo": self.repo.meta.name, "event": ev }))?;
         let mut headers = vec![
             ("Content-Type".to_string(), "application/json".to_string()),
             ("X-Agit-Event".to_string(), "ping".to_string()),
             ("X-Agit-Repo".to_string(), self.repo.meta.name.clone()),
-            ("X-Agit-Delivery".to_string(), uuid::Uuid::new_v4().simple().to_string()),
+            (
+                "X-Agit-Delivery".to_string(),
+                uuid::Uuid::new_v4().simple().to_string(),
+            ),
             ("X-Agit-Webhook".to_string(), w.id.clone()),
         ];
         if let Some(secret) = &w.secret {
             headers.push(("X-Agit-Signature".to_string(), sign(secret, &body)));
         }
-        let _ = sender().lock().unwrap().send(Delivery { url: w.url.clone(), body, headers });
+        let _ = sender().lock().unwrap().send(Delivery {
+            url: w.url.clone(),
+            body,
+            headers,
+        });
         Ok(())
     }
 }

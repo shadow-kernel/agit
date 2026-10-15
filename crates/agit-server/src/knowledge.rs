@@ -51,7 +51,7 @@ impl<'a> NoteStore<'a> {
                 }
             }
         }
-        out.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms));
+        out.sort_by_key(|n| std::cmp::Reverse(n.updated_ms));
         Ok(out)
     }
 
@@ -59,7 +59,7 @@ impl<'a> NoteStore<'a> {
         if id.contains(['/', '\\']) {
             return Err(Error::Invalid("invalid note id".into()));
         }
-        let bytes = fs::read(self.path(id)).map_err(|_| Error::Invalid(format!("note {id} not found")))?;
+        let bytes = fs::read(self.path(id)).map_err(|_| Error::NotFound(format!("note {id}")))?;
         Ok(serde_json::from_slice(&bytes)?)
     }
 
@@ -120,27 +120,51 @@ impl<'a> NoteStore<'a> {
             superseded_by: None,
         };
         self.save(&n)?;
-        self.repo.emit("note.create", Some(author), serde_json::json!({ "id": n.id, "title": n.title, "tags": n.tags, "paths": n.paths }))?;
+        self.repo.emit(
+            "note.create",
+            Some(author),
+            serde_json::json!({ "id": n.id, "title": n.title, "tags": n.tags, "paths": n.paths }),
+        )?;
         Ok(n)
     }
 
     pub fn patch(&self, id: &str, p: NotePatch, author: &str) -> Result<Note> {
         let _g = self.repo.write_lock.lock().unwrap();
         let mut n = self.get(id)?;
-        if let Some(t) = p.title { n.title = t; }
-        if let Some(b) = p.body { n.body = b; }
+        if let Some(t) = p.title {
+            n.title = t;
+        }
+        if let Some(b) = p.body {
+            n.body = b;
+        }
         if let Some(tags) = p.tags {
-            for t in &tags { validate_tag(t)?; }
+            for t in &tags {
+                validate_tag(t)?;
+            }
             n.tags = dedup(tags);
         }
-        if let Some(x) = p.paths { n.paths = x; }
-        if let Some(x) = p.commits { n.commits = x; }
-        if let Some(x) = p.pulls { n.pulls = x; }
-        if let Some(c) = p.confidence { n.confidence = c.clamp(0.0, 1.0); }
-        if let Some(s) = p.superseded_by { n.superseded_by = s; }
+        if let Some(x) = p.paths {
+            n.paths = x;
+        }
+        if let Some(x) = p.commits {
+            n.commits = x;
+        }
+        if let Some(x) = p.pulls {
+            n.pulls = x;
+        }
+        if let Some(c) = p.confidence {
+            n.confidence = c.clamp(0.0, 1.0);
+        }
+        if let Some(s) = p.superseded_by {
+            n.superseded_by = s;
+        }
         n.updated_ms = now_ms();
         self.save(&n)?;
-        self.repo.emit("note.update", Some(author), serde_json::json!({ "id": n.id }))?;
+        self.repo.emit(
+            "note.update",
+            Some(author),
+            serde_json::json!({ "id": n.id }),
+        )?;
         Ok(n)
     }
 
@@ -148,7 +172,8 @@ impl<'a> NoteStore<'a> {
         let _g = self.repo.write_lock.lock().unwrap();
         self.get(id)?;
         fs::remove_file(self.path(id))?;
-        self.repo.emit("note.delete", Some(author), serde_json::json!({ "id": id }))?;
+        self.repo
+            .emit("note.delete", Some(author), serde_json::json!({ "id": id }))?;
         Ok(())
     }
 
@@ -159,7 +184,10 @@ impl<'a> NoteStore<'a> {
                 *m.entry(t).or_insert(0) += 1;
             }
         }
-        let mut v: Vec<TagCount> = m.into_iter().map(|(tag, count)| TagCount { tag, count }).collect();
+        let mut v: Vec<TagCount> = m
+            .into_iter()
+            .map(|(tag, count)| TagCount { tag, count })
+            .collect();
         v.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.tag.cmp(&b.tag)));
         Ok(v)
     }
@@ -174,11 +202,17 @@ impl<'a> NoteStore<'a> {
 
     pub fn set_rules(&self, rules: Vec<TagRule>, author: &str) -> Result<Vec<TagRule>> {
         for r in &rules {
-            for t in &r.tags { validate_tag(t)?; }
+            for t in &r.tags {
+                validate_tag(t)?;
+            }
         }
         let _g = self.repo.write_lock.lock().unwrap();
         write_atomic(&self.rules_path(), &serde_json::to_vec_pretty(&rules)?)?;
-        self.repo.emit("knowledge.rules", Some(author), serde_json::json!({ "count": rules.len() }))?;
+        self.repo.emit(
+            "knowledge.rules",
+            Some(author),
+            serde_json::json!({ "count": rules.len() }),
+        )?;
         Ok(rules)
     }
 
@@ -203,12 +237,16 @@ fn dedup(v: Vec<String>) -> Vec<String> {
 pub fn validate_tag(t: &str) -> Result<()> {
     let ok = !t.is_empty()
         && t.len() <= 80
-        && t.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, ':' | '-' | '_' | '.' | '/'))
+        && t.chars().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, ':' | '-' | '_' | '.' | '/')
+        })
         && !t.starts_with(':')
         && !t.ends_with(':');
     if ok {
         Ok(())
     } else {
-        Err(Error::Invalid(format!("invalid tag {t:?} (use namespace:value, lowercase)")))
+        Err(Error::Invalid(format!(
+            "invalid tag {t:?} (use namespace:value, lowercase)"
+        )))
     }
 }

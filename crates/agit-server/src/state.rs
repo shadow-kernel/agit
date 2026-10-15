@@ -36,7 +36,15 @@ impl RepoHandle {
     fn open(dir: PathBuf) -> Result<RepoHandle> {
         let meta_path = dir.join("meta.json");
         let meta: RepoMeta = serde_json::from_slice(&fs::read(&meta_path)?)?;
-        for sub in ["objects", "refs/heads", "refs/tags", "locks", "leases", "pulls", "knowledge/notes"] {
+        for sub in [
+            "objects",
+            "refs/heads",
+            "refs/tags",
+            "locks",
+            "leases",
+            "pulls",
+            "knowledge/notes",
+        ] {
             fs::create_dir_all(dir.join(sub))?;
         }
         let (tx, _) = broadcast::channel(1024);
@@ -62,16 +70,22 @@ impl RepoHandle {
     }
 
     pub fn head(&self) -> Result<Option<ObjectId>> {
-        self.refs.read(&format!("{HEADS_PREFIX}{}", self.meta.default_branch))
+        self.refs
+            .read(&format!("{HEADS_PREFIX}{}", self.meta.default_branch))
     }
 
     /// Resolve a revision: full ref, branch, tag, or (abbreviated) id.
     pub fn resolve(&self, rev: &str) -> Result<ObjectId> {
         if rev == "HEAD" {
-            return self.head()?.ok_or_else(|| Error::UnknownRevision("HEAD".into()));
+            return self
+                .head()?
+                .ok_or_else(|| Error::UnknownRevision("HEAD".into()));
         }
         if rev.starts_with("refs/") {
-            return self.refs.read(rev)?.ok_or_else(|| Error::RefNotFound(rev.into()));
+            return self
+                .refs
+                .read(rev)?
+                .ok_or_else(|| Error::RefNotFound(rev.into()));
         }
         if let Some(id) = self.refs.read(&format!("{HEADS_PREFIX}{rev}"))? {
             return Ok(id);
@@ -114,7 +128,9 @@ fn valid_repo_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 100
         && !name.starts_with('.')
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 impl AppState {
@@ -127,12 +143,18 @@ impl AppState {
                     Ok(h) => {
                         repos.insert(h.meta.name.clone(), Arc::new(h));
                     }
-                    Err(err) => tracing::warn!(path = %e.path().display(), %err, "skipping unreadable repository"),
+                    Err(err) => {
+                        tracing::warn!(path = %e.path().display(), %err, "skipping unreadable repository")
+                    }
                 }
             }
         }
         tracing::info!(count = repos.len(), "repositories loaded");
-        Ok(AppState { data_dir, token, repos: RwLock::new(repos) })
+        Ok(AppState {
+            data_dir,
+            token,
+            repos: RwLock::new(repos),
+        })
     }
 
     pub fn repos_dir(&self) -> PathBuf {
@@ -178,7 +200,9 @@ impl AppState {
 
     pub fn delete(&self, name: &str) -> Result<()> {
         let mut repos = self.repos.write().unwrap();
-        let h = repos.remove(name).ok_or_else(|| Error::NotARepository(Path::new(name).to_path_buf()))?;
+        let h = repos
+            .remove(name)
+            .ok_or_else(|| Error::NotARepository(Path::new(name).to_path_buf()))?;
         fs::remove_dir_all(&h.dir)?;
         Ok(())
     }

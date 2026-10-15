@@ -50,9 +50,9 @@ impl RefStore {
             || name.contains("//")
             || name.contains("..")
             || name.split('/').any(|c| c.is_empty() || c.starts_with('.'))
-            || name
-                .chars()
-                .any(|c| c.is_control() || matches!(c, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\'));
+            || name.chars().any(|c| {
+                c.is_control() || matches!(c, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+            });
         if bad {
             Err(Error::InvalidRefName(name.to_string()))
         } else {
@@ -206,7 +206,9 @@ pub fn write_atomic_bulk(path: &Path, data: &[u8]) -> Result<()> {
 }
 
 fn write_atomic_with(path: &Path, data: &[u8], sync: bool) -> Result<()> {
-    let dir = path.parent().ok_or_else(|| Error::Invalid("path has no parent".into()))?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| Error::Invalid("path has no parent".into()))?;
     fs::create_dir_all(dir).map_err(io_at(dir))?;
     let mut tmp = tempfile::Builder::new()
         .prefix(".tmp-")
@@ -217,8 +219,10 @@ fn write_atomic_with(path: &Path, data: &[u8], sync: bool) -> Result<()> {
     if sync {
         tmp.as_file().sync_data().map_err(io_at(path))?;
     }
-    tmp.persist(path)
-        .map_err(|e| Error::IoAt { path: path.to_path_buf(), source: e.error })?;
+    tmp.persist(path).map_err(|e| Error::IoAt {
+        path: path.to_path_buf(),
+        source: e.error,
+    })?;
     Ok(())
 }
 
@@ -255,8 +259,10 @@ mod tests {
     fn list_and_validate() {
         let dir = tempfile::tempdir().unwrap();
         let refs = RefStore::open(dir.path());
-        refs.update("refs/heads/a", Expect::Any, Some(id(1))).unwrap();
-        refs.update("refs/heads/feature/x", Expect::Any, Some(id(2))).unwrap();
+        refs.update("refs/heads/a", Expect::Any, Some(id(1)))
+            .unwrap();
+        refs.update("refs/heads/feature/x", Expect::Any, Some(id(2)))
+            .unwrap();
         let l = refs.list(HEADS_PREFIX).unwrap();
         assert_eq!(l.len(), 2);
         assert_eq!(l[0].0, "refs/heads/a");

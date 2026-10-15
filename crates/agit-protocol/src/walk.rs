@@ -8,7 +8,11 @@ use agit_core::{ObjectId, Result};
 
 /// All commits reachable from `roots` (bounded by `limit` to keep pathological
 /// histories from blowing up a single request; None = unbounded).
-pub fn commit_closure(store: &ObjectStore, roots: &[ObjectId], limit: Option<usize>) -> Result<HashSet<ObjectId>> {
+pub fn commit_closure(
+    store: &ObjectStore,
+    roots: &[ObjectId],
+    limit: Option<usize>,
+) -> Result<HashSet<ObjectId>> {
     let mut seen = HashSet::new();
     let mut q: VecDeque<ObjectId> = roots.iter().copied().collect();
     while let Some(id) = q.pop_front() {
@@ -31,7 +35,12 @@ pub fn commit_closure(store: &ObjectStore, roots: &[ObjectId], limit: Option<usi
 
 /// Collect every object (tree + blob) under `tree`, skipping subtrees whose
 /// id is in `known` (and adding what it visits to `known`).
-fn collect_tree(store: &ObjectStore, tree: ObjectId, known: &mut HashSet<ObjectId>, out: &mut Vec<ObjectId>) -> Result<()> {
+fn collect_tree(
+    store: &ObjectStore,
+    tree: ObjectId,
+    known: &mut HashSet<ObjectId>,
+    out: &mut Vec<ObjectId>,
+) -> Result<()> {
     if !known.insert(tree) {
         return Ok(());
     }
@@ -68,7 +77,11 @@ fn mark_tree(store: &ObjectStore, tree: ObjectId, known: &mut HashSet<ObjectId>)
 /// reachable from `haves`) is missing. Commits come after their trees and
 /// blobs so a receiver can verify as it goes; order within is topological
 /// enough for import (import does not require order anyway).
-pub fn objects_to_send(store: &ObjectStore, wants: &[ObjectId], haves: &[ObjectId]) -> Result<Vec<ObjectId>> {
+pub fn objects_to_send(
+    store: &ObjectStore,
+    wants: &[ObjectId],
+    haves: &[ObjectId],
+) -> Result<Vec<ObjectId>> {
     let have_commits = commit_closure(store, haves, None)?;
     // Commits to send: BFS from wants, stop at have_commits.
     let mut send_commits = Vec::new();
@@ -87,18 +100,24 @@ pub fn objects_to_send(store: &ObjectStore, wants: &[ObjectId], haves: &[ObjectI
             }
             _ => {
                 // A want that is not a commit (tag of a tree etc.): send as-is.
-                send_commits.push((id, agit_core::Commit {
-                    tree: id,
-                    parents: vec![],
-                    author: agit_core::Signature { name: String::new(), email: String::new() },
-                    time_ms: 0,
-                    message: String::new(),
-                    intent: None,
-                    task: None,
-                    agent: None,
-                    checkpoint: false,
-                    meta: Default::default(),
-                }));
+                send_commits.push((
+                    id,
+                    agit_core::Commit {
+                        tree: id,
+                        parents: vec![],
+                        author: agit_core::Signature {
+                            name: String::new(),
+                            email: String::new(),
+                        },
+                        time_ms: 0,
+                        message: String::new(),
+                        intent: None,
+                        task: None,
+                        agent: None,
+                        checkpoint: false,
+                        meta: Default::default(),
+                    },
+                ));
             }
         }
     }

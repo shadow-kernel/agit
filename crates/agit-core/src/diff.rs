@@ -127,7 +127,10 @@ pub fn diff_maps(old: &BTreeMap<String, Side>, new: &BTreeMap<String, Side>) -> 
     out
 }
 
-pub fn tree_to_sides(store: &ObjectStore, tree: Option<&ObjectId>) -> Result<BTreeMap<String, Side>> {
+pub fn tree_to_sides(
+    store: &ObjectStore,
+    tree: Option<&ObjectId>,
+) -> Result<BTreeMap<String, Side>> {
     Ok(match tree {
         None => BTreeMap::new(),
         Some(t) => flatten_tree(store, t)?
@@ -141,7 +144,11 @@ pub fn tree_to_sides(store: &ObjectStore, tree: Option<&ObjectId>) -> Result<BTr
 ///
 /// Walks both trees recursively and skips subtrees with identical ids, so
 /// the cost is proportional to the size of the change, not the repository.
-pub fn diff_trees(store: &ObjectStore, old: Option<&ObjectId>, new: Option<&ObjectId>) -> Result<Vec<Change>> {
+pub fn diff_trees(
+    store: &ObjectStore,
+    old: Option<&ObjectId>,
+    new: Option<&ObjectId>,
+) -> Result<Vec<Change>> {
     let mut out = Vec::new();
     diff_tree_rec(store, "", old, new, &mut out)?;
     Ok(out)
@@ -156,7 +163,13 @@ fn join(prefix: &str, name: &str) -> String {
 }
 
 /// Emit every file under `tree` as Added or Deleted.
-fn emit_subtree(store: &ObjectStore, prefix: &str, tree: &ObjectId, deleted: bool, out: &mut Vec<Change>) -> Result<()> {
+fn emit_subtree(
+    store: &ObjectStore,
+    prefix: &str,
+    tree: &ObjectId,
+    deleted: bool,
+    out: &mut Vec<Change>,
+) -> Result<()> {
     let t = store.read_tree(tree)?;
     for e in t.entries() {
         let path = join(prefix, &e.name);
@@ -165,9 +178,19 @@ fn emit_subtree(store: &ObjectStore, prefix: &str, tree: &ObjectId, deleted: boo
         } else {
             let side = Some(Side::from(e));
             out.push(if deleted {
-                Change { path, kind: ChangeKind::Deleted, old: side, new: None }
+                Change {
+                    path,
+                    kind: ChangeKind::Deleted,
+                    old: side,
+                    new: None,
+                }
             } else {
-                Change { path, kind: ChangeKind::Added, old: None, new: side }
+                Change {
+                    path,
+                    kind: ChangeKind::Added,
+                    old: None,
+                    new: side,
+                }
             });
         }
     }
@@ -209,7 +232,12 @@ fn diff_tree_rec(
                 if e.mode.is_dir() {
                     emit_subtree(store, &path, &e.id, true, out)?;
                 } else {
-                    out.push(Change { path, kind: ChangeKind::Deleted, old: Some(Side::from(e)), new: None });
+                    out.push(Change {
+                        path,
+                        kind: ChangeKind::Deleted,
+                        old: Some(Side::from(e)),
+                        new: None,
+                    });
                 }
                 i += 1;
             }
@@ -219,7 +247,12 @@ fn diff_tree_rec(
                 if e.mode.is_dir() {
                     emit_subtree(store, &path, &e.id, false, out)?;
                 } else {
-                    out.push(Change { path, kind: ChangeKind::Added, old: None, new: Some(Side::from(e)) });
+                    out.push(Change {
+                        path,
+                        kind: ChangeKind::Added,
+                        old: None,
+                        new: Some(Side::from(e)),
+                    });
                 }
                 j += 1;
             }
@@ -234,10 +267,20 @@ fn diff_tree_rec(
                     }
                     (true, false) => {
                         emit_subtree(store, &path, &a.id, true, out)?;
-                        out.push(Change { path, kind: ChangeKind::Added, old: None, new: Some(Side::from(b)) });
+                        out.push(Change {
+                            path,
+                            kind: ChangeKind::Added,
+                            old: None,
+                            new: Some(Side::from(b)),
+                        });
                     }
                     (false, true) => {
-                        out.push(Change { path: path.clone(), kind: ChangeKind::Deleted, old: Some(Side::from(a)), new: None });
+                        out.push(Change {
+                            path: path.clone(),
+                            kind: ChangeKind::Deleted,
+                            old: Some(Side::from(a)),
+                            new: None,
+                        });
                         emit_subtree(store, &path, &b.id, false, out)?;
                     }
                     (false, false) => {
@@ -249,7 +292,12 @@ fn diff_tree_rec(
                             } else {
                                 ChangeKind::Modified
                             };
-                            out.push(Change { path, kind, old: Some(Side::from(a)), new: Some(Side::from(b)) });
+                            out.push(Change {
+                                path,
+                                kind,
+                                old: Some(Side::from(a)),
+                                new: Some(Side::from(b)),
+                            });
                         }
                     }
                 }
@@ -309,6 +357,63 @@ pub fn line_stats(old: &[u8], new: &[u8]) -> (usize, usize) {
     (add, del)
 }
 
+/// Render a unified patch for `changes` using blobs from the store only.
+pub fn render_patch(store: &ObjectStore, changes: &[Change], context: usize) -> Result<String> {
+    let mut out = String::new();
+    for c in changes {
+        if c.old
+            .as_ref()
+            .is_some_and(|s| s.mode == EntryMode::Submodule)
+            || c.new
+                .as_ref()
+                .is_some_and(|s| s.mode == EntryMode::Submodule)
+        {
+            out.push_str(&format!("--- a/{0}\n+++ b/{0}\n", c.path));
+            if let Some(o) = &c.old {
+                out.push_str(&format!("-Subproject commit {}\n", o.id));
+            }
+            if let Some(n) = &c.new {
+                out.push_str(&format!("+Subproject commit {}\n", n.id));
+            }
+            continue;
+        }
+        let old = match &c.old {
+            Some(s) => store.read_blob(&s.id).unwrap_or_default(),
+            None => vec![],
+        };
+        let new = match &c.new {
+            Some(s) => store.read_blob(&s.id).unwrap_or_default(),
+            None => vec![],
+        };
+        match unified(&c.path, &old, &new, context) {
+            Some(p) => out.push_str(&p),
+            None => out.push_str(&format!("Binary files a/{0} and b/{0} differ\n", c.path)),
+        }
+    }
+    Ok(out)
+}
+
+/// (path, added, removed) per change, from the store only.
+pub fn change_stats(store: &ObjectStore, changes: &[Change]) -> Vec<(String, usize, usize)> {
+    changes
+        .iter()
+        .map(|c| {
+            let old = c
+                .old
+                .as_ref()
+                .and_then(|s| store.read_blob(&s.id).ok())
+                .unwrap_or_default();
+            let new = c
+                .new
+                .as_ref()
+                .and_then(|s| store.read_blob(&s.id).ok())
+                .unwrap_or_default();
+            let (a, d) = line_stats(&old, &new);
+            (c.path.clone(), a, d)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,43 +449,4 @@ mod tests {
         assert_eq!(line_stats(b"a\nb\n", b"a\nc\n"), (1, 1));
         assert!(unified("bin", b"\0\x01", b"\0\x02", 3).is_none());
     }
-}
-
-/// Render a unified patch for `changes` using blobs from the store only.
-pub fn render_patch(store: &ObjectStore, changes: &[Change], context: usize) -> Result<String> {
-    let mut out = String::new();
-    for c in changes {
-        if c.old.as_ref().is_some_and(|s| s.mode == EntryMode::Submodule) || c.new.as_ref().is_some_and(|s| s.mode == EntryMode::Submodule) {
-            out.push_str(&format!("--- a/{0}\n+++ b/{0}\n", c.path));
-            if let Some(o) = &c.old { out.push_str(&format!("-Subproject commit {}\n", o.id)); }
-            if let Some(n) = &c.new { out.push_str(&format!("+Subproject commit {}\n", n.id)); }
-            continue;
-        }
-        let old = match &c.old {
-            Some(s) => store.read_blob(&s.id).unwrap_or_default(),
-            None => vec![],
-        };
-        let new = match &c.new {
-            Some(s) => store.read_blob(&s.id).unwrap_or_default(),
-            None => vec![],
-        };
-        match unified(&c.path, &old, &new, context) {
-            Some(p) => out.push_str(&p),
-            None => out.push_str(&format!("Binary files a/{0} and b/{0} differ\n", c.path)),
-        }
-    }
-    Ok(out)
-}
-
-/// (path, added, removed) per change, from the store only.
-pub fn change_stats(store: &ObjectStore, changes: &[Change]) -> Vec<(String, usize, usize)> {
-    changes
-        .iter()
-        .map(|c| {
-            let old = c.old.as_ref().and_then(|s| store.read_blob(&s.id).ok()).unwrap_or_default();
-            let new = c.new.as_ref().and_then(|s| store.read_blob(&s.id).ok()).unwrap_or_default();
-            let (a, d) = line_stats(&old, &new);
-            (c.path.clone(), a, d)
-        })
-        .collect()
 }

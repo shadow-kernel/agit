@@ -35,29 +35,66 @@ impl From<std::io::Error> for ApiErr {
 impl ApiErr {
     fn parts(&self) -> (StatusCode, String, String, bool, Option<serde_json::Value>) {
         match self {
-            ApiErr::NotFound(m) => (StatusCode::NOT_FOUND, "not_found".into(), m.clone(), false, None),
-            ApiErr::Forbidden(m) => (StatusCode::FORBIDDEN, "forbidden".into(), m.clone(), false, None),
-            ApiErr::BadRequest(m) => (StatusCode::BAD_REQUEST, "invalid".into(), m.clone(), false, None),
+            ApiErr::NotFound(m) => (
+                StatusCode::NOT_FOUND,
+                "not_found".into(),
+                m.clone(),
+                false,
+                None,
+            ),
+            ApiErr::Forbidden(m) => (
+                StatusCode::FORBIDDEN,
+                "forbidden".into(),
+                m.clone(),
+                false,
+                None,
+            ),
+            ApiErr::BadRequest(m) => (
+                StatusCode::BAD_REQUEST,
+                "invalid".into(),
+                m.clone(),
+                false,
+                None,
+            ),
             ApiErr::Core(e) => {
                 let code = e.code().to_string();
                 let details = match e {
-                    CoreError::RefConflict { name, expected, actual } => Some(serde_json::json!({
+                    CoreError::RefConflict {
+                        name,
+                        expected,
+                        actual,
+                    } => Some(serde_json::json!({
                         "name": name, "expected": expected, "actual": actual
                     })),
-                    CoreError::LeaseConflict { path, holder, lease_id } => Some(serde_json::json!({
+                    CoreError::LeaseConflict {
+                        path,
+                        holder,
+                        lease_id,
+                    } => Some(serde_json::json!({
                         "path": path, "holder": holder, "lease_id": lease_id
                     })),
                     CoreError::MergeConflicts(n) => Some(serde_json::json!({ "count": n })),
                     _ => None,
                 };
                 let status = match e {
-                    CoreError::NotARepository(_) | CoreError::RefNotFound(_) | CoreError::UnknownRevision(_)
-                    | CoreError::LeaseNotFound(_) | CoreError::WorkspaceNotFound(_) | CoreError::PathNotTracked(_) => StatusCode::NOT_FOUND,
+                    CoreError::NotARepository(_)
+                    | CoreError::RefNotFound(_)
+                    | CoreError::UnknownRevision(_)
+                    | CoreError::LeaseNotFound(_)
+                    | CoreError::WorkspaceNotFound(_)
+                    | CoreError::PathNotTracked(_)
+                    | CoreError::NotFound(_) => StatusCode::NOT_FOUND,
                     CoreError::ObjectNotFound(_) => StatusCode::PRECONDITION_FAILED,
-                    CoreError::AlreadyExists(_) | CoreError::RefConflict { .. } | CoreError::LeaseConflict { .. }
-                    | CoreError::MergeConflicts(_) | CoreError::WorkspaceExists(_) => StatusCode::CONFLICT,
-                    CoreError::Invalid(_) | CoreError::InvalidRefName(_) | CoreError::InvalidObjectId(_)
-                    | CoreError::AmbiguousRevision(_) | CoreError::NothingToCommit => StatusCode::BAD_REQUEST,
+                    CoreError::AlreadyExists(_)
+                    | CoreError::RefConflict { .. }
+                    | CoreError::LeaseConflict { .. }
+                    | CoreError::MergeConflicts(_)
+                    | CoreError::WorkspaceExists(_) => StatusCode::CONFLICT,
+                    CoreError::Invalid(_)
+                    | CoreError::InvalidRefName(_)
+                    | CoreError::InvalidObjectId(_)
+                    | CoreError::AmbiguousRevision(_)
+                    | CoreError::NothingToCommit => StatusCode::BAD_REQUEST,
                     CoreError::LockTimeout(_) => StatusCode::SERVICE_UNAVAILABLE,
                     CoreError::PolicyViolation(_) => StatusCode::FORBIDDEN,
                     _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -74,7 +111,15 @@ impl IntoResponse for ApiErr {
         if status.is_server_error() {
             tracing::error!(%code, %message, "request failed");
         }
-        let body = ApiErrorBody { ok: false, error: ApiError { code, message, retryable, details } };
+        let body = ApiErrorBody {
+            ok: false,
+            error: ApiError {
+                code,
+                message,
+                retryable,
+                details,
+            },
+        };
         (status, Json(body)).into_response()
     }
 }

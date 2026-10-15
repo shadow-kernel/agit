@@ -49,7 +49,9 @@ impl<'a> Iterator for Decoder<'a> {
         let len = u32::from_be_bytes(rest[1..5].try_into().unwrap()) as usize;
         if rest.len() < 5 + len {
             self.pos = self.bytes.len();
-            return Some(Err(Error::Invalid("truncated object stream payload".into())));
+            return Some(Err(Error::Invalid(
+                "truncated object stream payload".into(),
+            )));
         }
         let payload = &rest[5..5 + len];
         self.pos += 5 + len;

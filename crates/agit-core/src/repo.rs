@@ -122,12 +122,23 @@ impl Repository {
         }
         fs::create_dir_all(&work_dir).map_err(io_at(&work_dir))?;
         fs::create_dir_all(&common).map_err(io_at(&common))?;
-        for sub in ["objects", "refs/heads", "refs/tags", "refs/checkpoints", "locks", "leases", "workspaces"] {
+        for sub in [
+            "objects",
+            "refs/heads",
+            "refs/tags",
+            "refs/checkpoints",
+            "locks",
+            "leases",
+            "workspaces",
+        ] {
             let p = common.join(sub);
             fs::create_dir_all(&p).map_err(io_at(&p))?;
         }
         let cfg = Config::default();
-        write_atomic(&common.join("config.json"), &serde_json::to_vec_pretty(&cfg)?)?;
+        write_atomic(
+            &common.join("config.json"),
+            &serde_json::to_vec_pretty(&cfg)?,
+        )?;
         write_atomic(
             &common.join("HEAD"),
             format!("ref: {HEADS_PREFIX}{}\n", cfg.default_branch).as_bytes(),
@@ -184,7 +195,11 @@ impl Repository {
             if candidate.is_file() {
                 let bytes = fs::read(&candidate).map_err(io_at(&candidate))?;
                 let ptr: WorkspacePointer = serde_json::from_slice(&bytes)?;
-                return Repository::open_secondary(ptr.common_dir, dir.to_path_buf(), ptr.workspace);
+                return Repository::open_secondary(
+                    ptr.common_dir,
+                    dir.to_path_buf(),
+                    ptr.workspace,
+                );
             }
             cur = dir.parent();
         }
@@ -256,7 +271,10 @@ impl Repository {
     }
 
     pub fn save_config(&self, cfg: &Config) -> Result<()> {
-        write_atomic(&self.common_dir.join("config.json"), &serde_json::to_vec_pretty(cfg)?)
+        write_atomic(
+            &self.common_dir.join("config.json"),
+            &serde_json::to_vec_pretty(cfg)?,
+        )
     }
 
     /// Resolve the author identity: env > config > OS user.
@@ -333,7 +351,8 @@ impl Repository {
                     Some(id) => Expect::Is(id),
                     None => Expect::Absent,
                 };
-                self.refs.update(&format!("{HEADS_PREFIX}{b}"), expect, Some(new))
+                self.refs
+                    .update(&format!("{HEADS_PREFIX}{b}"), expect, Some(new))
             }
             Head::Detached(_) => self.set_head(&Head::Detached(new)),
         }
@@ -387,13 +406,21 @@ impl Repository {
             }
             match op {
                 '~' => {
-                    let n: usize = if num.is_empty() { 1 } else { num.parse().unwrap_or(1) };
+                    let n: usize = if num.is_empty() {
+                        1
+                    } else {
+                        num.parse().unwrap_or(1)
+                    };
                     for _ in 0..n {
                         id = self.first_parent(&id, rev)?;
                     }
                 }
                 '^' => {
-                    let n: usize = if num.is_empty() { 1 } else { num.parse().unwrap_or(1) };
+                    let n: usize = if num.is_empty() {
+                        1
+                    } else {
+                        num.parse().unwrap_or(1)
+                    };
                     let c = self.store.read_commit(&id)?;
                     id = *c
                         .parents
@@ -432,7 +459,10 @@ impl Repository {
         if let Some(id) = self.refs.read(&format!("{TAGS_PREFIX}{base}"))? {
             return Ok(id);
         }
-        if let Some(id) = self.refs.read(&format!("{}{base}", crate::refs::CHECKPOINTS_PREFIX))? {
+        if let Some(id) = self
+            .refs
+            .read(&format!("{}{base}", crate::refs::CHECKPOINTS_PREFIX))?
+        {
             return Ok(id);
         }
         self.store.resolve_prefix(base)
@@ -485,10 +515,7 @@ impl Repository {
         start: Option<ObjectId>,
         agent: Option<&str>,
     ) -> Result<(Repository, WorkspaceMeta)> {
-        if name.is_empty()
-            || name == PRIMARY_WORKSPACE
-            || name.contains(['/', '\\', '.', ' '])
-        {
+        if name.is_empty() || name == PRIMARY_WORKSPACE || name.contains(['/', '\\', '.', ' ']) {
             return Err(Error::Invalid(format!("invalid workspace name {name:?}")));
         }
         let ws_dir = self.common_dir.join("workspaces").join(name);
@@ -509,7 +536,11 @@ impl Repository {
                     .join(format!("{base}.{name}"))
             }
         };
-        if path.exists() && fs::read_dir(&path).map(|mut d| d.next().is_some()).unwrap_or(true) {
+        if path.exists()
+            && fs::read_dir(&path)
+                .map(|mut d| d.next().is_some())
+                .unwrap_or(true)
+        {
             return Err(Error::Invalid(format!(
                 "workspace path {} exists and is not empty",
                 path.display()
@@ -526,16 +557,23 @@ impl Repository {
             None => self.head_commit()?,
         };
         if let Some(id) = start {
-            self.refs.update(&format!("{HEADS_PREFIX}{branch}"), Expect::Absent, Some(id))?;
+            self.refs
+                .update(&format!("{HEADS_PREFIX}{branch}"), Expect::Absent, Some(id))?;
         }
-        write_atomic(&ws_dir.join("HEAD"), format!("ref: {HEADS_PREFIX}{branch}\n").as_bytes())?;
+        write_atomic(
+            &ws_dir.join("HEAD"),
+            format!("ref: {HEADS_PREFIX}{branch}\n").as_bytes(),
+        )?;
         let meta = WorkspaceMeta {
             name: name.to_string(),
             path: path.clone(),
             created_ms: crate::events::now_ms(),
             agent: agent.map(str::to_string),
         };
-        write_atomic(&ws_dir.join("meta.json"), &serde_json::to_vec_pretty(&meta)?)?;
+        write_atomic(
+            &ws_dir.join("meta.json"),
+            &serde_json::to_vec_pretty(&meta)?,
+        )?;
         let ptr = WorkspacePointer {
             common_dir: self.common_dir.clone(),
             workspace: name.to_string(),

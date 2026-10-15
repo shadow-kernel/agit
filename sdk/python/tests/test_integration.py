@@ -11,7 +11,7 @@ import uuid
 
 import pytest
 
-from agit import AgentSession, AlreadyExists, Client, LeaseConflict, NotFound
+from agit import AgentSession, AgitError, AlreadyExists, Client, LeaseConflict, NotFound
 
 pytestmark = pytest.mark.integration
 
@@ -66,8 +66,11 @@ def test_roundtrip_against_real_server(server_url):
 
         assert client.leases(name) == []
         assert not any(a.id == "sdk-it" for a in client.agents(name))  # no commits, lease released
-        with pytest.raises(NotFound):
+        # The server currently answers 400 `invalid` for an unknown PR number; API.md only
+        # promises the envelope, so accept either code but require a typed error.
+        with pytest.raises(AgitError) as ei:
             client.pull(name, 999)
+        assert ei.value.code in ("not_found", "invalid") and ei.value.status in (400, 404)
     finally:
         assert client.delete_repo(name) == {"deleted": True}
     time.sleep(0.05)

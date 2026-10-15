@@ -12,7 +12,7 @@ use crate::events::now_ms;
 use crate::hash::ObjectId;
 use crate::index::IndexEntry;
 use crate::lease::LeaseStore;
-use crate::merge::{merge_base, merge_trees, is_ancestor, Conflict, MergeLabels};
+use crate::merge::{is_ancestor, merge_base, merge_trees, Conflict, MergeLabels};
 use crate::object::{AgentInfo, Commit, Signature};
 use crate::refs::{Expect, CHECKPOINTS_PREFIX, HEADS_PREFIX, TAGS_PREFIX};
 use crate::repo::{Head, Repository};
@@ -49,7 +49,9 @@ pub struct CommitResult {
 }
 
 fn actor_of(opts_agent: Option<&AgentInfo>, author: &Signature) -> String {
-    opts_agent.map(|a| a.id.clone()).unwrap_or_else(|| author.name.clone())
+    opts_agent
+        .map(|a| a.id.clone())
+        .unwrap_or_else(|| author.name.clone())
 }
 
 /// Refuse when any of `paths` is under another holder's exclusive lease.
@@ -165,7 +167,11 @@ pub struct CheckpointResult {
 
 /// Snapshot the whole working tree (tracked and untracked) into a checkpoint
 /// commit on `refs/checkpoints/<workspace>`. HEAD and the index are untouched.
-pub fn checkpoint(repo: &Repository, message: Option<String>, agent: Option<AgentInfo>) -> Result<CheckpointResult> {
+pub fn checkpoint(
+    repo: &Repository,
+    message: Option<String>,
+    agent: Option<AgentInfo>,
+) -> Result<CheckpointResult> {
     let tree = worktree::snapshot_worktree(repo)?;
     let head = repo.head_commit()?;
     let ref_name = format!("{CHECKPOINTS_PREFIX}{}", repo.workspace());
@@ -280,7 +286,11 @@ pub fn log(repo: &Repository, start: &[ObjectId], opts: &LogOptions) -> Result<V
 }
 
 /// Same as [`log`] but for a bare object store (server side).
-pub fn log_store(store: &crate::store::ObjectStore, start: &[ObjectId], opts: &LogOptions) -> Result<Vec<LogEntry>> {
+pub fn log_store(
+    store: &crate::store::ObjectStore,
+    start: &[ObjectId],
+    opts: &LogOptions,
+) -> Result<Vec<LogEntry>> {
     let mut heap = BinaryHeap::new();
     let mut seen = HashSet::new();
     for s in start {
@@ -384,9 +394,14 @@ pub fn create_branch(repo: &Repository, name: &str, start: Option<&str>) -> Resu
 pub fn delete_branch(repo: &Repository, name: &str, force: bool) -> Result<ObjectId> {
     let full = format!("{HEADS_PREFIX}{name}");
     if repo.current_branch()?.as_deref() == Some(name) {
-        return Err(Error::Invalid(format!("cannot delete the current branch {name}")));
+        return Err(Error::Invalid(format!(
+            "cannot delete the current branch {name}"
+        )));
     }
-    let id = repo.refs().read(&full)?.ok_or_else(|| Error::RefNotFound(full.clone()))?;
+    let id = repo
+        .refs()
+        .read(&full)?
+        .ok_or_else(|| Error::RefNotFound(full.clone()))?;
     if !force {
         if let Some(head) = repo.head_commit()? {
             if !is_ancestor(repo.store(), &id, &head)? {
@@ -431,7 +446,10 @@ pub fn create_tag(repo: &Repository, name: &str, rev: Option<&str>) -> Result<Ob
 
 pub fn delete_tag(repo: &Repository, name: &str) -> Result<ObjectId> {
     let full = format!("{TAGS_PREFIX}{name}");
-    let id = repo.refs().read(&full)?.ok_or_else(|| Error::RefNotFound(full.clone()))?;
+    let id = repo
+        .refs()
+        .read(&full)?
+        .ok_or_else(|| Error::RefNotFound(full.clone()))?;
     repo.refs().update(&full, Expect::Is(id), None)?;
     Ok(id)
 }
@@ -459,7 +477,9 @@ pub enum Head2 {
 /// revision.
 pub fn switch(repo: &Repository, target: &str, create: bool, force: bool) -> Result<SwitchResult> {
     if repo.merge_head()?.is_some() && !force {
-        return Err(Error::Invalid("merge in progress; commit or abort it first".into()));
+        return Err(Error::Invalid(
+            "merge in progress; commit or abort it first".into(),
+        ));
     }
     let branch_ref = format!("{HEADS_PREFIX}{target}");
     let (new_head, id) = if create {
@@ -498,10 +518,24 @@ pub fn switch(repo: &Repository, target: &str, create: bool, force: bool) -> Res
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MergeResult {
-    AlreadyUpToDate { head: ObjectId },
-    FastForward { from: Option<ObjectId>, to: ObjectId, files_changed: usize },
-    Merged { commit: ObjectId, tree: ObjectId, auto_merged: Vec<String> },
-    Conflicts { tree: ObjectId, conflicts: Vec<Conflict>, auto_merged: Vec<String> },
+    AlreadyUpToDate {
+        head: ObjectId,
+    },
+    FastForward {
+        from: Option<ObjectId>,
+        to: ObjectId,
+        files_changed: usize,
+    },
+    Merged {
+        commit: ObjectId,
+        tree: ObjectId,
+        auto_merged: Vec<String>,
+    },
+    Conflicts {
+        tree: ObjectId,
+        conflicts: Vec<Conflict>,
+        auto_merged: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -534,7 +568,11 @@ pub fn merge(repo: &Repository, rev: &str, opts: MergeOptions) -> Result<MergeRe
         let to_tree = store.read_commit(&theirs)?.tree;
         let changes = worktree::checkout_tree(repo, None, &to_tree, opts.force)?;
         repo.advance_head(None, theirs)?;
-        return Ok(MergeResult::FastForward { from: None, to: theirs, files_changed: changes.len() });
+        return Ok(MergeResult::FastForward {
+            from: None,
+            to: theirs,
+            files_changed: changes.len(),
+        });
     };
 
     if ours_id == theirs || is_ancestor(store, &theirs, &ours_id)? {
@@ -553,7 +591,11 @@ pub fn merge(repo: &Repository, rev: &str, opts: MergeOptions) -> Result<MergeRe
             opts.agent.as_ref().map(|a| a.id.as_str()),
             serde_json::json!({ "kind": "fast_forward", "from": ours_id, "to": theirs }),
         )?;
-        return Ok(MergeResult::FastForward { from: Some(ours_id), to: theirs, files_changed: changes.len() });
+        return Ok(MergeResult::FastForward {
+            from: Some(ours_id),
+            to: theirs,
+            files_changed: changes.len(),
+        });
     }
 
     let labels = MergeLabels {
@@ -584,7 +626,10 @@ pub fn merge(repo: &Repository, rev: &str, opts: MergeOptions) -> Result<MergeRe
         let mut index = repo.load_index()?;
         for c in &outcome.conflicts {
             if let Some(e) = index.get(&c.path).cloned() {
-                index.insert(IndexEntry { conflict: true, ..e });
+                index.insert(IndexEntry {
+                    conflict: true,
+                    ..e
+                });
             } else {
                 // delete/modify where the surviving side is absent: record a
                 // placeholder so `status` reports the conflict.

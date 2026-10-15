@@ -41,7 +41,11 @@ pub fn add(repo: &Repository, url: &str, path: &str, branch: Option<&str>) -> Re
         return Err(Error::AlreadyExists(path.into()));
     }
     let abs = repo.abs_path(&path);
-    if abs.exists() && std::fs::read_dir(&abs).map(|mut d| d.next().is_some()).unwrap_or(true) {
+    if abs.exists()
+        && std::fs::read_dir(&abs)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(true)
+    {
         return Err(Error::Invalid(format!("{path} exists and is not empty")));
     }
     let (nested, _) = sync::clone(&resolve_url(repo, url), &abs)?;
@@ -50,10 +54,18 @@ pub fn add(repo: &Repository, url: &str, path: &str, branch: Option<&str>) -> Re
             agit_core::ops::switch(&nested, b, false, true)?;
         }
     }
-    let m = Submodule { path: path.clone(), url: url.to_string(), branch: branch.map(str::to_string) };
+    let m = Submodule {
+        path: path.clone(),
+        url: url.to_string(),
+        branch: branch.map(str::to_string),
+    };
     modules.push(m.clone());
     submodule::write_modules(repo, &modules)?;
-    agit_core::worktree::add(repo, &[submodule::MODULES_FILE.to_string(), path.clone()], true)?;
+    agit_core::worktree::add(
+        repo,
+        &[submodule::MODULES_FILE.to_string(), path.clone()],
+        true,
+    )?;
     repo.events().append(
         "submodule.add",
         Some(repo.workspace()),
@@ -73,22 +85,37 @@ pub fn update(repo: &Repository, paths: Option<&[String]>) -> Result<Vec<Submodu
         if paths.is_some_and(|ps| !ps.iter().any(|p| p.trim_matches('/') == m.path)) {
             continue;
         }
-        let pinned = index.get(&m.path).filter(|e| e.mode.is_submodule()).map(|e| e.id);
+        let pinned = index
+            .get(&m.path)
+            .filter(|e| e.mode.is_submodule())
+            .map(|e| e.id);
         let abs = repo.abs_path(&m.path);
         let nested = match submodule::open_nested(repo, &m.path)? {
             Some(r) => r,
             None => {
                 let (r, _) = sync::clone(&resolve_url(repo, &m.url), &abs)?;
-                out.push(SubmoduleUpdate { path: m.path.clone(), action: "cloned".into(), commit: r.head_commit()? });
+                out.push(SubmoduleUpdate {
+                    path: m.path.clone(),
+                    action: "cloned".into(),
+                    commit: r.head_commit()?,
+                });
                 r
             }
         };
         let Some(pinned) = pinned else {
-            out.push(SubmoduleUpdate { path: m.path.clone(), action: "unpinned".into(), commit: nested.head_commit()? });
+            out.push(SubmoduleUpdate {
+                path: m.path.clone(),
+                action: "unpinned".into(),
+                commit: nested.head_commit()?,
+            });
             continue;
         };
         if nested.head_commit()? == Some(pinned) {
-            out.push(SubmoduleUpdate { path: m.path.clone(), action: "up_to_date".into(), commit: Some(pinned) });
+            out.push(SubmoduleUpdate {
+                path: m.path.clone(),
+                action: "up_to_date".into(),
+                commit: Some(pinned),
+            });
             continue;
         }
         if !nested.store().contains(&pinned) {
@@ -101,7 +128,11 @@ pub fn update(repo: &Repository, paths: Option<&[String]>) -> Result<Vec<Submodu
             }
         }
         checkout_detached(&nested, pinned)?;
-        out.push(SubmoduleUpdate { path: m.path.clone(), action: "checked_out".into(), commit: Some(pinned) });
+        out.push(SubmoduleUpdate {
+            path: m.path.clone(),
+            action: "checked_out".into(),
+            commit: Some(pinned),
+        });
     }
     Ok(out)
 }
@@ -111,7 +142,11 @@ fn checkout_detached(nested: &Repository, id: ObjectId) -> Result<()> {
     let to = nested.store().read_commit(&id)?.tree;
     agit_core::worktree::checkout_tree(nested, from.as_ref(), &to, false)?;
     nested.set_head(&Head::Detached(id))?;
-    let _ = nested.refs().update(&format!("refs/checkpoints/{}", nested.workspace()), Expect::Any, None);
+    let _ = nested.refs().update(
+        &format!("refs/checkpoints/{}", nested.workspace()),
+        Expect::Any,
+        None,
+    );
     Ok(())
 }
 

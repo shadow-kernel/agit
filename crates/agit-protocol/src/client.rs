@@ -27,13 +27,17 @@ pub struct RepoUrl {
 impl RepoUrl {
     pub fn parse(url: &str) -> Result<RepoUrl> {
         let url = url.trim_end_matches('/');
-        let idx = url
-            .rfind("/repos/")
-            .ok_or_else(|| Error::Invalid(format!("not an agit repository url (expected .../api/v1/repos/<name>): {url}")))?;
+        let idx = url.rfind("/repos/").ok_or_else(|| {
+            Error::Invalid(format!(
+                "not an agit repository url (expected .../api/v1/repos/<name>): {url}"
+            ))
+        })?;
         let base = url[..idx].to_string();
         let repo = url[idx + 7..].to_string();
         if repo.is_empty() || repo.contains('/') {
-            return Err(Error::Invalid(format!("invalid repository name in url {url}")));
+            return Err(Error::Invalid(format!(
+                "invalid repository name in url {url}"
+            )));
         }
         Ok(RepoUrl { base, repo })
     }
@@ -46,21 +50,69 @@ fn map_err(e: ureq::Error) -> Error {
             match serde_json::from_str::<ApiErrorBody>(&body) {
                 Ok(b) => match b.error.code.as_str() {
                     "ref_conflict" => Error::RefConflict {
-                        name: b.error.details.as_ref().and_then(|d| d.get("name")).and_then(|v| v.as_str()).unwrap_or("?").to_string(),
-                        expected: b.error.details.as_ref().and_then(|d| d.get("expected")).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()),
-                        actual: b.error.details.as_ref().and_then(|d| d.get("actual")).and_then(|v| v.as_str()).and_then(|s| s.parse().ok()),
+                        name: b
+                            .error
+                            .details
+                            .as_ref()
+                            .and_then(|d| d.get("name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?")
+                            .to_string(),
+                        expected: b
+                            .error
+                            .details
+                            .as_ref()
+                            .and_then(|d| d.get("expected"))
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse().ok()),
+                        actual: b
+                            .error
+                            .details
+                            .as_ref()
+                            .and_then(|d| d.get("actual"))
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| s.parse().ok()),
                     },
                     "lease_conflict" => Error::LeaseConflict {
-                        path: b.error.details.as_ref().and_then(|d| d.get("path")).and_then(|v| v.as_str()).unwrap_or("?").to_string(),
-                        holder: b.error.details.as_ref().and_then(|d| d.get("holder")).and_then(|v| v.as_str()).unwrap_or("?").to_string(),
-                        lease_id: b.error.details.as_ref().and_then(|d| d.get("lease_id")).and_then(|v| v.as_str()).unwrap_or("?").to_string(),
+                        path: b
+                            .error
+                            .details
+                            .as_ref()
+                            .and_then(|d| d.get("path"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?")
+                            .to_string(),
+                        holder: b
+                            .error
+                            .details
+                            .as_ref()
+                            .and_then(|d| d.get("holder"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?")
+                            .to_string(),
+                        lease_id: b
+                            .error
+                            .details
+                            .as_ref()
+                            .and_then(|d| d.get("lease_id"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?")
+                            .to_string(),
                     },
                     "merge_conflicts" => Error::MergeConflicts(
-                        b.error.details.as_ref().and_then(|d| d.get("count")).and_then(|v| v.as_u64()).unwrap_or(1) as usize,
+                        b.error
+                            .details
+                            .as_ref()
+                            .and_then(|d| d.get("count"))
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(1) as usize,
                     ),
                     "already_exists" => Error::AlreadyExists(b.error.message.into()),
                     "policy_violation" => Error::PolicyViolation(b.error.message),
-                    _ => Error::Invalid(format!("server error {status} [{}]: {}", b.error.code, b.error.message)),
+                    _ => Error::Invalid(format!(
+                        "server error {status} [{}]: {}",
+                        b.error.code, b.error.message
+                    )),
                 },
                 Err(_) => Error::Invalid(format!("server error {status}: {body}")),
             }
@@ -113,12 +165,19 @@ impl Client {
 
     fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
         let resp = self.req("GET", path).call().map_err(map_err)?;
-        resp.into_json().map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
+        resp.into_json()
+            .map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
     }
 
-    fn send_json<B: Serialize, T: DeserializeOwned>(&self, method: &str, path: &str, body: &B) -> Result<T> {
+    fn send_json<B: Serialize, T: DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
         let resp = self.req(method, path).send_json(body).map_err(map_err)?;
-        resp.into_json().map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
+        resp.into_json()
+            .map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
     }
 
     // -- repos --
@@ -129,7 +188,14 @@ impl Client {
         self.get_json("/repos")
     }
     pub fn create_repo(&self, name: &str, default_branch: Option<&str>) -> Result<RepoSummary> {
-        self.send_json("POST", "/repos", &CreateRepo { name: name.into(), default_branch: default_branch.map(str::to_string) })
+        self.send_json(
+            "POST",
+            "/repos",
+            &CreateRepo {
+                name: name.into(),
+                default_branch: default_branch.map(str::to_string),
+            },
+        )
     }
     pub fn repo(&self, repo: &str) -> Result<RepoSummary> {
         self.get_json(&format!("/repos/{repo}"))
@@ -145,7 +211,11 @@ impl Client {
 
     // -- objects --
     pub fn missing(&self, repo: &str, ids: &[ObjectId]) -> Result<Vec<ObjectId>> {
-        let r: MissingResponse = self.send_json("POST", &format!("/repos/{repo}/objects/missing"), &IdList { ids: ids.to_vec() })?;
+        let r: MissingResponse = self.send_json(
+            "POST",
+            &format!("/repos/{repo}/objects/missing"),
+            &IdList { ids: ids.to_vec() },
+        )?;
         Ok(r.missing)
     }
     pub fn upload(&self, repo: &str, stream: &[u8]) -> Result<StoreResponse> {
@@ -154,12 +224,16 @@ impl Client {
             .set("Content-Type", crate::stream::CONTENT_TYPE)
             .send_bytes(stream)
             .map_err(map_err)?;
-        resp.into_json().map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
+        resp.into_json()
+            .map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
     }
     pub fn fetch(&self, repo: &str, wants: &[ObjectId], haves: &[ObjectId]) -> Result<Vec<u8>> {
         let resp = self
             .req("POST", &format!("/repos/{repo}/fetch"))
-            .send_json(&FetchRequest { wants: wants.to_vec(), haves: haves.to_vec() })
+            .send_json(&FetchRequest {
+                wants: wants.to_vec(),
+                haves: haves.to_vec(),
+            })
             .map_err(map_err)?;
         let mut out = Vec::new();
         use std::io::Read;
@@ -175,8 +249,12 @@ impl Client {
         self.send_json("POST", &format!("/repos/{repo}/leases"), req)
     }
     pub fn release_lease(&self, repo: &str, id: &str) -> Result<serde_json::Value> {
-        let resp = self.req("DELETE", &format!("/repos/{repo}/leases/{id}")).call().map_err(map_err)?;
-        resp.into_json().map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
+        let resp = self
+            .req("DELETE", &format!("/repos/{repo}/leases/{id}"))
+            .call()
+            .map_err(map_err)?;
+        resp.into_json()
+            .map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
     }
 
     // -- pulls --
@@ -200,7 +278,11 @@ impl Client {
         self.send_json("POST", &format!("/repos/{repo}/pulls/{n}/merge"), req)
     }
     pub fn close_pull(&self, repo: &str, n: u64) -> Result<PullRequest> {
-        self.send_json("POST", &format!("/repos/{repo}/pulls/{n}/close"), &serde_json::json!({}))
+        self.send_json(
+            "POST",
+            &format!("/repos/{repo}/pulls/{n}/close"),
+            &serde_json::json!({}),
+        )
     }
 
     // -- knowledge --
@@ -220,8 +302,12 @@ impl Client {
         self.send_json("POST", &format!("/repos/{repo}/webhooks"), req)
     }
     pub fn delete_webhook(&self, repo: &str, id: &str) -> Result<serde_json::Value> {
-        let resp = self.req("DELETE", &format!("/repos/{repo}/webhooks/{id}")).call().map_err(map_err)?;
-        resp.into_json().map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
+        let resp = self
+            .req("DELETE", &format!("/repos/{repo}/webhooks/{id}"))
+            .call()
+            .map_err(map_err)?;
+        resp.into_json()
+            .map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
     }
     pub fn policy(&self, repo: &str) -> Result<Policy> {
         self.get_json(&format!("/repos/{repo}/policy"))
@@ -246,7 +332,9 @@ pub fn urlencode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
+                out.push(b as char)
+            }
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }

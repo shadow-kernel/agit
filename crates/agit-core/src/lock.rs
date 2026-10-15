@@ -48,7 +48,12 @@ impl Lock {
                     std::thread::sleep(backoff);
                     backoff = (backoff * 2).min(Duration::from_millis(50));
                 }
-                Err(e) => return Err(Error::IoAt { path: path.to_path_buf(), source: e }),
+                Err(e) => {
+                    return Err(Error::IoAt {
+                        path: path.to_path_buf(),
+                        source: e,
+                    })
+                }
             }
         }
     }

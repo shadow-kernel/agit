@@ -14,7 +14,14 @@ fn write(root: &Path, rel: &str, content: &str) {
 
 fn commit_all(repo: &Repository, msg: &str) -> ops::CommitResult {
     worktree::add(repo, &[], false).unwrap();
-    ops::commit(repo, CommitOptions { message: msg.into(), ..Default::default() }).unwrap()
+    ops::commit(
+        repo,
+        CommitOptions {
+            message: msg.into(),
+            ..Default::default()
+        },
+    )
+    .unwrap()
 }
 
 #[test]
@@ -31,21 +38,52 @@ fn add_update_status_with_local_clone() {
     let app = Repository::init(&tmp.path().join("app")).unwrap();
     write(app.work_dir(), "main.rs", "fn main() {}\n");
     commit_all(&app, "app");
-    let m = submodule::add(&app, &lib.work_dir().display().to_string(), "vendor/lib", None).unwrap();
+    let m = submodule::add(
+        &app,
+        &lib.work_dir().display().to_string(),
+        "vendor/lib",
+        None,
+    )
+    .unwrap();
     assert_eq!(m.path, "vendor/lib");
     assert!(app.work_dir().join("vendor/lib/.agit").is_dir());
-    assert_eq!(fs::read_to_string(app.work_dir().join("vendor/lib/lib.rs")).unwrap(), "v2\n");
+    assert_eq!(
+        fs::read_to_string(app.work_dir().join("vendor/lib/lib.rs")).unwrap(),
+        "v2\n"
+    );
 
     // Staged: .agitmodules and the submodule entry pinned at lib HEAD.
     let st = worktree::status(&app, true).unwrap();
-    let staged: Vec<(&str, EntryMode)> = st.staged.iter().map(|c| (c.path.as_str(), c.new.as_ref().unwrap().mode)).collect();
+    let staged: Vec<(&str, EntryMode)> = st
+        .staged
+        .iter()
+        .map(|c| (c.path.as_str(), c.new.as_ref().unwrap().mode))
+        .collect();
     assert!(staged.contains(&(".agitmodules", EntryMode::File)));
     assert!(staged.contains(&("vendor/lib", EntryMode::Submodule)));
-    assert!(st.untracked.is_empty(), "nested repo files must not leak: {:?}", st.untracked);
-    let c = ops::commit(&app, CommitOptions { message: "add lib".into(), ..Default::default() }).unwrap();
-    assert!(c.changes.iter().any(|ch| ch.path == "vendor/lib" && ch.new.as_ref().unwrap().id == lib_c2.id));
+    assert!(
+        st.untracked.is_empty(),
+        "nested repo files must not leak: {:?}",
+        st.untracked
+    );
+    let c = ops::commit(
+        &app,
+        CommitOptions {
+            message: "add lib".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(c
+        .changes
+        .iter()
+        .any(|ch| ch.path == "vendor/lib" && ch.new.as_ref().unwrap().id == lib_c2.id));
     let st = worktree::status(&app, true).unwrap();
-    assert!(st.is_clean(), "status after commit: {}", serde_json::to_string_pretty(&st).unwrap());
+    assert!(
+        st.is_clean(),
+        "status after commit: {}",
+        serde_json::to_string_pretty(&st).unwrap()
+    );
 
     // Tree object carries the submodule mode and the pinned commit id.
     let flat = agit_core::index::flatten_tree(app.store(), &c.tree).unwrap();
@@ -71,15 +109,24 @@ fn add_update_status_with_local_clone() {
     assert_eq!(submodule::status(&app).unwrap()[0].state, "ok");
 
     // A fresh clone of the app has the pin but no checkout; update clones it.
-    let (clone, _) = agit_protocol::sync::clone_local(app.work_dir(), &tmp.path().join("app2")).unwrap();
+    let (clone, _) =
+        agit_protocol::sync::clone_local(app.work_dir(), &tmp.path().join("app2")).unwrap();
     assert_eq!(submodule::status(&clone).unwrap()[0].state, "missing");
     let u = submodule::update(&clone, None).unwrap();
     assert_eq!(u[0].action, "cloned");
-    assert_eq!(fs::read_to_string(clone.work_dir().join("vendor/lib/lib.rs")).unwrap(), "v2\n");
+    assert_eq!(
+        fs::read_to_string(clone.work_dir().join("vendor/lib/lib.rs")).unwrap(),
+        "v2\n"
+    );
     assert_eq!(submodule::status(&clone).unwrap()[0].state, "ok");
 
     // Patch rendering shows subproject lines.
-    let changes = agit_core::diff::diff_trees(app.store(), Some(&app.resolve_commit("HEAD~1").unwrap().1.tree), Some(&c.tree)).unwrap();
+    let changes = agit_core::diff::diff_trees(
+        app.store(),
+        Some(&app.resolve_commit("HEAD~1").unwrap().1.tree),
+        Some(&c.tree),
+    )
+    .unwrap();
     let patch = agit_core::diff::render_patch(app.store(), &changes, 3).unwrap();
     assert!(patch.contains(&format!("+Subproject commit {}", lib_c2.id)));
 

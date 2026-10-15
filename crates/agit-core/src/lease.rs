@@ -164,7 +164,12 @@ impl LeaseStore {
         let rd = match fs::read_dir(&self.dir) {
             Ok(rd) => rd,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
-            Err(e) => return Err(Error::IoAt { path: self.dir.clone(), source: e }),
+            Err(e) => {
+                return Err(Error::IoAt {
+                    path: self.dir.clone(),
+                    source: e,
+                })
+            }
         };
         for entry in rd.flatten() {
             let p = entry.path();
@@ -251,7 +256,10 @@ impl LeaseStore {
             workspace: req.workspace,
         };
         fs::create_dir_all(&self.dir).map_err(io_at(&self.dir))?;
-        write_atomic(&self.path_for(&lease.id), &serde_json::to_vec_pretty(&lease)?)?;
+        write_atomic(
+            &self.path_for(&lease.id),
+            &serde_json::to_vec_pretty(&lease)?,
+        )?;
         Ok(lease)
     }
 
@@ -333,7 +341,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = LeaseStore::open(dir.path());
         let a = store.claim(req("agent-a", &["src/auth"])).unwrap();
-        let err = store.claim(req("agent-b", &["src/auth/login.rs"])).unwrap_err();
+        let err = store
+            .claim(req("agent-b", &["src/auth/login.rs"]))
+            .unwrap_err();
         assert!(matches!(err, Error::LeaseConflict { .. }));
         // Same holder may re-claim overlapping paths.
         store.claim(req("agent-a", &["src/auth/x"])).unwrap();

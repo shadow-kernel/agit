@@ -254,7 +254,10 @@ pub enum Cmd {
     /// Verify object integrity and reachability.
     Fsck,
     /// Get or set configuration (user.name, user.email, default_branch).
-    Config { key: Option<String>, value: Option<String> },
+    Config {
+        key: Option<String>,
+        value: Option<String>,
+    },
     /// Manage server remotes.
     Remote {
         #[command(subcommand)]
@@ -440,18 +443,33 @@ pub fn run(cli: Cli) -> Result<()> {
     match cli.cmd {
         Cmd::Init { path } => {
             let base = cwd(&cli.dir)?;
-            let target = if path.is_absolute() { path } else { base.join(path) };
+            let target = if path.is_absolute() {
+                path
+            } else {
+                base.join(path)
+            };
             let repo = Repository::init(&target)?;
-            emit(json, &serde_json::json!({ "path": repo.work_dir(), "common_dir": repo.common_dir() }), || {
-                println!("Initialized empty agit repository in {}", repo.common_dir().display());
-            });
+            emit(
+                json,
+                &serde_json::json!({ "path": repo.work_dir(), "common_dir": repo.common_dir() }),
+                || {
+                    println!(
+                        "Initialized empty agit repository in {}",
+                        repo.common_dir().display()
+                    );
+                },
+            );
         }
         Cmd::Add { paths, all, force } => {
             let repo = open(&cli.dir)?;
             if paths.is_empty() && !all {
                 bail!("nothing specified; use `agit add <paths>` or `agit add -A`");
             }
-            let rel = if all { vec![] } else { rels(&repo, &cwd(&cli.dir)?, &paths)? };
+            let rel = if all {
+                vec![]
+            } else {
+                rels(&repo, &cwd(&cli.dir)?, &paths)?
+            };
             let r = worktree::add(&repo, &rel, force)?;
             emit(json, &r, || {
                 for p in &r.added {
@@ -488,7 +506,16 @@ pub fn run(cli: Cli) -> Result<()> {
             let st = worktree::status(&repo, true)?;
             emit(json, &st, || print_status(&st, short));
         }
-        Cmd::Commit { message, intent, task, meta, all, allow_empty, force, agent } => {
+        Cmd::Commit {
+            message,
+            intent,
+            task,
+            meta,
+            all,
+            allow_empty,
+            force,
+            agent,
+        } => {
             let repo = open(&cli.dir)?;
             let r = ops::commit(
                 &repo,
@@ -510,13 +537,21 @@ pub fn run(cli: Cli) -> Result<()> {
                 println!(" {} file(s) changed", r.changes.len());
             });
         }
-        Cmd::Checkpoint { message, cmd, agent } => {
+        Cmd::Checkpoint {
+            message,
+            cmd,
+            agent,
+        } => {
             let repo = open(&cli.dir)?;
             match cmd {
                 None => {
                     let r = ops::checkpoint(&repo, message, agent.info())?;
                     emit(json, &r, || {
-                        println!("checkpoint {} ({} file(s) differ from HEAD)", r.id.short(), r.changes_vs_head);
+                        println!(
+                            "checkpoint {} ({} file(s) differ from HEAD)",
+                            r.id.short(),
+                            r.changes_vs_head
+                        );
                     });
                 }
                 Some(CheckpointCmd::List { limit }) => {
@@ -527,22 +562,39 @@ pub fn run(cli: Cli) -> Result<()> {
                         .collect();
                     emit(json, &entries, || {
                         for e in &entries {
-                            println!("{} {} {}", e.id.short(), fmt_time(e.commit.time_ms), e.commit.summary());
+                            println!(
+                                "{} {} {}",
+                                e.id.short(),
+                                fmt_time(e.commit.time_ms),
+                                e.commit.summary()
+                            );
                         }
                     });
                 }
                 Some(CheckpointCmd::Restore { rev }) => {
                     let changes = ops::restore(&repo, &rev)?;
-                    emit(json, &changes, || println!("Restored {} file(s)", changes.len()));
+                    emit(json, &changes, || {
+                        println!("Restored {} file(s)", changes.len())
+                    });
                 }
             }
         }
         Cmd::Restore { rev } => {
             let repo = open(&cli.dir)?;
             let changes = ops::restore(&repo, &rev)?;
-            emit(json, &changes, || println!("Restored {} file(s)", changes.len()));
+            emit(json, &changes, || {
+                println!("Restored {} file(s)", changes.len())
+            });
         }
-        Cmd::Log { rev, limit, agent, task, path, first_parent, oneline } => {
+        Cmd::Log {
+            rev,
+            limit,
+            agent,
+            task,
+            path,
+            first_parent,
+            oneline,
+        } => {
             let repo = open(&cli.dir)?;
             let start = match repo.resolve(&rev) {
                 Ok(id) => vec![id],
@@ -553,7 +605,17 @@ pub fn run(cli: Cli) -> Result<()> {
                 Some(p) => Some(repo.rel_path(&cwd(&cli.dir)?, &p)?),
                 None => None,
             };
-            let entries = ops::log(&repo, &start, &LogOptions { limit, agent, task, path, first_parent })?;
+            let entries = ops::log(
+                &repo,
+                &start,
+                &LogOptions {
+                    limit,
+                    agent,
+                    task,
+                    path,
+                    first_parent,
+                },
+            )?;
             emit(json, &entries, || {
                 for e in &entries {
                     if oneline {
@@ -574,19 +636,28 @@ pub fn run(cli: Cli) -> Result<()> {
                         Some(p) => Some(repo.store().read_commit(p)?.tree),
                         None => None,
                     };
-                    let changes = diff::diff_trees(repo.store(), parent_tree.as_ref(), Some(&c.tree))?;
-                    let patch = if no_patch { None } else { Some(render_patch(&repo, &changes, 3)?) };
-                    emit(json, &serde_json::json!({ "id": id, "commit": c, "changes": changes, "patch": patch }), || {
-                        print_commit_header(&id, &c);
-                        println!();
-                        if let Some(p) = patch {
-                            print!("{p}");
-                        } else {
-                            for ch in &changes {
-                                println!("{} {}", ch.kind.letter(), ch.path);
+                    let changes =
+                        diff::diff_trees(repo.store(), parent_tree.as_ref(), Some(&c.tree))?;
+                    let patch = if no_patch {
+                        None
+                    } else {
+                        Some(render_patch(&repo, &changes, 3)?)
+                    };
+                    emit(
+                        json,
+                        &serde_json::json!({ "id": id, "commit": c, "changes": changes, "patch": patch }),
+                        || {
+                            print_commit_header(&id, &c);
+                            println!();
+                            if let Some(p) = patch {
+                                print!("{p}");
+                            } else {
+                                for ch in &changes {
+                                    println!("{} {}", ch.kind.letter(), ch.path);
+                                }
                             }
-                        }
-                    });
+                        },
+                    );
                 }
                 Object::Tree(t) => {
                     emit(json, &t.entries(), || {
@@ -597,7 +668,11 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
                 Object::Blob(b) => {
                     if json {
-                        emit(json, &serde_json::json!({ "id": id, "size": b.len(), "binary": diff::is_binary(&b), "content": String::from_utf8_lossy(&b) }), || {});
+                        emit(
+                            json,
+                            &serde_json::json!({ "id": id, "size": b.len(), "binary": diff::is_binary(&b), "content": String::from_utf8_lossy(&b) }),
+                            || {},
+                        );
                     } else {
                         use std::io::Write;
                         std::io::stdout().write_all(&b)?;
@@ -605,76 +680,126 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
             }
         }
-        Cmd::Diff { staged, revs, stat, name_only, unified } => {
+        Cmd::Diff {
+            staged,
+            revs,
+            stat,
+            name_only,
+            unified,
+        } => {
             let repo = open(&cli.dir)?;
-            let (old, new): (BTreeMap<String, diff::Side>, BTreeMap<String, diff::Side>) = match revs.len() {
-                0 if staged => {
-                    let head = repo.head_tree()?;
-                    (diff::tree_to_sides(repo.store(), head.as_ref())?, index_sides(&repo)?)
-                }
-                0 => (index_sides(&repo)?, worktree_sides(&repo)?),
-                1 => {
-                    let t = repo.resolve_commit(&revs[0])?.1.tree;
-                    (diff::tree_to_sides(repo.store(), Some(&t))?, worktree_sides(&repo)?)
-                }
-                2 => {
-                    let a = repo.resolve_commit(&revs[0])?.1.tree;
-                    let b = repo.resolve_commit(&revs[1])?.1.tree;
-                    (diff::tree_to_sides(repo.store(), Some(&a))?, diff::tree_to_sides(repo.store(), Some(&b))?)
-                }
-                _ => bail!("diff takes at most two revisions"),
-            };
+            let (old, new): (BTreeMap<String, diff::Side>, BTreeMap<String, diff::Side>) =
+                match revs.len() {
+                    0 if staged => {
+                        let head = repo.head_tree()?;
+                        (
+                            diff::tree_to_sides(repo.store(), head.as_ref())?,
+                            index_sides(&repo)?,
+                        )
+                    }
+                    0 => (index_sides(&repo)?, worktree_sides(&repo)?),
+                    1 => {
+                        let t = repo.resolve_commit(&revs[0])?.1.tree;
+                        (
+                            diff::tree_to_sides(repo.store(), Some(&t))?,
+                            worktree_sides(&repo)?,
+                        )
+                    }
+                    2 => {
+                        let a = repo.resolve_commit(&revs[0])?.1.tree;
+                        let b = repo.resolve_commit(&revs[1])?.1.tree;
+                        (
+                            diff::tree_to_sides(repo.store(), Some(&a))?,
+                            diff::tree_to_sides(repo.store(), Some(&b))?,
+                        )
+                    }
+                    _ => bail!("diff takes at most two revisions"),
+                };
             let changes = diff::diff_maps(&old, &new);
             let from_worktree = revs.len() <= 1 && !staged;
-            let patch = if name_only || stat { None } else { Some(render_patch_sides(&repo, &changes, unified, from_worktree)?) };
+            let patch = if name_only || stat {
+                None
+            } else {
+                Some(render_patch_sides(&repo, &changes, unified, from_worktree)?)
+            };
             let stats: Vec<(String, usize, usize)> = if stat || json {
-                changes.iter().map(|c| {
-                    let (a, d) = blob_stats(&repo, c, from_worktree).unwrap_or((0, 0));
-                    (c.path.clone(), a, d)
-                }).collect()
+                changes
+                    .iter()
+                    .map(|c| {
+                        let (a, d) = blob_stats(&repo, c, from_worktree).unwrap_or((0, 0));
+                        (c.path.clone(), a, d)
+                    })
+                    .collect()
             } else {
                 vec![]
             };
-            emit(json, &serde_json::json!({ "changes": changes, "stats": stats.iter().map(|(p,a,d)| serde_json::json!({"path":p,"added":a,"removed":d})).collect::<Vec<_>>(), "patch": patch }), || {
-                if name_only {
-                    for c in &changes {
-                        println!("{}", c.path);
+            emit(
+                json,
+                &serde_json::json!({ "changes": changes, "stats": stats.iter().map(|(p,a,d)| serde_json::json!({"path":p,"added":a,"removed":d})).collect::<Vec<_>>(), "patch": patch }),
+                || {
+                    if name_only {
+                        for c in &changes {
+                            println!("{}", c.path);
+                        }
+                    } else if stat {
+                        let (mut ta, mut td) = (0, 0);
+                        for (p, a, d) in &stats {
+                            ta += a;
+                            td += d;
+                            println!(" {p} | +{a} -{d}");
+                        }
+                        println!(
+                            " {} file(s) changed, {ta} insertion(s), {td} deletion(s)",
+                            changes.len()
+                        );
+                    } else if let Some(p) = patch {
+                        print!("{p}");
                     }
-                } else if stat {
-                    let (mut ta, mut td) = (0, 0);
-                    for (p, a, d) in &stats {
-                        ta += a;
-                        td += d;
-                        println!(" {p} | +{a} -{d}");
-                    }
-                    println!(" {} file(s) changed, {ta} insertion(s), {td} deletion(s)", changes.len());
-                } else if let Some(p) = patch {
-                    print!("{p}");
-                }
-            });
+                },
+            );
         }
-        Cmd::Branch { name, start, delete, force_delete } => {
+        Cmd::Branch {
+            name,
+            start,
+            delete,
+            force_delete,
+        } => {
             let repo = open(&cli.dir)?;
             match name {
                 None => {
                     let list = ops::list_branches(&repo)?;
                     emit(json, &list, || {
                         for b in &list {
-                            println!("{} {} {}", if b.current { "*" } else { " " }, b.name, b.id.short());
+                            println!(
+                                "{} {} {}",
+                                if b.current { "*" } else { " " },
+                                b.name,
+                                b.id.short()
+                            );
                         }
                     });
                 }
                 Some(n) if delete || force_delete => {
                     let id = ops::delete_branch(&repo, &n, force_delete)?;
-                    emit(json, &serde_json::json!({ "deleted": n, "was": id }), || println!("Deleted branch {n} (was {})", id.short()));
+                    emit(
+                        json,
+                        &serde_json::json!({ "deleted": n, "was": id }),
+                        || println!("Deleted branch {n} (was {})", id.short()),
+                    );
                 }
                 Some(n) => {
                     let b = ops::create_branch(&repo, &n, start.as_deref())?;
-                    emit(json, &b, || println!("Created branch {} at {}", b.name, b.id.short()));
+                    emit(json, &b, || {
+                        println!("Created branch {} at {}", b.name, b.id.short())
+                    });
                 }
             }
         }
-        Cmd::Switch { target, create, force } => {
+        Cmd::Switch {
+            target,
+            create,
+            force,
+        } => {
             let repo = open(&cli.dir)?;
             let r = ops::switch(&repo, &target, create, force)?;
             emit(json, &r, || match &r.head {
@@ -682,20 +807,50 @@ pub fn run(cli: Cli) -> Result<()> {
                 ops::Head2::Detached => println!("HEAD is now at {}", r.id.short()),
             });
         }
-        Cmd::Merge { rev, message, intent, no_ff, abort, force, agent } => {
+        Cmd::Merge {
+            rev,
+            message,
+            intent,
+            no_ff,
+            abort,
+            force,
+            agent,
+        } => {
             let repo = open(&cli.dir)?;
             if abort {
                 ops::merge_abort(&repo)?;
-                emit(json, &serde_json::json!({ "aborted": true }), || println!("Merge aborted"));
+                emit(json, &serde_json::json!({ "aborted": true }), || {
+                    println!("Merge aborted")
+                });
                 return Ok(());
             }
             let rev = rev.context("merge needs a revision")?;
-            let r = ops::merge(&repo, &rev, MergeOptions { message, intent, agent: agent.info(), no_ff, force })?;
+            let r = ops::merge(
+                &repo,
+                &rev,
+                MergeOptions {
+                    message,
+                    intent,
+                    agent: agent.info(),
+                    no_ff,
+                    force,
+                },
+            )?;
             let conflicted = matches!(r, MergeResult::Conflicts { .. });
             emit(json, &r, || match &r {
                 MergeResult::AlreadyUpToDate { .. } => println!("Already up to date."),
-                MergeResult::FastForward { to, files_changed, .. } => println!("Fast-forward to {} ({files_changed} file(s))", to.short()),
-                MergeResult::Merged { commit, auto_merged, .. } => println!("Merge made commit {} ({} file(s) auto-merged)", commit.short(), auto_merged.len()),
+                MergeResult::FastForward {
+                    to, files_changed, ..
+                } => println!("Fast-forward to {} ({files_changed} file(s))", to.short()),
+                MergeResult::Merged {
+                    commit,
+                    auto_merged,
+                    ..
+                } => println!(
+                    "Merge made commit {} ({} file(s) auto-merged)",
+                    commit.short(),
+                    auto_merged.len()
+                ),
                 MergeResult::Conflicts { conflicts, .. } => {
                     for c in conflicts {
                         println!("CONFLICT ({:?}): {}", c.kind, c.path);
@@ -714,27 +869,51 @@ pub fn run(cli: Cli) -> Result<()> {
             match name {
                 None => {
                     let tags = ops::list_tags(&repo)?;
-                    emit(json, &tags.iter().map(|(n, id)| serde_json::json!({"name": n, "id": id})).collect::<Vec<_>>(), || {
-                        for (n, _) in &tags {
-                            println!("{n}");
-                        }
-                    });
+                    emit(
+                        json,
+                        &tags
+                            .iter()
+                            .map(|(n, id)| serde_json::json!({"name": n, "id": id}))
+                            .collect::<Vec<_>>(),
+                        || {
+                            for (n, _) in &tags {
+                                println!("{n}");
+                            }
+                        },
+                    );
                 }
                 Some(n) if delete => {
                     let id = ops::delete_tag(&repo, &n)?;
-                    emit(json, &serde_json::json!({ "deleted": n, "was": id }), || println!("Deleted tag {n}"));
+                    emit(
+                        json,
+                        &serde_json::json!({ "deleted": n, "was": id }),
+                        || println!("Deleted tag {n}"),
+                    );
                 }
                 Some(n) => {
                     let id = ops::create_tag(&repo, &n, rev.as_deref())?;
-                    emit(json, &serde_json::json!({ "name": n, "id": id }), || println!("Tagged {} as {n}", id.short()));
+                    emit(json, &serde_json::json!({ "name": n, "id": id }), || {
+                        println!("Tagged {} as {n}", id.short())
+                    });
                 }
             }
         }
         Cmd::Lease { cmd } => run_lease(&cli.dir, json, cmd)?,
         Cmd::Remote { cmd } => crate::remote::run_remote(&open(&cli.dir)?, json, cmd)?,
-        Cmd::Push { remote, branch, force, create } => crate::remote::run_push(&open(&cli.dir)?, json, &remote, branch, force, create)?,
-        Cmd::Fetch { remote, branches } => crate::remote::run_fetch(&open(&cli.dir)?, json, &remote, &branches)?,
-        Cmd::Pull { remote, no_ff, agent } => crate::remote::run_pull(&open(&cli.dir)?, json, &remote, no_ff, agent.info())?,
+        Cmd::Push {
+            remote,
+            branch,
+            force,
+            create,
+        } => crate::remote::run_push(&open(&cli.dir)?, json, &remote, branch, force, create)?,
+        Cmd::Fetch { remote, branches } => {
+            crate::remote::run_fetch(&open(&cli.dir)?, json, &remote, &branches)?
+        }
+        Cmd::Pull {
+            remote,
+            no_ff,
+            agent,
+        } => crate::remote::run_pull(&open(&cli.dir)?, json, &remote, no_ff, agent.info())?,
         Cmd::Clone { url, dest } => crate::remote::run_clone(json, &cwd(&cli.dir)?, &url, dest)?,
         Cmd::Pr { remote, cmd } => crate::remote::run_pr(&open(&cli.dir)?, json, &remote, cmd)?,
         Cmd::Know { remote, cmd } => crate::remote::run_know(&open(&cli.dir)?, json, &remote, cmd)?,
@@ -746,14 +925,28 @@ pub fn run(cli: Cli) -> Result<()> {
                 SubmoduleCmd::Add { url, path, branch } => {
                     let rel = repo.rel_path(&cwd, std::path::Path::new(&path))?;
                     let m = agit_protocol::submodule::add(&repo, &url, &rel, branch.as_deref())?;
-                    emit(json, &m, || println!("added submodule {} from {}", m.path, m.url));
+                    emit(json, &m, || {
+                        println!("added submodule {} from {}", m.path, m.url)
+                    });
                 }
                 SubmoduleCmd::Update { paths } => {
-                    let rels = rels(&repo, &cwd, &paths.iter().map(PathBuf::from).collect::<Vec<_>>())?;
-                    let r = agit_protocol::submodule::update(&repo, if rels.is_empty() { None } else { Some(&rels) })?;
+                    let rels = rels(
+                        &repo,
+                        &cwd,
+                        &paths.iter().map(PathBuf::from).collect::<Vec<_>>(),
+                    )?;
+                    let r = agit_protocol::submodule::update(
+                        &repo,
+                        if rels.is_empty() { None } else { Some(&rels) },
+                    )?;
                     emit(json, &r, || {
                         for u in &r {
-                            println!("{:<12} {} {}", u.action, u.path, u.commit.map(|c| c.short()).unwrap_or_default());
+                            println!(
+                                "{:<12} {} {}",
+                                u.action,
+                                u.path,
+                                u.commit.map(|c| c.short()).unwrap_or_default()
+                            );
                         }
                     });
                 }
@@ -761,26 +954,41 @@ pub fn run(cli: Cli) -> Result<()> {
                     let r = agit_protocol::submodule::status(&repo)?;
                     emit(json, &r, || {
                         for s in &r {
-                            println!("{:<9} {} pinned={} actual={}", s.state, s.path, s.pinned.map(|c| c.short()).unwrap_or_else(|| "-".into()), s.actual.map(|c| c.short()).unwrap_or_else(|| "-".into()));
+                            println!(
+                                "{:<9} {} pinned={} actual={}",
+                                s.state,
+                                s.path,
+                                s.pinned.map(|c| c.short()).unwrap_or_else(|| "-".into()),
+                                s.actual.map(|c| c.short()).unwrap_or_else(|| "-".into())
+                            );
                         }
                     });
                 }
                 SubmoduleCmd::Remove { path, delete } => {
                     let rel = repo.rel_path(&cwd, std::path::Path::new(&path))?;
                     agit_protocol::submodule::remove(&repo, &rel, delete)?;
-                    emit(json, &serde_json::json!({ "removed": rel }), || println!("removed submodule {rel}"));
+                    emit(json, &serde_json::json!({ "removed": rel }), || {
+                        println!("removed submodule {rel}")
+                    });
                 }
             }
         }
         Cmd::Ws { cmd } => run_ws(&cli.dir, json, cmd)?,
-        Cmd::Events { since, follow, kind } => {
+        Cmd::Events {
+            since,
+            follow,
+            kind,
+        } => {
             let repo = open(&cli.dir)?;
             let mut cursor = since;
             loop {
                 let events = repo.events().read_after(cursor)?;
                 for ev in events {
                     cursor = ev.seq;
-                    if kind.as_ref().is_some_and(|k| !ev.kind.starts_with(k.as_str())) {
+                    if kind
+                        .as_ref()
+                        .is_some_and(|k| !ev.kind.starts_with(k.as_str()))
+                    {
                         continue;
                     }
                     if json {
@@ -806,17 +1014,25 @@ pub fn run(cli: Cli) -> Result<()> {
         Cmd::RevParse { rev } => {
             let repo = open(&cli.dir)?;
             let id = repo.resolve(&rev)?;
-            emit(json, &serde_json::json!({ "rev": rev, "id": id }), || println!("{id}"));
+            emit(json, &serde_json::json!({ "rev": rev, "id": id }), || {
+                println!("{id}")
+            });
         }
         Cmd::CatFile { id, type_only } => {
             let repo = open(&cli.dir)?;
             let oid: ObjectId = match id.parse() {
                 Ok(o) => o,
-                Err(_) => repo.resolve(&id).or_else(|_| repo.store().resolve_prefix(&id))?,
+                Err(_) => repo
+                    .resolve(&id)
+                    .or_else(|_| repo.store().resolve_prefix(&id))?,
             };
             let kind = repo.store().kind(&oid)?;
             if type_only {
-                emit(json, &serde_json::json!({ "id": oid, "type": kind }), || println!("{kind}"));
+                emit(
+                    json,
+                    &serde_json::json!({ "id": oid, "type": kind }),
+                    || println!("{kind}"),
+                );
                 return Ok(());
             }
             match repo.store().read(&oid)? {
@@ -832,7 +1048,9 @@ pub fn run(cli: Cli) -> Result<()> {
                     });
                 }
                 Object::Commit(c) => {
-                    emit(json, &c, || println!("{}", serde_json::to_string_pretty(&c).unwrap()));
+                    emit(json, &c, || {
+                        println!("{}", serde_json::to_string_pretty(&c).unwrap())
+                    });
                 }
             }
         }
@@ -882,7 +1100,9 @@ pub fn run(cli: Cli) -> Result<()> {
             let repo = open(&cli.dir)?;
             let mut cfg = repo.config()?;
             match (key, value) {
-                (None, _) => emit(json, &cfg, || println!("{}", serde_json::to_string_pretty(&cfg).unwrap())),
+                (None, _) => emit(json, &cfg, || {
+                    println!("{}", serde_json::to_string_pretty(&cfg).unwrap())
+                }),
                 (Some(k), None) => {
                     let v = match k.as_str() {
                         "user.name" => serde_json::json!(cfg.user.name),
@@ -890,7 +1110,9 @@ pub fn run(cli: Cli) -> Result<()> {
                         "default_branch" => serde_json::json!(cfg.default_branch),
                         _ => bail!("unknown config key {k}"),
                     };
-                    emit(json, &serde_json::json!({ "key": k, "value": v }), || println!("{}", v.as_str().unwrap_or("")));
+                    emit(json, &serde_json::json!({ "key": k, "value": v }), || {
+                        println!("{}", v.as_str().unwrap_or(""))
+                    });
                 }
                 (Some(k), Some(v)) => {
                     match k.as_str() {
@@ -912,7 +1134,13 @@ fn run_lease(dir: &Option<PathBuf>, json: bool, cmd: LeaseCmd) -> Result<()> {
     let repo = open(dir)?;
     let leases = repo.leases();
     match cmd {
-        LeaseCmd::Claim { paths, holder, ttl, note, shared } => {
+        LeaseCmd::Claim {
+            paths,
+            holder,
+            ttl,
+            note,
+            shared,
+        } => {
             if paths.is_empty() {
                 bail!("lease claim needs at least one path");
             }
@@ -930,13 +1158,29 @@ fn run_lease(dir: &Option<PathBuf>, json: bool, cmd: LeaseCmd) -> Result<()> {
             let lease = leases.claim(LeaseRequest {
                 holder: holder.clone(),
                 paths,
-                mode: if shared { LeaseMode::Shared } else { LeaseMode::Exclusive },
+                mode: if shared {
+                    LeaseMode::Shared
+                } else {
+                    LeaseMode::Exclusive
+                },
                 ttl: Some(parse_duration(&ttl)?),
                 note,
                 workspace: Some(repo.workspace().to_string()),
             })?;
-            repo.events().append("lease.claim", Some(repo.workspace()), Some(&holder), serde_json::to_value(&lease)?)?;
-            emit(json, &lease, || println!("lease {} granted to {} for {}", lease.id, lease.holder, lease.paths.join(", ")));
+            repo.events().append(
+                "lease.claim",
+                Some(repo.workspace()),
+                Some(&holder),
+                serde_json::to_value(&lease)?,
+            )?;
+            emit(json, &lease, || {
+                println!(
+                    "lease {} granted to {} for {}",
+                    lease.id,
+                    lease.holder,
+                    lease.paths.join(", ")
+                )
+            });
         }
         LeaseCmd::Release { id, holder, all } => {
             let released = if all {
@@ -947,14 +1191,32 @@ fn run_lease(dir: &Option<PathBuf>, json: bool, cmd: LeaseCmd) -> Result<()> {
                 vec![leases.release(&id)?]
             };
             for l in &released {
-                repo.events().append("lease.release", Some(repo.workspace()), Some(&l.holder), serde_json::json!({ "id": l.id, "paths": l.paths }))?;
+                repo.events().append(
+                    "lease.release",
+                    Some(repo.workspace()),
+                    Some(&l.holder),
+                    serde_json::json!({ "id": l.id, "paths": l.paths }),
+                )?;
             }
-            emit(json, &released, || println!("released {} lease(s)", released.len()));
+            emit(json, &released, || {
+                println!("released {} lease(s)", released.len())
+            });
         }
         LeaseCmd::Renew { id, ttl } => {
             let l = leases.renew(&id, parse_duration(&ttl)?)?;
-            repo.events().append("lease.renew", Some(repo.workspace()), Some(&l.holder), serde_json::json!({ "id": l.id, "expires_ms": l.expires_ms }))?;
-            emit(json, &l, || println!("lease {} renewed until {}", l.id, l.expires_ms.map(fmt_time).unwrap_or_default()));
+            repo.events().append(
+                "lease.renew",
+                Some(repo.workspace()),
+                Some(&l.holder),
+                serde_json::json!({ "id": l.id, "expires_ms": l.expires_ms }),
+            )?;
+            emit(json, &l, || {
+                println!(
+                    "lease {} renewed until {}",
+                    l.id,
+                    l.expires_ms.map(fmt_time).unwrap_or_default()
+                )
+            });
         }
         LeaseCmd::List => {
             let list = leases.list()?;
@@ -975,10 +1237,20 @@ fn run_lease(dir: &Option<PathBuf>, json: bool, cmd: LeaseCmd) -> Result<()> {
             let cwd = cwd(dir)?;
             let paths: Vec<String> = paths
                 .iter()
-                .map(|p| if p.contains(['*', '?', '[', '{']) { Ok(p.clone()) } else { Ok(repo.rel_path(&cwd, std::path::Path::new(p))?) })
+                .map(|p| {
+                    if p.contains(['*', '?', '[', '{']) {
+                        Ok(p.clone())
+                    } else {
+                        Ok(repo.rel_path(&cwd, std::path::Path::new(p))?)
+                    }
+                })
                 .collect::<Result<_>>()?;
             ops::enforce_leases(leases, &holder, &paths)?;
-            emit(json, &serde_json::json!({ "allowed": true, "holder": holder, "paths": paths }), || println!("ok"));
+            emit(
+                json,
+                &serde_json::json!({ "allowed": true, "holder": holder, "paths": paths }),
+                || println!("ok"),
+            );
         }
     }
     Ok(())
@@ -987,23 +1259,48 @@ fn run_lease(dir: &Option<PathBuf>, json: bool, cmd: LeaseCmd) -> Result<()> {
 fn run_ws(dir: &Option<PathBuf>, json: bool, cmd: WsCmd) -> Result<()> {
     let repo = open(dir)?;
     match cmd {
-        WsCmd::New { name, path, from, agent } => {
+        WsCmd::New {
+            name,
+            path,
+            from,
+            agent,
+        } => {
             let start = match from {
                 Some(r) => Some(repo.resolve(&r)?),
                 None => None,
             };
             let path = match path {
-                Some(p) => Some(if p.is_absolute() { p } else { cwd(dir)?.join(p) }),
+                Some(p) => Some(if p.is_absolute() {
+                    p
+                } else {
+                    cwd(dir)?.join(p)
+                }),
                 None => None,
             };
-            let (_ws, meta) = repo.create_workspace(&name, path.as_deref(), start, agent.as_deref())?;
-            emit(json, &meta, || println!("workspace {} created at {} (branch ws/{})", meta.name, meta.path.display(), meta.name));
+            let (_ws, meta) =
+                repo.create_workspace(&name, path.as_deref(), start, agent.as_deref())?;
+            emit(json, &meta, || {
+                println!(
+                    "workspace {} created at {} (branch ws/{})",
+                    meta.name,
+                    meta.path.display(),
+                    meta.name
+                )
+            });
         }
         WsCmd::List => {
             let list = repo.list_workspaces()?;
             emit(json, &list, || {
                 for w in &list {
-                    println!("{} {}{}", if w.name == repo.workspace() { "*" } else { " " }, w.name, w.agent.as_ref().map(|a| format!(" ({a})")).unwrap_or_default());
+                    println!(
+                        "{} {}{}",
+                        if w.name == repo.workspace() { "*" } else { " " },
+                        w.name,
+                        w.agent
+                            .as_ref()
+                            .map(|a| format!(" ({a})"))
+                            .unwrap_or_default()
+                    );
                     println!("    {}", w.path.display());
                 }
             });
@@ -1026,7 +1323,8 @@ fn parse_meta(items: &[String]) -> Result<BTreeMap<String, serde_json::Value>> {
         let (k, v) = item
             .split_once('=')
             .with_context(|| format!("--meta expects key=value, got {item:?}"))?;
-        let value = serde_json::from_str(v).unwrap_or_else(|_| serde_json::Value::String(v.to_string()));
+        let value =
+            serde_json::from_str(v).unwrap_or_else(|_| serde_json::Value::String(v.to_string()));
         out.insert(k.to_string(), value);
     }
     Ok(out)
@@ -1036,7 +1334,16 @@ fn index_sides(repo: &Repository) -> Result<BTreeMap<String, diff::Side>> {
     Ok(repo
         .load_index()?
         .iter()
-        .map(|e| (e.path.clone(), diff::Side { id: e.id, mode: e.mode, size: e.size }))
+        .map(|e| {
+            (
+                e.path.clone(),
+                diff::Side {
+                    id: e.id,
+                    mode: e.mode,
+                    size: e.size,
+                },
+            )
+        })
         .collect())
 }
 
@@ -1057,7 +1364,12 @@ fn worktree_sides(repo: &Repository) -> Result<BTreeMap<String, diff::Side>> {
     Ok(sides)
 }
 
-fn read_side(repo: &Repository, path: &str, side: &diff::Side, from_worktree: bool) -> Result<Vec<u8>> {
+fn read_side(
+    repo: &Repository,
+    path: &str,
+    side: &diff::Side,
+    from_worktree: bool,
+) -> Result<Vec<u8>> {
     if from_worktree && !repo.store().contains(&side.id) {
         return Ok(std::fs::read(repo.abs_path(path))?);
     }
@@ -1068,7 +1380,12 @@ fn render_patch(repo: &Repository, changes: &[diff::Change], ctx: usize) -> Resu
     render_patch_sides(repo, changes, ctx, false)
 }
 
-fn render_patch_sides(repo: &Repository, changes: &[diff::Change], ctx: usize, from_worktree: bool) -> Result<String> {
+fn render_patch_sides(
+    repo: &Repository,
+    changes: &[diff::Change],
+    ctx: usize,
+    from_worktree: bool,
+) -> Result<String> {
     let mut out = String::new();
     for c in changes {
         let old = match &c.old {
@@ -1100,9 +1417,19 @@ fn blob_stats(repo: &Repository, c: &diff::Change, from_worktree: bool) -> Resul
 }
 
 fn print_commit_header(id: &ObjectId, c: &agit_core::Commit) {
-    println!("commit {id}{}", if c.checkpoint { " (checkpoint)" } else { "" });
+    println!(
+        "commit {id}{}",
+        if c.checkpoint { " (checkpoint)" } else { "" }
+    );
     if c.parents.len() > 1 {
-        println!("Merge:  {}", c.parents.iter().map(|p| p.short()).collect::<Vec<_>>().join(" "));
+        println!(
+            "Merge:  {}",
+            c.parents
+                .iter()
+                .map(|p| p.short())
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
     }
     println!("Author: {} <{}>", c.author.name, c.author.email);
     if let Some(a) = &c.agent {
@@ -1146,7 +1473,10 @@ fn print_status(st: &worktree::Status, short: bool) {
     }
     match &st.branch {
         Some(b) => println!("On branch {b}"),
-        None => println!("HEAD detached at {}", st.head.map(|h| h.short()).unwrap_or_default()),
+        None => println!(
+            "HEAD detached at {}",
+            st.head.map(|h| h.short()).unwrap_or_default()
+        ),
     }
     if st.workspace != "main" {
         println!("Workspace {}", st.workspace);

@@ -188,7 +188,8 @@ pub fn status(repo: &Repository, refresh_cache: bool) -> Result<Status> {
 
     // unstaged: index vs working tree
     let files = walk(repo, None)?;
-    let on_disk: BTreeMap<&str, &FileStat> = files.iter().map(|f| (f.rel.as_str(), &f.stat)).collect();
+    let on_disk: BTreeMap<&str, &FileStat> =
+        files.iter().map(|f| (f.rel.as_str(), &f.stat)).collect();
 
     let (changed, cache_updates) = compare_index_to_disk(repo, &index, &on_disk)?;
 
@@ -226,15 +227,18 @@ pub fn status(repo: &Repository, refresh_cache: bool) -> Result<Status> {
     })
 }
 
+/// Stat cache refreshes produced by a status pass: (path, fresh stat).
+type StatRefresh = (String, FileStat);
+
 /// Compare every index entry against the files on disk. Returns the changes
 /// and a list of (path, stat) whose cache entries can be refreshed.
 fn compare_index_to_disk(
     repo: &Repository,
     index: &Index,
     on_disk: &BTreeMap<&str, &FileStat>,
-) -> Result<(Vec<Change>, Vec<(String, FileStat)>)> {
+) -> Result<(Vec<Change>, Vec<StatRefresh>)> {
     let entries: Vec<&IndexEntry> = index.iter().collect();
-    let results: Vec<(Option<Change>, Option<(String, FileStat)>)> = entries
+    let results: Vec<(Option<Change>, Option<StatRefresh>)> = entries
         .par_iter()
         .map(|e| {
             let old = Side {
@@ -250,12 +254,21 @@ fn compare_index_to_disk(
                             path: e.path.clone(),
                             kind: ChangeKind::Modified,
                             old: Some(old),
-                            new: Some(Side { id: head, mode: EntryMode::Submodule, size: 0 }),
+                            new: Some(Side {
+                                id: head,
+                                mode: EntryMode::Submodule,
+                                size: 0,
+                            }),
                         }),
                         None,
                     ),
                     _ => (
-                        Some(Change { path: e.path.clone(), kind: ChangeKind::Deleted, old: Some(old), new: None }),
+                        Some(Change {
+                            path: e.path.clone(),
+                            kind: ChangeKind::Deleted,
+                            old: Some(old),
+                            new: None,
+                        }),
                         None,
                     ),
                 };
@@ -347,7 +360,10 @@ fn hash_path(abs: &Path, mode: EntryMode) -> Result<(ObjectId, u64)> {
     if mode == EntryMode::Symlink {
         let target = fs::read_link(abs).map_err(io_at(abs))?;
         let bytes = target.to_string_lossy().as_bytes().to_vec();
-        Ok((crate::object::hash_object(ObjectKind::Blob, &bytes), bytes.len() as u64))
+        Ok((
+            crate::object::hash_object(ObjectKind::Blob, &bytes),
+            bytes.len() as u64,
+        ))
     } else {
         ObjectStore::hash_file(abs)
     }
@@ -431,7 +447,9 @@ pub fn add(repo: &Repository, rel_paths: &[String], include_ignored: bool) -> Re
     let mut submodule_entries: Vec<IndexEntry> = Vec::new();
     for m in &modules {
         let requested = rel_paths.is_empty()
-            || rel_paths.iter().any(|p| p == &m.path || m.path.starts_with(&format!("{p}/")) || p.is_empty());
+            || rel_paths
+                .iter()
+                .any(|p| p == &m.path || m.path.starts_with(&format!("{p}/")) || p.is_empty());
         if !requested {
             continue;
         }
@@ -500,7 +518,9 @@ pub fn add(repo: &Repository, rel_paths: &[String], include_ignored: bool) -> Re
             let abs = repo.abs_path(&f.rel);
             let (id, size) = store_path(store, &abs, f.stat.mode)?;
             let is_new = existing.is_none();
-            let changed = existing.as_ref().is_none_or(|e| e.id != id || e.mode != f.stat.mode || e.conflict);
+            let changed = existing
+                .as_ref()
+                .is_none_or(|e| e.id != id || e.mode != f.stat.mode || e.conflict);
             Ok((
                 IndexEntry {
                     path: f.rel,
@@ -563,12 +583,20 @@ pub fn unstage(repo: &Repository, rel_paths: &[String]) -> Result<Vec<String>> {
     let head = tree_to_sides(repo.store(), head_tree.as_ref())?;
     let mut touched = Vec::new();
     let targets: Vec<String> = if rel_paths.is_empty() {
-        index.paths().map(str::to_string).chain(head.keys().cloned()).collect()
+        index
+            .paths()
+            .map(str::to_string)
+            .chain(head.keys().cloned())
+            .collect()
     } else {
         let mut v = Vec::new();
         for p in rel_paths {
             v.extend(index.under(p).map(|e| e.path.clone()));
-            v.extend(head.keys().filter(|k| *k == p || k.starts_with(&format!("{p}/"))).cloned());
+            v.extend(
+                head.keys()
+                    .filter(|k| *k == p || k.starts_with(&format!("{p}/")))
+                    .cloned(),
+            );
         }
         v
     };
@@ -631,7 +659,11 @@ pub fn checkout_tree(
         for c in &changes {
             let abs = repo.abs_path(&c.path);
             let from_side = from_sides.get(&c.path);
-            if from_side.is_some_and(|s| s.mode == EntryMode::Submodule) || c.new.as_ref().is_some_and(|s| s.mode == EntryMode::Submodule) {
+            if from_side.is_some_and(|s| s.mode == EntryMode::Submodule)
+                || c.new
+                    .as_ref()
+                    .is_some_and(|s| s.mode == EntryMode::Submodule)
+            {
                 continue;
             }
             match (fs::symlink_metadata(&abs), from_side) {
@@ -670,7 +702,10 @@ pub fn checkout_tree(
         let abs = repo.abs_path(&c.path);
         match c.kind {
             ChangeKind::Deleted => {
-                if c.old.as_ref().is_some_and(|s| s.mode == EntryMode::Submodule) {
+                if c.old
+                    .as_ref()
+                    .is_some_and(|s| s.mode == EntryMode::Submodule)
+                {
                     // Leave the nested repository in place; `submodule` manages it.
                 } else if abs.exists() || fs::symlink_metadata(&abs).is_ok() {
                     fs::remove_file(&abs).map_err(io_at(&abs))?;
@@ -743,7 +778,11 @@ fn write_entry(store: &ObjectStore, abs: &Path, side: &Side) -> Result<()> {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let mode = if side.mode == EntryMode::Executable { 0o755 } else { 0o644 };
+                let mode = if side.mode == EntryMode::Executable {
+                    0o755
+                } else {
+                    0o644
+                };
                 fs::set_permissions(abs, fs::Permissions::from_mode(mode)).map_err(io_at(abs))?;
             }
         }

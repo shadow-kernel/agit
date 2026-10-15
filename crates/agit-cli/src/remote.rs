@@ -14,9 +14,14 @@ use crate::output::{emit, fmt_time};
 #[derive(Subcommand)]
 pub enum RemoteCmd {
     /// Register a remote: `agit remote add origin http://host:7878/api/v1/repos/<name>`.
-    Add { name: String, url: String },
+    Add {
+        name: String,
+        url: String,
+    },
     List,
-    Remove { name: String },
+    Remove {
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -45,7 +50,9 @@ pub enum PrCmd {
         state: String,
     },
     /// Show a pull request with commits, changes and mergeability.
-    View { number: u64 },
+    View {
+        number: u64,
+    },
     /// Submit a review: approve, request_changes or comment.
     Review {
         number: u64,
@@ -74,7 +81,9 @@ pub enum PrCmd {
         #[arg(short, long)]
         message: Option<String>,
     },
-    Close { number: u64 },
+    Close {
+        number: u64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -124,11 +133,19 @@ pub fn run_remote(repo: &Repository, json: bool, cmd: RemoteCmd) -> Result<()> {
     match cmd {
         RemoteCmd::Add { name, url } => {
             sync::add_remote(repo, &name, &url)?;
-            emit(json, &serde_json::json!({ "name": name, "url": url }), || println!("added remote {name}"));
+            emit(
+                json,
+                &serde_json::json!({ "name": name, "url": url }),
+                || println!("added remote {name}"),
+            );
         }
         RemoteCmd::List => {
             let cfg = repo.config()?;
-            let list: Vec<serde_json::Value> = cfg.remotes.iter().map(|(n, r)| serde_json::json!({ "name": n, "url": r.url })).collect();
+            let list: Vec<serde_json::Value> = cfg
+                .remotes
+                .iter()
+                .map(|(n, r)| serde_json::json!({ "name": n, "url": r.url }))
+                .collect();
             emit(json, &list, || {
                 for (n, r) in &cfg.remotes {
                     println!("{n}\t{}", r.url);
@@ -137,16 +154,27 @@ pub fn run_remote(repo: &Repository, json: bool, cmd: RemoteCmd) -> Result<()> {
         }
         RemoteCmd::Remove { name } => {
             sync::remove_remote(repo, &name)?;
-            emit(json, &serde_json::json!({ "removed": name }), || println!("removed remote {name}"));
+            emit(json, &serde_json::json!({ "removed": name }), || {
+                println!("removed remote {name}")
+            });
         }
     }
     Ok(())
 }
 
-pub fn run_push(repo: &Repository, json: bool, remote: &str, branch: Option<String>, force: bool, create: bool) -> Result<()> {
+pub fn run_push(
+    repo: &Repository,
+    json: bool,
+    remote: &str,
+    branch: Option<String>,
+    force: bool,
+    create: bool,
+) -> Result<()> {
     let branch = match branch {
         Some(b) => b,
-        None => repo.current_branch()?.ok_or_else(|| anyhow::anyhow!("not on a branch; specify one to push"))?,
+        None => repo
+            .current_branch()?
+            .ok_or_else(|| anyhow::anyhow!("not on a branch; specify one to push"))?,
     };
     let r = sync::push(repo, remote, &branch, force, create)?;
     emit(json, &r, || {
@@ -155,7 +183,9 @@ pub fn run_push(repo: &Repository, json: bool, remote: &str, branch: Option<Stri
         } else {
             println!(
                 "To {remote}: {} -> {} ({} object(s) sent)",
-                r.old.map(|o| o.short()).unwrap_or_else(|| "[new branch]".into()),
+                r.old
+                    .map(|o| o.short())
+                    .unwrap_or_else(|| "[new branch]".into()),
                 r.new.short(),
                 r.objects_sent
             );
@@ -165,29 +195,62 @@ pub fn run_push(repo: &Repository, json: bool, remote: &str, branch: Option<Stri
 }
 
 pub fn run_fetch(repo: &Repository, json: bool, remote: &str, branches: &[String]) -> Result<()> {
-    let r = sync::fetch(repo, remote, if branches.is_empty() { None } else { Some(branches) })?;
+    let r = sync::fetch(
+        repo,
+        remote,
+        if branches.is_empty() {
+            None
+        } else {
+            Some(branches)
+        },
+    )?;
     emit(json, &r, || {
         for f in &r.refs {
-            println!("{} {} -> {}", f.name, f.old.map(|o| o.short()).unwrap_or_else(|| "[new]".into()), f.new.short());
+            println!(
+                "{} {} -> {}",
+                f.name,
+                f.old.map(|o| o.short()).unwrap_or_else(|| "[new]".into()),
+                f.new.short()
+            );
         }
         println!("{} object(s) received", r.objects_received);
     });
     Ok(())
 }
 
-pub fn run_pull(repo: &Repository, json: bool, remote: &str, no_ff: bool, agent: Option<AgentInfo>) -> Result<()> {
-    let (f, m) = sync::pull(repo, remote, MergeOptions { no_ff, agent, ..Default::default() })?;
+pub fn run_pull(
+    repo: &Repository,
+    json: bool,
+    remote: &str,
+    no_ff: bool,
+    agent: Option<AgentInfo>,
+) -> Result<()> {
+    let (f, m) = sync::pull(
+        repo,
+        remote,
+        MergeOptions {
+            no_ff,
+            agent,
+            ..Default::default()
+        },
+    )?;
     let conflicted = matches!(m, MergeResult::Conflicts { .. });
-    emit(json, &serde_json::json!({ "fetch": f, "merge": m }), || match &m {
-        MergeResult::AlreadyUpToDate { .. } => println!("Already up to date."),
-        MergeResult::FastForward { to, files_changed, .. } => println!("Fast-forward to {} ({files_changed} file(s))", to.short()),
-        MergeResult::Merged { commit, .. } => println!("Merge made commit {}", commit.short()),
-        MergeResult::Conflicts { conflicts, .. } => {
-            for c in conflicts {
-                println!("CONFLICT ({:?}): {}", c.kind, c.path);
+    emit(
+        json,
+        &serde_json::json!({ "fetch": f, "merge": m }),
+        || match &m {
+            MergeResult::AlreadyUpToDate { .. } => println!("Already up to date."),
+            MergeResult::FastForward {
+                to, files_changed, ..
+            } => println!("Fast-forward to {} ({files_changed} file(s))", to.short()),
+            MergeResult::Merged { commit, .. } => println!("Merge made commit {}", commit.short()),
+            MergeResult::Conflicts { conflicts, .. } => {
+                for c in conflicts {
+                    println!("CONFLICT ({:?}): {}", c.kind, c.path);
+                }
             }
-        }
-    });
+        },
+    );
     if conflicted {
         if let MergeResult::Conflicts { conflicts, .. } = m {
             return Err(agit_core::Error::MergeConflicts(conflicts.len()).into());
@@ -199,36 +262,78 @@ pub fn run_pull(repo: &Repository, json: bool, remote: &str, no_ff: bool, agent:
 pub fn run_clone(json: bool, cwd: &Path, url: &str, dir: Option<PathBuf>) -> Result<()> {
     let name = agit_protocol::client::RepoUrl::parse(url)?.repo;
     let dir = dir.unwrap_or_else(|| PathBuf::from(&name));
-    let dir = if dir.is_absolute() { dir } else { cwd.join(dir) };
+    let dir = if dir.is_absolute() {
+        dir
+    } else {
+        cwd.join(dir)
+    };
     if dir.exists() && std::fs::read_dir(&dir)?.next().is_some() {
         bail!("destination {} exists and is not empty", dir.display());
     }
     let (repo, f) = sync::clone(url, &dir)?;
-    emit(json, &serde_json::json!({ "path": repo.work_dir(), "fetch": f }), || {
-        println!("Cloned {name} into {} ({} object(s))", repo.work_dir().display(), f.objects_received);
-    });
+    emit(
+        json,
+        &serde_json::json!({ "path": repo.work_dir(), "fetch": f }),
+        || {
+            println!(
+                "Cloned {name} into {} ({} object(s))",
+                repo.work_dir().display(),
+                f.objects_received
+            );
+        },
+    );
     Ok(())
 }
 
 pub fn run_pr(repo: &Repository, json: bool, remote: &str, cmd: PrCmd) -> Result<()> {
     let (c, name) = client(repo, remote)?;
     match cmd {
-        PrCmd::Create { title, body, intent, task, source, target, push } => {
+        PrCmd::Create {
+            title,
+            body,
+            intent,
+            task,
+            source,
+            target,
+            push,
+        } => {
             let source = match source {
                 Some(s) => s,
-                None => repo.current_branch()?.ok_or_else(|| anyhow::anyhow!("not on a branch; use --source"))?,
+                None => repo
+                    .current_branch()?
+                    .ok_or_else(|| anyhow::anyhow!("not on a branch; use --source"))?,
             };
             if push {
                 sync::push(repo, remote, &source, false, false)?;
             }
-            let pr = c.create_pull(&name, &PullCreate { title, body, intent, task, source, target })?;
-            emit(json, &pr, || println!("Opened pull request #{}: {}", pr.number, pr.title));
+            let pr = c.create_pull(
+                &name,
+                &PullCreate {
+                    title,
+                    body,
+                    intent,
+                    task,
+                    source,
+                    target,
+                },
+            )?;
+            emit(json, &pr, || {
+                println!("Opened pull request #{}: {}", pr.number, pr.title)
+            });
         }
         PrCmd::List { state } => {
             let list = c.pulls(&name, Some(&state))?;
             emit(json, &list, || {
                 for p in &list {
-                    println!("#{:<4} {:<8} {:<40} {} -> {} by {}", p.number, format!("{:?}", p.state).to_lowercase(), p.title, p.source.trim_start_matches("refs/heads/"), p.target.trim_start_matches("refs/heads/"), p.author.id);
+                    println!(
+                        "#{:<4} {:<8} {:<40} {} -> {} by {}",
+                        p.number,
+                        format!("{:?}", p.state).to_lowercase(),
+                        p.title,
+                        p.source.trim_start_matches("refs/heads/"),
+                        p.target.trim_start_matches("refs/heads/"),
+                        p.author.id
+                    );
                 }
             });
         }
@@ -237,25 +342,58 @@ pub fn run_pr(repo: &Repository, json: bool, remote: &str, cmd: PrCmd) -> Result
             emit(json, &d, || {
                 let p = &d.pr;
                 println!("#{} {} [{:?}]", p.number, p.title, p.state);
-                println!("{} -> {}  by {}  {}", p.source, p.target, p.author.id, fmt_time(p.created_ms));
-                if let Some(i) = &p.intent { println!("Intent: {i}"); }
-                if let Some(t) = &p.task { println!("Task:   {t}"); }
-                println!("mergeable: {}  conflicts: {}", d.mergeable, d.conflicts.len());
-                if !p.body.is_empty() { println!("\n{}\n", p.body); }
+                println!(
+                    "{} -> {}  by {}  {}",
+                    p.source,
+                    p.target,
+                    p.author.id,
+                    fmt_time(p.created_ms)
+                );
+                if let Some(i) = &p.intent {
+                    println!("Intent: {i}");
+                }
+                if let Some(t) = &p.task {
+                    println!("Task:   {t}");
+                }
+                println!(
+                    "mergeable: {}  conflicts: {}",
+                    d.mergeable,
+                    d.conflicts.len()
+                );
+                if !p.body.is_empty() {
+                    println!("\n{}\n", p.body);
+                }
                 println!("commits ({}):", d.commits.len());
-                for cm in &d.commits { println!("  {} {}", cm.id.short(), cm.commit.summary()); }
+                for cm in &d.commits {
+                    println!("  {} {}", cm.id.short(), cm.commit.summary());
+                }
                 println!("files ({}):", d.changes.len());
-                for ch in &d.changes { println!("  {} {}", ch.kind.letter(), ch.path); }
+                for ch in &d.changes {
+                    println!("  {} {}", ch.kind.letter(), ch.path);
+                }
                 if !p.reviews.is_empty() {
                     println!("reviews:");
-                    for r in &p.reviews { println!("  {} {:?} {}", r.reviewer, r.decision, r.body); }
+                    for r in &p.reviews {
+                        println!("  {} {:?} {}", r.reviewer, r.decision, r.body);
+                    }
                 }
                 for cm in &p.comments {
-                    println!("comment #{} {} {}{}: {}", cm.id, cm.author, cm.path.clone().unwrap_or_default(), cm.line.map(|l| format!(":{l}")).unwrap_or_default(), cm.body);
+                    println!(
+                        "comment #{} {} {}{}: {}",
+                        cm.id,
+                        cm.author,
+                        cm.path.clone().unwrap_or_default(),
+                        cm.line.map(|l| format!(":{l}")).unwrap_or_default(),
+                        cm.body
+                    );
                 }
             });
         }
-        PrCmd::Review { number, decision, body } => {
+        PrCmd::Review {
+            number,
+            decision,
+            body,
+        } => {
             let decision = match decision.as_str() {
                 "approve" => ReviewDecision::Approve,
                 "request_changes" | "request-changes" => ReviewDecision::RequestChanges,
@@ -263,25 +401,50 @@ pub fn run_pr(repo: &Repository, json: bool, remote: &str, cmd: PrCmd) -> Result
                 other => bail!("unknown decision {other}; use approve|request_changes|comment"),
             };
             let pr = c.review_pull(&name, number, &ReviewCreate { decision, body })?;
-            emit(json, &pr, || println!("Reviewed #{} ({:?})", pr.number, decision));
+            emit(json, &pr, || {
+                println!("Reviewed #{} ({:?})", pr.number, decision)
+            });
         }
-        PrCmd::Comment { number, body, path, line, kind } => {
+        PrCmd::Comment {
+            number,
+            body,
+            path,
+            line,
+            kind,
+        } => {
             let kind = match kind.as_str() {
                 "question" => CommentKind::Question,
                 "suggestion" => CommentKind::Suggestion,
                 "blocker" => CommentKind::Blocker,
                 _ => CommentKind::Note,
             };
-            let cm = c.comment_pull(&name, number, &CommentCreate { path, line, kind, body })?;
-            emit(json, &cm, || println!("Added comment #{} to #{number}", cm.id));
+            let cm = c.comment_pull(
+                &name,
+                number,
+                &CommentCreate {
+                    path,
+                    line,
+                    kind,
+                    body,
+                },
+            )?;
+            emit(json, &cm, || {
+                println!("Added comment #{} to #{number}", cm.id)
+            });
         }
-        PrCmd::Merge { number, strategy, message } => {
+        PrCmd::Merge {
+            number,
+            strategy,
+            message,
+        } => {
             let strategy = match strategy.as_str() {
                 "ff" => MergeStrategy::Ff,
                 _ => MergeStrategy::Merge,
             };
             let r = c.merge_pull(&name, number, &MergeRequest { strategy, message })?;
-            emit(json, &r, || println!("Merged #{} as {}", r.pr.number, r.merged_commit.short()));
+            emit(json, &r, || {
+                println!("Merged #{} as {}", r.pr.number, r.merged_commit.short())
+            });
         }
         PrCmd::Close { number } => {
             let pr = c.close_pull(&name, number)?;
@@ -294,7 +457,15 @@ pub fn run_pr(repo: &Repository, json: bool, remote: &str, cmd: PrCmd) -> Result
 pub fn run_know(repo: &Repository, json: bool, remote: &str, cmd: KnowCmd) -> Result<()> {
     let (c, name) = client(repo, remote)?;
     match cmd {
-        KnowCmd::Add { title, body, body_file, tags, paths, commits, confidence } => {
+        KnowCmd::Add {
+            title,
+            body,
+            body_file,
+            tags,
+            paths,
+            commits,
+            confidence,
+        } => {
             let body = match body_file {
                 Some(p) if p.as_os_str() == "-" => {
                     let mut s = String::new();
@@ -304,19 +475,50 @@ pub fn run_know(repo: &Repository, json: bool, remote: &str, cmd: KnowCmd) -> Re
                 Some(p) => std::fs::read_to_string(p)?,
                 None => body,
             };
-            let commits = commits.iter().map(|r| Ok(repo.resolve(r)?)).collect::<Result<Vec<_>>>()?;
-            let n = c.create_note(&name, &NoteCreate { title, body, tags, paths, commits, pulls: vec![], confidence })?;
+            let commits = commits
+                .iter()
+                .map(|r| Ok(repo.resolve(r)?))
+                .collect::<Result<Vec<_>>>()?;
+            let n = c.create_note(
+                &name,
+                &NoteCreate {
+                    title,
+                    body,
+                    tags,
+                    paths,
+                    commits,
+                    pulls: vec![],
+                    confidence,
+                },
+            )?;
             emit(json, &n, || println!("note {} created: {}", n.id, n.title));
         }
-        KnowCmd::Search { tags, path, query, limit } => {
+        KnowCmd::Search {
+            tags,
+            path,
+            query,
+            limit,
+        } => {
             let mut q = format!("?limit={limit}");
-            if !tags.is_empty() { q.push_str(&format!("&tags={}", tags.join(","))); }
-            if let Some(p) = path { q.push_str(&format!("&path={}", agit_protocol::client::urlencode(&p))); }
-            if let Some(s) = query { q.push_str(&format!("&q={}", agit_protocol::client::urlencode(&s))); }
+            if !tags.is_empty() {
+                q.push_str(&format!("&tags={}", tags.join(",")));
+            }
+            if let Some(p) = path {
+                q.push_str(&format!("&path={}", agit_protocol::client::urlencode(&p)));
+            }
+            if let Some(s) = query {
+                q.push_str(&format!("&q={}", agit_protocol::client::urlencode(&s)));
+            }
             let list = c.notes(&name, &q)?;
             emit(json, &list, || {
                 for n in &list {
-                    println!("{} {:<40} [{}] {}", n.id, n.title, n.tags.join(", "), n.paths.join(" "));
+                    println!(
+                        "{} {:<40} [{}] {}",
+                        n.id,
+                        n.title,
+                        n.tags.join(", "),
+                        n.paths.join(" ")
+                    );
                 }
             });
         }
@@ -324,7 +526,13 @@ pub fn run_know(repo: &Repository, json: bool, remote: &str, cmd: KnowCmd) -> Re
             let n = c.note(&name, &id)?;
             emit(json, &n, || {
                 println!("# {}\n", n.title);
-                println!("tags: {}\npaths: {}\nauthor: {}  confidence: {}\n", n.tags.join(", "), n.paths.join(" "), n.author, n.confidence);
+                println!(
+                    "tags: {}\npaths: {}\nauthor: {}  confidence: {}\n",
+                    n.tags.join(", "),
+                    n.paths.join(" "),
+                    n.author,
+                    n.confidence
+                );
                 println!("{}", n.body);
             });
         }
@@ -332,21 +540,42 @@ pub fn run_know(repo: &Repository, json: bool, remote: &str, cmd: KnowCmd) -> Re
             let ctx = c.context(&name, &path)?;
             emit(json, &ctx, || {
                 println!("context for {}", ctx.path);
-                if !ctx.suggested_tags.is_empty() { println!("suggested tags: {}", ctx.suggested_tags.join(", ")); }
+                if !ctx.suggested_tags.is_empty() {
+                    println!("suggested tags: {}", ctx.suggested_tags.join(", "));
+                }
                 println!("\nnotes ({}):", ctx.notes.len());
-                for n in &ctx.notes { println!("  {} {} [{}]", n.id, n.title, n.tags.join(", ")); }
+                for n in &ctx.notes {
+                    println!("  {} {} [{}]", n.id, n.title, n.tags.join(", "));
+                }
                 println!("\nrecent commits ({}):", ctx.recent_commits.len());
-                for cm in &ctx.recent_commits { println!("  {} {} {}", cm.id.short(), cm.commit.summary(), cm.commit.agent.as_ref().map(|a| format!("({})", a.id)).unwrap_or_default()); }
+                for cm in &ctx.recent_commits {
+                    println!(
+                        "  {} {} {}",
+                        cm.id.short(),
+                        cm.commit.summary(),
+                        cm.commit
+                            .agent
+                            .as_ref()
+                            .map(|a| format!("({})", a.id))
+                            .unwrap_or_default()
+                    );
+                }
                 println!("\nleases ({}):", ctx.leases.len());
-                for l in &ctx.leases { println!("  {} {} {}", l.id, l.holder, l.paths.join(" ")); }
+                for l in &ctx.leases {
+                    println!("  {} {} {}", l.id, l.holder, l.paths.join(" "));
+                }
                 println!("\nopen pull requests ({}):", ctx.open_pulls.len());
-                for p in &ctx.open_pulls { println!("  #{} {} ({})", p.number, p.title, p.author.id); }
+                for p in &ctx.open_pulls {
+                    println!("  #{} {} ({})", p.number, p.title, p.author.id);
+                }
             });
         }
         KnowCmd::Tags => {
             let list = c.tags(&name)?;
             emit(json, &list, || {
-                for t in &list { println!("{:<30} {}", t.tag, t.count); }
+                for t in &list {
+                    println!("{:<30} {}", t.tag, t.count);
+                }
             });
         }
     }

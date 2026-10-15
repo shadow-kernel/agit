@@ -59,7 +59,12 @@ impl EventLog {
         let file = match std::fs::File::open(&self.path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(crate::error::Error::IoAt { path: self.path.clone(), source: e }),
+            Err(e) => {
+                return Err(crate::error::Error::IoAt {
+                    path: self.path.clone(),
+                    source: e,
+                })
+            }
         };
         let len = file.metadata()?.len();
         let mut reader = BufReader::new(file);
@@ -115,7 +120,12 @@ impl EventLog {
         let file = match std::fs::File::open(&self.path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-            Err(e) => return Err(crate::error::Error::IoAt { path: self.path.clone(), source: e }),
+            Err(e) => {
+                return Err(crate::error::Error::IoAt {
+                    path: self.path.clone(),
+                    source: e,
+                })
+            }
         };
         let reader = BufReader::new(file);
         let mut out = Vec::new();
@@ -142,8 +152,10 @@ mod tests {
     fn append_and_read() {
         let dir = tempfile::tempdir().unwrap();
         let log = EventLog::open(dir.path());
-        log.append("a", None, Some("x"), serde_json::json!({"n": 1})).unwrap();
-        log.append("b", Some("ws"), None, serde_json::json!({"n": 2})).unwrap();
+        log.append("a", None, Some("x"), serde_json::json!({"n": 1}))
+            .unwrap();
+        log.append("b", Some("ws"), None, serde_json::json!({"n": 2}))
+            .unwrap();
         let all = log.read_after(0).unwrap();
         assert_eq!(all.len(), 2);
         assert_eq!(all[0].seq, 1);

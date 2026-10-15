@@ -19,7 +19,10 @@ pub enum Error {
     CorruptObject { id: ObjectId, reason: String },
 
     #[error("object {expected} failed verification (content hashes to {actual})")]
-    HashMismatch { expected: ObjectId, actual: ObjectId },
+    HashMismatch {
+        expected: ObjectId,
+        actual: ObjectId,
+    },
 
     #[error("reference not found: {0}")]
     RefNotFound(String),
@@ -80,6 +83,9 @@ pub enum Error {
     #[error("policy violation: {0}")]
     PolicyViolation(String),
 
+    #[error("not found: {0}")]
+    NotFound(String),
+
     #[error("{0}")]
     Invalid(String),
 
@@ -124,6 +130,7 @@ impl Error {
             WorkspaceNotFound(_) => "workspace_not_found",
             LockTimeout(_) => "lock_timeout",
             PolicyViolation(_) => "policy_violation",
+            NotFound(_) => "not_found",
             Invalid(_) => "invalid",
             IoAt { .. } | Io(_) => "io",
             Serde(_) => "serde",

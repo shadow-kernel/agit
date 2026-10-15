@@ -83,7 +83,14 @@ fn n(v: &Value, k: &str, d: u64) -> u64 {
     v.get(k).and_then(|x| x.as_u64()).unwrap_or(d)
 }
 fn list(v: &Value, k: &str) -> Vec<String> {
-    v.get(k).and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
+    v.get(k)
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl Server {
@@ -93,7 +100,12 @@ impl Server {
 
     fn agent(&self, args: &Value) -> Option<AgentInfo> {
         let id = s(args, "agent").or_else(|| std::env::var("AGIT_AGENT").ok())?;
-        Some(AgentInfo { id, model: s(args, "model").or_else(|| std::env::var("AGIT_MODEL").ok()), run_id: s(args, "run_id").or_else(|| std::env::var("AGIT_RUN_ID").ok()), on_behalf_of: None })
+        Some(AgentInfo {
+            id,
+            model: s(args, "model").or_else(|| std::env::var("AGIT_MODEL").ok()),
+            run_id: s(args, "run_id").or_else(|| std::env::var("AGIT_RUN_ID").ok()),
+            on_behalf_of: None,
+        })
     }
 
     fn rel(&self, repo: &Repository, p: &str) -> Result<String> {
@@ -106,30 +118,69 @@ impl Server {
             "agit_status" => serde_json::to_value(worktree::status(&repo, true)?)?,
             "agit_log" => {
                 let rev = s(args, "rev").unwrap_or_else(|| "HEAD".into());
-                let start = match repo.resolve(&rev) { Ok(id) => vec![id], Err(_) if rev == "HEAD" => vec![], Err(e) => return Err(e.into()) };
-                let path = match s(args, "path") { Some(p) => Some(self.rel(&repo, &p)?), None => None };
-                serde_json::to_value(ops::log(&repo, &start, &LogOptions { limit: Some(n(args, "limit", 20) as usize), agent: s(args, "agent"), task: s(args, "task"), path, first_parent: false })?)?
+                let start = match repo.resolve(&rev) {
+                    Ok(id) => vec![id],
+                    Err(_) if rev == "HEAD" => vec![],
+                    Err(e) => return Err(e.into()),
+                };
+                let path = match s(args, "path") {
+                    Some(p) => Some(self.rel(&repo, &p)?),
+                    None => None,
+                };
+                serde_json::to_value(ops::log(
+                    &repo,
+                    &start,
+                    &LogOptions {
+                        limit: Some(n(args, "limit", 20) as usize),
+                        agent: s(args, "agent"),
+                        task: s(args, "task"),
+                        path,
+                        first_parent: false,
+                    },
+                )?)?
             }
             "agit_show" => {
                 let id = repo.resolve(&s(args, "rev").unwrap_or_else(|| "HEAD".into()))?;
                 let c = repo.store().read_commit(&id)?;
-                let parent_tree = match c.parents.first() { Some(p) => Some(repo.store().read_commit(p)?.tree), None => None };
+                let parent_tree = match c.parents.first() {
+                    Some(p) => Some(repo.store().read_commit(p)?.tree),
+                    None => None,
+                };
                 let changes = diff::diff_trees(repo.store(), parent_tree.as_ref(), Some(&c.tree))?;
-                let patch = if args.get("patch").and_then(|x| x.as_bool()).unwrap_or(true) { Some(diff::render_patch(repo.store(), &changes, 3)?) } else { None };
+                let patch = if args.get("patch").and_then(|x| x.as_bool()).unwrap_or(true) {
+                    Some(diff::render_patch(repo.store(), &changes, 3)?)
+                } else {
+                    None
+                };
                 json!({ "id": id, "commit": c, "changes": changes, "patch": patch })
             }
             "agit_diff" => {
                 let ctx = n(args, "context", 3) as usize;
                 let (old, new) = match (s(args, "from"), s(args, "to")) {
-                    (Some(f), Some(t)) => (diff::tree_to_sides(repo.store(), Some(&repo.resolve_commit(&f)?.1.tree))?, diff::tree_to_sides(repo.store(), Some(&repo.resolve_commit(&t)?.1.tree))?),
-                    (Some(f), None) => (diff::tree_to_sides(repo.store(), Some(&repo.resolve_commit(&f)?.1.tree))?, worktree_sides(&repo)?),
-                    _ if b(args, "staged") => (diff::tree_to_sides(repo.store(), repo.head_tree()?.as_ref())?, index_sides(&repo)?),
+                    (Some(f), Some(t)) => (
+                        diff::tree_to_sides(repo.store(), Some(&repo.resolve_commit(&f)?.1.tree))?,
+                        diff::tree_to_sides(repo.store(), Some(&repo.resolve_commit(&t)?.1.tree))?,
+                    ),
+                    (Some(f), None) => (
+                        diff::tree_to_sides(repo.store(), Some(&repo.resolve_commit(&f)?.1.tree))?,
+                        worktree_sides(&repo)?,
+                    ),
+                    _ if b(args, "staged") => (
+                        diff::tree_to_sides(repo.store(), repo.head_tree()?.as_ref())?,
+                        index_sides(&repo)?,
+                    ),
                     _ => (index_sides(&repo)?, worktree_sides(&repo)?),
                 };
                 let changes = diff::diff_maps(&old, &new);
                 let from_worktree = s(args, "to").is_none() && !b(args, "staged");
                 let patch = render(&repo, &changes, ctx, from_worktree)?;
-                let stats: Vec<Value> = changes.iter().map(|c| { let (a, d) = stats(&repo, c, from_worktree).unwrap_or((0, 0)); json!({ "path": c.path, "added": a, "removed": d }) }).collect();
+                let stats: Vec<Value> = changes
+                    .iter()
+                    .map(|c| {
+                        let (a, d) = stats(&repo, c, from_worktree).unwrap_or((0, 0));
+                        json!({ "path": c.path, "added": a, "removed": d })
+                    })
+                    .collect();
                 json!({ "changes": changes, "stats": stats, "patch": patch })
             }
             "agit_read_file" => {
@@ -143,7 +194,9 @@ impl Server {
                     Some(rev) => {
                         let tree = repo.resolve_commit(&rev)?.1.tree;
                         let flat = agit_core::index::flatten_tree(repo.store(), &tree)?;
-                        let e = flat.get(&rel).ok_or_else(|| anyhow!("{rel} not found in {rev}"))?;
+                        let e = flat
+                            .get(&rel)
+                            .ok_or_else(|| anyhow!("{rel} not found in {rev}"))?;
                         let bytes = repo.store().read_blob(&e.id)?;
                         json!({ "path": rel, "rev": rev, "id": e.id, "size": bytes.len(), "binary": diff::is_binary(&bytes), "content": if diff::is_binary(&bytes) { None } else { Some(String::from_utf8_lossy(&bytes).to_string()) } })
                     }
@@ -158,7 +211,9 @@ impl Server {
                     for part in path.split('/') {
                         let t = repo.store().read_tree(&cur)?;
                         let e = t.get(part).ok_or_else(|| anyhow!("{path} not found"))?;
-                        if !e.mode.is_dir() { return Err(anyhow!("{path} is a file")); }
+                        if !e.mode.is_dir() {
+                            return Err(anyhow!("{path} is a file"));
+                        }
                         cur = e.id;
                     }
                 }
@@ -166,25 +221,103 @@ impl Server {
                 json!({ "path": path, "entries": t.entries() })
             }
             "agit_add" => {
-                let paths = if b(args, "all") { vec![] } else { list(args, "paths").iter().map(|p| self.rel(&repo, p)).collect::<Result<Vec<_>>>()? };
-                if paths.is_empty() && !b(args, "all") { return Err(anyhow!("give paths or all=true")); }
+                let paths = if b(args, "all") {
+                    vec![]
+                } else {
+                    list(args, "paths")
+                        .iter()
+                        .map(|p| self.rel(&repo, p))
+                        .collect::<Result<Vec<_>>>()?
+                };
+                if paths.is_empty() && !b(args, "all") {
+                    return Err(anyhow!("give paths or all=true"));
+                }
                 serde_json::to_value(worktree::add(&repo, &paths, false)?)?
             }
             "agit_commit" => {
-                let meta: BTreeMap<String, Value> = args.get("meta").and_then(|m| m.as_object()).map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default();
-                serde_json::to_value(ops::commit(&repo, CommitOptions { message: s(args, "message").unwrap_or_default(), intent: s(args, "intent"), task: s(args, "task"), agent: self.agent(args), meta, author: None, allow_empty: false, force: b(args, "force"), all: b(args, "all") })?)?
+                let meta: BTreeMap<String, Value> = args
+                    .get("meta")
+                    .and_then(|m| m.as_object())
+                    .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                    .unwrap_or_default();
+                serde_json::to_value(ops::commit(
+                    &repo,
+                    CommitOptions {
+                        message: s(args, "message").unwrap_or_default(),
+                        intent: s(args, "intent"),
+                        task: s(args, "task"),
+                        agent: self.agent(args),
+                        meta,
+                        author: None,
+                        allow_empty: false,
+                        force: b(args, "force"),
+                        all: b(args, "all"),
+                    },
+                )?)?
             }
-            "agit_checkpoint" => serde_json::to_value(ops::checkpoint(&repo, s(args, "message"), self.agent(args))?)?,
-            "agit_checkpoint_list" => serde_json::to_value(ops::list_checkpoints(&repo, n(args, "limit", 20) as usize)?.into_iter().map(|(id, commit)| ops::LogEntry { id, commit }).collect::<Vec<_>>())?,
-            "agit_restore" => serde_json::to_value(ops::restore(&repo, &s(args, "rev").ok_or_else(|| anyhow!("rev required"))?)?)?,
+            "agit_checkpoint" => serde_json::to_value(ops::checkpoint(
+                &repo,
+                s(args, "message"),
+                self.agent(args),
+            )?)?,
+            "agit_checkpoint_list" => serde_json::to_value(
+                ops::list_checkpoints(&repo, n(args, "limit", 20) as usize)?
+                    .into_iter()
+                    .map(|(id, commit)| ops::LogEntry { id, commit })
+                    .collect::<Vec<_>>(),
+            )?,
+            "agit_restore" => serde_json::to_value(ops::restore(
+                &repo,
+                &s(args, "rev").ok_or_else(|| anyhow!("rev required"))?,
+            )?)?,
             "agit_branches" => serde_json::to_value(ops::list_branches(&repo)?)?,
-            "agit_switch" => serde_json::to_value(ops::switch(&repo, &s(args, "target").ok_or_else(|| anyhow!("target required"))?, b(args, "create"), b(args, "force"))?)?,
-            "agit_merge" => serde_json::to_value(ops::merge(&repo, &s(args, "rev").ok_or_else(|| anyhow!("rev required"))?, MergeOptions { message: s(args, "message"), intent: None, agent: self.agent(args), no_ff: b(args, "no_ff"), force: false })?)?,
+            "agit_switch" => serde_json::to_value(ops::switch(
+                &repo,
+                &s(args, "target").ok_or_else(|| anyhow!("target required"))?,
+                b(args, "create"),
+                b(args, "force"),
+            )?)?,
+            "agit_merge" => serde_json::to_value(ops::merge(
+                &repo,
+                &s(args, "rev").ok_or_else(|| anyhow!("rev required"))?,
+                MergeOptions {
+                    message: s(args, "message"),
+                    intent: None,
+                    agent: self.agent(args),
+                    no_ff: b(args, "no_ff"),
+                    force: false,
+                },
+            )?)?,
             "agit_lease_claim" => {
-                let paths: Vec<String> = list(args, "paths").iter().map(|p| if p.contains(['*', '?', '[']) { Ok(p.clone()) } else { self.rel(&repo, p) }).collect::<Result<_>>()?;
+                let paths: Vec<String> = list(args, "paths")
+                    .iter()
+                    .map(|p| {
+                        if p.contains(['*', '?', '[']) {
+                            Ok(p.clone())
+                        } else {
+                            self.rel(&repo, p)
+                        }
+                    })
+                    .collect::<Result<_>>()?;
                 let holder = s(args, "holder").ok_or_else(|| anyhow!("holder required"))?;
-                let lease = repo.leases().claim(LeaseRequest { holder: holder.clone(), paths, mode: if b(args, "shared") { LeaseMode::Shared } else { LeaseMode::Exclusive }, ttl: Some(std::time::Duration::from_secs(n(args, "ttl_secs", 3600))), note: s(args, "note"), workspace: Some(repo.workspace().to_string()) })?;
-                repo.events().append("lease.claim", Some(repo.workspace()), Some(&holder), serde_json::to_value(&lease)?)?;
+                let lease = repo.leases().claim(LeaseRequest {
+                    holder: holder.clone(),
+                    paths,
+                    mode: if b(args, "shared") {
+                        LeaseMode::Shared
+                    } else {
+                        LeaseMode::Exclusive
+                    },
+                    ttl: Some(std::time::Duration::from_secs(n(args, "ttl_secs", 3600))),
+                    note: s(args, "note"),
+                    workspace: Some(repo.workspace().to_string()),
+                })?;
+                repo.events().append(
+                    "lease.claim",
+                    Some(repo.workspace()),
+                    Some(&holder),
+                    serde_json::to_value(&lease)?,
+                )?;
                 serde_json::to_value(lease)?
             }
             "agit_lease_release" => {
@@ -193,72 +326,202 @@ impl Server {
                     (None, Some(h)) => repo.leases().release_all(&h)?,
                     _ => return Err(anyhow!("id or holder required")),
                 };
-                for l in &released { repo.events().append("lease.release", Some(repo.workspace()), Some(&l.holder), json!({ "id": l.id, "paths": l.paths }))?; }
+                for l in &released {
+                    repo.events().append(
+                        "lease.release",
+                        Some(repo.workspace()),
+                        Some(&l.holder),
+                        json!({ "id": l.id, "paths": l.paths }),
+                    )?;
+                }
                 serde_json::to_value(released)?
             }
             "agit_lease_list" => serde_json::to_value(repo.leases().list()?)?,
             "agit_lease_check" => {
-                let paths: Vec<String> = list(args, "paths").iter().map(|p| self.rel(&repo, p)).collect::<Result<_>>()?;
-                ops::enforce_leases(repo.leases(), &s(args, "holder").unwrap_or_default(), &paths)?;
+                let paths: Vec<String> = list(args, "paths")
+                    .iter()
+                    .map(|p| self.rel(&repo, p))
+                    .collect::<Result<_>>()?;
+                ops::enforce_leases(
+                    repo.leases(),
+                    &s(args, "holder").unwrap_or_default(),
+                    &paths,
+                )?;
                 json!({ "allowed": true })
             }
             "agit_events" => {
                 let kind = s(args, "kind");
                 let mut ev = repo.events().read_after(n(args, "since", 0))?;
-                if let Some(k) = kind { ev.retain(|e| e.kind.starts_with(&k)); }
+                if let Some(k) = kind {
+                    ev.retain(|e| e.kind.starts_with(&k));
+                }
                 let limit = n(args, "limit", 100) as usize;
-                if ev.len() > limit { ev = ev.split_off(ev.len() - limit); }
+                if ev.len() > limit {
+                    ev = ev.split_off(ev.len() - limit);
+                }
                 serde_json::to_value(ev)?
             }
             "agit_workspaces" => serde_json::to_value(repo.list_workspaces()?)?,
             "agit_push" => {
                 let remote = s(args, "remote").unwrap_or_else(|| self.remote.clone());
-                let branch = match s(args, "branch") { Some(b) => b, None => repo.current_branch()?.ok_or_else(|| anyhow!("not on a branch"))? };
-                serde_json::to_value(sync::push(&repo, &remote, &branch, b(args, "force"), b(args, "create"))?)?
+                let branch = match s(args, "branch") {
+                    Some(b) => b,
+                    None => repo
+                        .current_branch()?
+                        .ok_or_else(|| anyhow!("not on a branch"))?,
+                };
+                serde_json::to_value(sync::push(
+                    &repo,
+                    &remote,
+                    &branch,
+                    b(args, "force"),
+                    b(args, "create"),
+                )?)?
             }
             "agit_pull" => {
                 let remote = s(args, "remote").unwrap_or_else(|| self.remote.clone());
-                let (f, m) = sync::pull(&repo, &remote, MergeOptions { agent: self.agent(args), ..Default::default() })?;
+                let (f, m) = sync::pull(
+                    &repo,
+                    &remote,
+                    MergeOptions {
+                        agent: self.agent(args),
+                        ..Default::default()
+                    },
+                )?;
                 json!({ "fetch": f, "merge": m })
             }
             "agit_pr_create" => {
                 let (c, name) = self.client(&repo, args)?;
-                let source = match s(args, "source") { Some(x) => x, None => repo.current_branch()?.ok_or_else(|| anyhow!("not on a branch"))? };
-                if args.get("push").and_then(|x| x.as_bool()).unwrap_or(true) { sync::push(&repo, &self.remote, &source, false, false)?; }
-                serde_json::to_value(c.create_pull(&name, &PullCreate { title: s(args, "title").unwrap_or_default(), body: s(args, "body"), intent: s(args, "intent"), task: s(args, "task"), source, target: s(args, "target") })?)?
+                let source = match s(args, "source") {
+                    Some(x) => x,
+                    None => repo
+                        .current_branch()?
+                        .ok_or_else(|| anyhow!("not on a branch"))?,
+                };
+                if args.get("push").and_then(|x| x.as_bool()).unwrap_or(true) {
+                    sync::push(&repo, &self.remote, &source, false, false)?;
+                }
+                serde_json::to_value(c.create_pull(
+                    &name,
+                    &PullCreate {
+                        title: s(args, "title").unwrap_or_default(),
+                        body: s(args, "body"),
+                        intent: s(args, "intent"),
+                        task: s(args, "task"),
+                        source,
+                        target: s(args, "target"),
+                    },
+                )?)?
             }
-            "agit_pr_list" => { let (c, name) = self.client(&repo, args)?; serde_json::to_value(c.pulls(&name, Some(&s(args, "state").unwrap_or_else(|| "open".into())))?)? }
-            "agit_pr_view" => { let (c, name) = self.client(&repo, args)?; serde_json::to_value(c.pull(&name, n(args, "number", 0))?)? }
+            "agit_pr_list" => {
+                let (c, name) = self.client(&repo, args)?;
+                serde_json::to_value(c.pulls(
+                    &name,
+                    Some(&s(args, "state").unwrap_or_else(|| "open".into())),
+                )?)?
+            }
+            "agit_pr_view" => {
+                let (c, name) = self.client(&repo, args)?;
+                serde_json::to_value(c.pull(&name, n(args, "number", 0))?)?
+            }
             "agit_pr_review" => {
                 let (c, name) = self.client(&repo, args)?;
-                let decision = match s(args, "decision").as_deref() { Some("approve") => ReviewDecision::Approve, Some("request_changes") => ReviewDecision::RequestChanges, _ => ReviewDecision::Comment };
-                serde_json::to_value(c.review_pull(&name, n(args, "number", 0), &ReviewCreate { decision, body: s(args, "body").unwrap_or_default() })?)?
+                let decision = match s(args, "decision").as_deref() {
+                    Some("approve") => ReviewDecision::Approve,
+                    Some("request_changes") => ReviewDecision::RequestChanges,
+                    _ => ReviewDecision::Comment,
+                };
+                serde_json::to_value(c.review_pull(
+                    &name,
+                    n(args, "number", 0),
+                    &ReviewCreate {
+                        decision,
+                        body: s(args, "body").unwrap_or_default(),
+                    },
+                )?)?
             }
             "agit_pr_comment" => {
                 let (c, name) = self.client(&repo, args)?;
-                let kind = match s(args, "kind").as_deref() { Some("question") => CommentKind::Question, Some("suggestion") => CommentKind::Suggestion, Some("blocker") => CommentKind::Blocker, _ => CommentKind::Note };
-                serde_json::to_value(c.comment_pull(&name, n(args, "number", 0), &CommentCreate { path: s(args, "path"), line: args.get("line").and_then(|x| x.as_u64()).map(|x| x as u32), kind, body: s(args, "body").unwrap_or_default() })?)?
+                let kind = match s(args, "kind").as_deref() {
+                    Some("question") => CommentKind::Question,
+                    Some("suggestion") => CommentKind::Suggestion,
+                    Some("blocker") => CommentKind::Blocker,
+                    _ => CommentKind::Note,
+                };
+                serde_json::to_value(c.comment_pull(
+                    &name,
+                    n(args, "number", 0),
+                    &CommentCreate {
+                        path: s(args, "path"),
+                        line: args.get("line").and_then(|x| x.as_u64()).map(|x| x as u32),
+                        kind,
+                        body: s(args, "body").unwrap_or_default(),
+                    },
+                )?)?
             }
             "agit_pr_merge" => {
                 let (c, name) = self.client(&repo, args)?;
-                let strategy = if s(args, "strategy").as_deref() == Some("ff") { MergeStrategy::Ff } else { MergeStrategy::Merge };
-                serde_json::to_value(c.merge_pull(&name, n(args, "number", 0), &MergeRequest { strategy, message: s(args, "message") })?)?
+                let strategy = if s(args, "strategy").as_deref() == Some("ff") {
+                    MergeStrategy::Ff
+                } else {
+                    MergeStrategy::Merge
+                };
+                serde_json::to_value(c.merge_pull(
+                    &name,
+                    n(args, "number", 0),
+                    &MergeRequest {
+                        strategy,
+                        message: s(args, "message"),
+                    },
+                )?)?
             }
-            "agit_context" => { let (c, name) = self.client(&repo, args)?; let p = self.rel(&repo, &s(args, "path").unwrap_or_default())?; serde_json::to_value(c.context(&name, &p)?)? }
+            "agit_context" => {
+                let (c, name) = self.client(&repo, args)?;
+                let p = self.rel(&repo, &s(args, "path").unwrap_or_default())?;
+                serde_json::to_value(c.context(&name, &p)?)?
+            }
             "agit_know_search" => {
                 let (c, name) = self.client(&repo, args)?;
                 let mut q = format!("?limit={}", n(args, "limit", 20));
                 let tags = list(args, "tags");
-                if !tags.is_empty() { q.push_str(&format!("&tags={}", tags.join(","))); }
-                if let Some(p) = s(args, "path") { q.push_str(&format!("&path={}", agit_protocol::client::urlencode(&p))); }
-                if let Some(t) = s(args, "query") { q.push_str(&format!("&q={}", agit_protocol::client::urlencode(&t))); }
+                if !tags.is_empty() {
+                    q.push_str(&format!("&tags={}", tags.join(",")));
+                }
+                if let Some(p) = s(args, "path") {
+                    q.push_str(&format!("&path={}", agit_protocol::client::urlencode(&p)));
+                }
+                if let Some(t) = s(args, "query") {
+                    q.push_str(&format!("&q={}", agit_protocol::client::urlencode(&t)));
+                }
                 serde_json::to_value(c.notes(&name, &q)?)?
             }
-            "agit_know_get" => { let (c, name) = self.client(&repo, args)?; serde_json::to_value(c.note(&name, &s(args, "id").unwrap_or_default())?)? }
+            "agit_know_get" => {
+                let (c, name) = self.client(&repo, args)?;
+                serde_json::to_value(c.note(&name, &s(args, "id").unwrap_or_default())?)?
+            }
             "agit_know_add" => {
                 let (c, name) = self.client(&repo, args)?;
-                let commits = list(args, "commits").iter().map(|r| Ok(repo.resolve(r)?)).collect::<Result<Vec<_>>>()?;
-                serde_json::to_value(c.create_note(&name, &NoteCreate { title: s(args, "title").unwrap_or_default(), body: s(args, "body").unwrap_or_default(), tags: list(args, "tags"), paths: list(args, "paths"), commits, pulls: vec![], confidence: args.get("confidence").and_then(|x| x.as_f64()).map(|x| x as f32) })?)?
+                let commits = list(args, "commits")
+                    .iter()
+                    .map(|r| Ok(repo.resolve(r)?))
+                    .collect::<Result<Vec<_>>>()?;
+                serde_json::to_value(
+                    c.create_note(
+                        &name,
+                        &NoteCreate {
+                            title: s(args, "title").unwrap_or_default(),
+                            body: s(args, "body").unwrap_or_default(),
+                            tags: list(args, "tags"),
+                            paths: list(args, "paths"),
+                            commits,
+                            pulls: vec![],
+                            confidence: args
+                                .get("confidence")
+                                .and_then(|x| x.as_f64())
+                                .map(|x| x as f32),
+                        },
+                    )?,
+                )?
             }
             other => return Err(anyhow!("unknown tool {other}")),
         };
@@ -272,32 +535,66 @@ impl Server {
 }
 
 fn index_sides(repo: &Repository) -> Result<BTreeMap<String, diff::Side>> {
-    Ok(repo.load_index()?.iter().map(|e| (e.path.clone(), diff::Side { id: e.id, mode: e.mode, size: e.size })).collect())
+    Ok(repo
+        .load_index()?
+        .iter()
+        .map(|e| {
+            (
+                e.path.clone(),
+                diff::Side {
+                    id: e.id,
+                    mode: e.mode,
+                    size: e.size,
+                },
+            )
+        })
+        .collect())
 }
 
 fn worktree_sides(repo: &Repository) -> Result<BTreeMap<String, diff::Side>> {
     let mut sides = index_sides(repo)?;
     for c in worktree::status(repo, true)?.unstaged {
         match c.kind {
-            diff::ChangeKind::Deleted => { sides.remove(&c.path); }
-            _ => { sides.insert(c.path.clone(), c.new.unwrap()); }
+            diff::ChangeKind::Deleted => {
+                sides.remove(&c.path);
+            }
+            _ => {
+                sides.insert(c.path.clone(), c.new.unwrap());
+            }
         }
     }
     Ok(sides)
 }
 
-fn read_side(repo: &Repository, path: &str, side: &diff::Side, from_worktree: bool) -> Result<Vec<u8>> {
+fn read_side(
+    repo: &Repository,
+    path: &str,
+    side: &diff::Side,
+    from_worktree: bool,
+) -> Result<Vec<u8>> {
     if from_worktree && !repo.store().contains(&side.id) {
         return Ok(std::fs::read(repo.abs_path(path))?);
     }
     Ok(repo.store().read_blob(&side.id)?)
 }
 
-fn render(repo: &Repository, changes: &[diff::Change], ctx: usize, from_worktree: bool) -> Result<String> {
+fn render(
+    repo: &Repository,
+    changes: &[diff::Change],
+    ctx: usize,
+    from_worktree: bool,
+) -> Result<String> {
     let mut out = String::new();
     for c in changes {
-        let old = c.old.as_ref().and_then(|s| repo.store().read_blob(&s.id).ok()).unwrap_or_default();
-        let new = match &c.new { Some(s) => read_side(repo, &c.path, s, from_worktree)?, None => vec![] };
+        let old = c
+            .old
+            .as_ref()
+            .and_then(|s| repo.store().read_blob(&s.id).ok())
+            .unwrap_or_default();
+        let new = match &c.new {
+            Some(s) => read_side(repo, &c.path, s, from_worktree)?,
+            None => vec![],
+        };
         match diff::unified(&c.path, &old, &new, ctx) {
             Some(p) => out.push_str(&p),
             None => out.push_str(&format!("Binary files a/{0} and b/{0} differ\n", c.path)),
@@ -307,15 +604,26 @@ fn render(repo: &Repository, changes: &[diff::Change], ctx: usize, from_worktree
 }
 
 fn stats(repo: &Repository, c: &diff::Change, from_worktree: bool) -> Result<(usize, usize)> {
-    let old = c.old.as_ref().and_then(|s| repo.store().read_blob(&s.id).ok()).unwrap_or_default();
-    let new = match &c.new { Some(s) => read_side(repo, &c.path, s, from_worktree)?, None => vec![] };
+    let old = c
+        .old
+        .as_ref()
+        .and_then(|s| repo.store().read_blob(&s.id).ok())
+        .unwrap_or_default();
+    let new = match &c.new {
+        Some(s) => read_side(repo, &c.path, s, from_worktree)?,
+        None => vec![],
+    };
     Ok(diff::line_stats(&old, &new))
 }
 
 fn error_payload(e: &anyhow::Error) -> Value {
     match e.downcast_ref::<agit_core::Error>() {
-        Some(core) => json!({ "ok": false, "error": { "code": core.code(), "message": core.to_string(), "retryable": core.is_retryable() } }),
-        None => json!({ "ok": false, "error": { "code": "error", "message": format!("{e:#}"), "retryable": false } }),
+        Some(core) => {
+            json!({ "ok": false, "error": { "code": core.code(), "message": core.to_string(), "retryable": core.is_retryable() } })
+        }
+        None => {
+            json!({ "ok": false, "error": { "code": "error", "message": format!("{e:#}"), "retryable": false } })
+        }
     }
 }
 
@@ -332,15 +640,21 @@ fn handle(server: &Server, msg: &Value) -> Option<Value> {
             "instructions": "agit version control for agents. Typical flow: agit_context(path) before editing, agit_lease_claim for the paths you will change, agit_checkpoint before risky edits, agit_add + agit_commit with intent/task/agent, agit_pr_create when done, agit_know_add to record what you learned."
         })),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({ "tools": tools().iter().map(|t| json!({ "name": t.name, "description": t.description, "inputSchema": t.schema })).collect::<Vec<_>>() })),
+        "tools/list" => Ok(
+            json!({ "tools": tools().iter().map(|t| json!({ "name": t.name, "description": t.description, "inputSchema": t.schema })).collect::<Vec<_>>() }),
+        ),
         "tools/call" => {
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
             match server.call(name, &args) {
-                Ok(v) => Ok(json!({ "content": [{ "type": "text", "text": serde_json::to_string(&v).unwrap_or_default() }], "structuredContent": v, "isError": false })),
+                Ok(v) => Ok(
+                    json!({ "content": [{ "type": "text", "text": serde_json::to_string(&v).unwrap_or_default() }], "structuredContent": v, "isError": false }),
+                ),
                 Err(e) => {
                     let p = error_payload(&e);
-                    Ok(json!({ "content": [{ "type": "text", "text": serde_json::to_string(&p).unwrap_or_default() }], "structuredContent": p, "isError": true }))
+                    Ok(
+                        json!({ "content": [{ "type": "text", "text": serde_json::to_string(&p).unwrap_or_default() }], "structuredContent": p, "isError": true }),
+                    )
                 }
             }
         }
@@ -352,7 +666,9 @@ fn handle(server: &Server, msg: &Value) -> Option<Value> {
     id.as_ref()?;
     Some(match result {
         Ok(r) => json!({ "jsonrpc": "2.0", "id": id, "result": r }),
-        Err((code, message)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
+        Err((code, message)) => {
+            json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+        }
     })
 }
 
@@ -393,11 +709,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let repo = Repository::init(&dir.path().join("r")).unwrap();
         std::fs::write(repo.work_dir().join("a.txt"), "hi\n").unwrap();
-        let server = Server { cwd: repo.work_dir().to_path_buf(), remote: "origin".into() };
+        let server = Server {
+            cwd: repo.work_dir().to_path_buf(),
+            remote: "origin".into(),
+        };
         let init = handle(&server, &json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } })).unwrap();
         assert_eq!(init["result"]["serverInfo"]["name"], "agit");
-        assert!(handle(&server, &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).is_none());
-        let list = handle(&server, &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).unwrap();
+        assert!(handle(
+            &server,
+            &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })
+        )
+        .is_none());
+        let list = handle(
+            &server,
+            &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        )
+        .unwrap();
         assert!(list["result"]["tools"].as_array().unwrap().len() > 25);
         let st = handle(&server, &json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "agit_status", "arguments": {} } })).unwrap();
         assert_eq!(st["result"]["isError"], false);
@@ -409,8 +736,15 @@ mod tests {
         assert_eq!(log["result"]["structuredContent"][0]["message"], "via mcp");
         let err = handle(&server, &json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "agit_show", "arguments": { "rev": "nope" } } })).unwrap();
         assert_eq!(err["result"]["isError"], true);
-        assert_eq!(err["result"]["structuredContent"]["error"]["code"], "unknown_revision");
-        let unknown = handle(&server, &json!({ "jsonrpc": "2.0", "id": 8, "method": "nope" })).unwrap();
+        assert_eq!(
+            err["result"]["structuredContent"]["error"]["code"],
+            "unknown_revision"
+        );
+        let unknown = handle(
+            &server,
+            &json!({ "jsonrpc": "2.0", "id": 8, "method": "nope" }),
+        )
+        .unwrap();
         assert_eq!(unknown["error"]["code"], -32601);
     }
 }

@@ -50,18 +50,16 @@ struct IndexFile<'a> {
 
 fn ancestors(path: &str) -> impl Iterator<Item = &str> {
     let mut cur = path;
-    std::iter::from_fn(move || {
-        match cur.rfind('/') {
-            Some(i) => {
-                cur = &cur[..i];
-                Some(cur)
-            }
-            None if !cur.is_empty() => {
-                cur = "";
-                Some("")
-            }
-            None => None,
+    std::iter::from_fn(move || match cur.rfind('/') {
+        Some(i) => {
+            cur = &cur[..i];
+            Some(cur)
         }
+        None if !cur.is_empty() => {
+            cur = "";
+            Some("")
+        }
+        None => None,
     })
 }
 
@@ -121,10 +119,18 @@ impl Index {
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Index::new()),
-            Err(e) => return Err(Error::IoAt { path: path.to_path_buf(), source: e }),
+            Err(e) => {
+                return Err(Error::IoAt {
+                    path: path.to_path_buf(),
+                    source: e,
+                })
+            }
         };
         if bytes.len() < 4 + 32 || (&bytes[..4] != MAGIC && &bytes[..4] != MAGIC_V1) {
-            return Err(Error::Invalid(format!("corrupt index at {}", path.display())));
+            return Err(Error::Invalid(format!(
+                "corrupt index at {}",
+                path.display()
+            )));
         }
         let v1 = &bytes[..4] == MAGIC_V1;
         let (body, sum) = bytes.split_at(bytes.len() - 32);
@@ -144,15 +150,31 @@ impl Index {
         }
         let file: IndexFile<'static> = bincode::deserialize(&body[4..])?;
         Ok(Index {
-            entries: file.entries.into_iter().map(|e| (e.path.clone(), e.into_owned())).collect(),
-            tree_cache: file.tree_cache.into_iter().map(|(p, id, n)| (p, (id, n))).collect(),
+            entries: file
+                .entries
+                .into_iter()
+                .map(|e| (e.path.clone(), e.into_owned()))
+                .collect(),
+            tree_cache: file
+                .tree_cache
+                .into_iter()
+                .map(|(p, id, n)| (p, (id, n)))
+                .collect(),
         })
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
         let file = IndexFile {
-            entries: self.entries.values().map(std::borrow::Cow::Borrowed).collect(),
-            tree_cache: self.tree_cache.iter().map(|(p, (id, n))| (p.clone(), *id, *n)).collect(),
+            entries: self
+                .entries
+                .values()
+                .map(std::borrow::Cow::Borrowed)
+                .collect(),
+            tree_cache: self
+                .tree_cache
+                .iter()
+                .map(|(p, (id, n))| (p.clone(), *id, *n))
+                .collect(),
         };
         let mut body = Vec::with_capacity(self.entries.len() * 96 + 4);
         body.extend_from_slice(MAGIC);
@@ -175,7 +197,10 @@ impl Index {
     }
 
     pub fn insert(&mut self, entry: IndexEntry) {
-        let changed = self.entries.get(&entry.path).is_none_or(|e| e.id != entry.id || e.mode != entry.mode || e.size != entry.size);
+        let changed = self
+            .entries
+            .get(&entry.path)
+            .is_none_or(|e| e.id != entry.id || e.mode != entry.mode || e.size != entry.size);
         if changed {
             self.invalidate(&entry.path);
         }
@@ -300,7 +325,10 @@ impl Index {
 }
 
 /// Flattened path -> entry list for a tree (recursive).
-pub fn flatten_tree(store: &ObjectStore, tree_id: &ObjectId) -> Result<BTreeMap<String, TreeEntry>> {
+pub fn flatten_tree(
+    store: &ObjectStore,
+    tree_id: &ObjectId,
+) -> Result<BTreeMap<String, TreeEntry>> {
     let mut out = BTreeMap::new();
     let mut stack = vec![(String::new(), *tree_id)];
     while let Some((prefix, tid)) = stack.pop() {
@@ -338,14 +366,23 @@ impl TreeBuilder {
     }
 
     /// Write using a read-only cache of known directory tree ids.
-    pub fn write_cached(self, store: &ObjectStore, cache: &BTreeMap<String, (ObjectId, u64)>) -> Result<ObjectId> {
+    pub fn write_cached(
+        self,
+        store: &ObjectStore,
+        cache: &BTreeMap<String, (ObjectId, u64)>,
+    ) -> Result<ObjectId> {
         let mut c = cache.clone();
         self.write_with_cache(store, &mut c)
     }
 
     /// Write, consulting and updating `cache` (dir path -> (tree id, entries)).
-    pub fn write_with_cache(mut self, store: &ObjectStore, cache: &mut BTreeMap<String, (ObjectId, u64)>) -> Result<ObjectId> {
-        self.files.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+    pub fn write_with_cache(
+        mut self,
+        store: &ObjectStore,
+        cache: &mut BTreeMap<String, (ObjectId, u64)>,
+    ) -> Result<ObjectId> {
+        self.files
+            .sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
         let mut root = Node::default();
         for (path, mode, id, size) in self.files {
             let mut node = &mut root;
@@ -374,14 +411,23 @@ struct Node {
 }
 
 impl Node {
-    fn write(self, store: &ObjectStore, path: &str, cache: &mut BTreeMap<String, (ObjectId, u64)>) -> Result<ObjectId> {
+    fn write(
+        self,
+        store: &ObjectStore,
+        path: &str,
+        cache: &mut BTreeMap<String, (ObjectId, u64)>,
+    ) -> Result<ObjectId> {
         if let Some((id, _)) = cache.get(path) {
             return Ok(*id);
         }
         let mut entries = self.files;
         for (name, node) in self.dirs {
             let count = node.files.len() + node.dirs.len();
-            let child_path = if path.is_empty() { name.clone() } else { format!("{path}/{name}") };
+            let child_path = if path.is_empty() {
+                name.clone()
+            } else {
+                format!("{path}/{name}")
+            };
             let id = node.write(store, &child_path, cache)?;
             entries.push(TreeEntry {
                 name,
@@ -444,7 +490,15 @@ mod tests {
         assert_eq!(again.write_tree(&store).unwrap(), tree_id);
         // Changing one file invalidates exactly its ancestors.
         let blob2 = store.write(crate::object::ObjectKind::Blob, b"y").unwrap();
-        again.insert(IndexEntry { path: "src/lib/a.rs".into(), id: blob2, mode: EntryMode::File, size: 1, mtime_ns: 2, ino: 1, conflict: false });
+        again.insert(IndexEntry {
+            path: "src/lib/a.rs".into(),
+            id: blob2,
+            mode: EntryMode::File,
+            size: 1,
+            mtime_ns: 2,
+            ino: 1,
+            conflict: false,
+        });
         assert_eq!(again.cached_trees(), 0);
         let t2 = again.write_tree_cached(&store).unwrap();
         assert_ne!(t2, tree_id);

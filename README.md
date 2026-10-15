@@ -377,7 +377,20 @@ Register it in an MCP client, started inside a repository:
 
 The server's `instructions` describe the intended loop: `agit_context(path)` before editing, `agit_lease_claim` for the paths you will change, `agit_checkpoint` before risky edits, `agit_add` + `agit_commit` with intent and task, `agit_pr_create` when done, `agit_know_add` to record what you learned.
 
-Python and TypeScript SDKs over the HTTP API are planned in `sdk/`. The step-by-step agent workflow is in [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md).
+**Python SDK ✅** (`sdk/python`, zero dependencies, Python 3.10+): typed client for every endpoint, SSE streaming, typed errors with the same codes, and an `AgentSession` helper that claims leases, opens pull requests, records notes and releases leases on exit.
+
+```python
+from agit import Client, AgentSession
+client = Client("http://127.0.0.1:7878/api/v1", agent="coder-1")
+with AgentSession(client, "demo", "coder-1") as s:
+    ctx = s.context("src/auth/login.rs")        # notes, suggested tags, recent commits, leases, open PRs
+    s.claim(["src/auth"], ttl_secs=1800, note="session refactor")
+    ...                                         # edit, commit and push with the CLI or MCP tools
+    s.open_pr(title="Rotate session tokens", source="feature/x", intent="close SEC-12")
+    s.remember(title="Session store lags", body="...", tags=["kind:gotcha", "area:auth"], paths=["src/auth/**"])
+```
+
+A TypeScript SDK (`sdk/typescript`) follows the same shape. The step-by-step agent workflow is in [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md).
 
 ### Idempotency 📋
 
