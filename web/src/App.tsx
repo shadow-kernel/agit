@@ -18,6 +18,10 @@ const Agents = lazy(() => import("./pages/Agents"));
 const Leases = lazy(() => import("./pages/Leases"));
 const Knowledge = lazy(() => import("./pages/Knowledge"));
 const KnowledgeNote = lazy(() => import("./pages/KnowledgeNote"));
+const Settings = lazy(() => import("./pages/Settings"));
+const Blame = lazy(() => import("./pages/Blame"));
+const Search = lazy(() => import("./pages/Search"));
+const Compare = lazy(() => import("./pages/Compare"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 
 const fallback = <div className="box" aria-busy><Skeleton lines={6} /></div>;
@@ -46,6 +50,10 @@ export default function App() {
             <Route path="tree/:rev/*" element={<Suspense fallback={fallback}><Tree /></Suspense>} />
             <Route path="tree/:rev" element={<Suspense fallback={fallback}><Tree /></Suspense>} />
             <Route path="blob/:rev/*" element={<Suspense fallback={fallback}><Blob /></Suspense>} />
+            <Route path="blame/:rev/*" element={<Suspense fallback={fallback}><Blame /></Suspense>} />
+            <Route path="search" element={<Suspense fallback={fallback}><Search /></Suspense>} />
+            <Route path="compare/*" element={<Suspense fallback={fallback}><Compare /></Suspense>} />
+            <Route path="settings/*" element={<Suspense fallback={fallback}><Settings /></Suspense>} />
             <Route path="commits" element={<Suspense fallback={fallback}><Commits /></Suspense>} />
             <Route path="commit/:id" element={<Suspense fallback={fallback}><CommitDetail /></Suspense>} />
             <Route path="pulls" element={<Suspense fallback={fallback}><Pulls /></Suspense>} />

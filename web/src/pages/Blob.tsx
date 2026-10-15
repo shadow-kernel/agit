@@ -49,6 +49,12 @@ export default function Blob() {
             </div>
           ) : null}
           <button className={`btn sm ${raw ? "active" : ""}`} onClick={() => setRaw((r) => !r)} disabled={!data || data.binary}>Raw</button>
+          {data && !data.binary ? (
+            <div className="segmented" role="tablist" aria-label="View">
+              <button className="active" role="tab" aria-selected>Code</button>
+              <Link role="tab" to={`${base}/blame/${encodeURIComponent(rev)}/${path}`} className="seg-link">Blame</Link>
+            </div>
+          ) : null}
           <Link className="btn sm" to={`${base}/commits?rev=${encodeURIComponent(rev)}&path=${encodeURIComponent(path)}`}>History</Link>
         </div>
         {blob.loading && !data ? (

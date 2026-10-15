@@ -10,7 +10,8 @@ export default function PullNew() {
   const [sp] = useSearchParams();
   const navigate = useNavigate();
   const branches = useAsync(() => api.branches(name), [name], { silent: true });
-  const [form, setForm] = useState({ title: "", body: "", intent: "", task: "", source: sp.get("source") || "", target: `refs/heads/${defaultBranch}` });
+  const asRef = (v: string | null) => (v ? (v.startsWith("refs/") ? v : `refs/heads/${v}`) : "");
+  const [form, setForm] = useState({ title: sp.get("title") || "", body: "", intent: sp.get("intent") || "", task: sp.get("task") || "", source: asRef(sp.get("source")), target: asRef(sp.get("target")) || `refs/heads/${defaultBranch}` });
   const create = useMutation((body: Parameters<typeof api.createPull>[1]) => api.createPull(name, body));
   const base = `/r/${encodeURIComponent(name)}`;
 

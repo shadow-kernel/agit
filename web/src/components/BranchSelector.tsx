@@ -4,7 +4,7 @@ import { api } from "../api/client";
 import { useAsync } from "../lib/useAsync";
 import { shortId } from "../lib/format";
 
-export function BranchSelector({ repo, rev, path = "", mode = "tree" }: { repo: string; rev: string; path?: string; mode?: "tree" | "blob" | "commits" }) {
+export function BranchSelector({ repo, rev, path = "", mode = "tree" }: { repo: string; rev: string; path?: string; mode?: "tree" | "blob" | "blame" | "commits" }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const ref = useRef<HTMLDivElement>(null);
@@ -35,6 +35,7 @@ export function BranchSelector({ repo, rev, path = "", mode = "tree" }: { repo: 
     const base = `/r/${encodeURIComponent(repo)}`;
     if (mode === "commits") return `${base}/commits?rev=${encodeURIComponent(name)}`;
     if (mode === "blob") return `${base}/blob/${encodeURIComponent(name)}/${path}`;
+    if (mode === "blame") return `${base}/blame/${encodeURIComponent(name)}/${path}`;
     return path ? `${base}/tree/${encodeURIComponent(name)}/${path}` : `${base}/tree/${encodeURIComponent(name)}`;
   };
 

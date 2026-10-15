@@ -11,6 +11,7 @@ pub fn emit<T: Serialize>(json: bool, result: &T, human: impl FnOnce()) {
 }
 
 pub fn report_error(e: &anyhow::Error, json: bool) -> u8 {
+    let details = e.downcast_ref::<Error>().and_then(|c| c.details());
     let (code, message, retryable, exit) = match e.downcast_ref::<Error>() {
         Some(core) => {
             let exit = if core.is_retryable() {
@@ -30,7 +31,7 @@ pub fn report_error(e: &anyhow::Error, json: bool) -> u8 {
     if json {
         let env = serde_json::json!({
             "ok": false,
-            "error": { "code": code, "message": message, "retryable": retryable }
+            "error": { "code": code, "message": message, "retryable": retryable, "details": details }
         });
         println!("{}", serde_json::to_string(&env).unwrap());
     } else {

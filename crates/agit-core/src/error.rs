@@ -137,6 +137,27 @@ impl Error {
         }
     }
 
+    /// Structured details for machine consumers (same shape as the server).
+    pub fn details(&self) -> Option<serde_json::Value> {
+        use Error::*;
+        match self {
+            RefConflict {
+                name,
+                expected,
+                actual,
+            } => Some(serde_json::json!({ "name": name, "expected": expected, "actual": actual })),
+            LeaseConflict {
+                path,
+                holder,
+                lease_id,
+            } => Some(serde_json::json!({ "path": path, "holder": holder, "lease_id": lease_id })),
+            MergeConflicts(n) => Some(serde_json::json!({ "count": n })),
+            DirtyWorktree(paths) => Some(serde_json::json!({ "paths": paths })),
+            ObjectNotFound(id) => Some(serde_json::json!({ "id": id })),
+            _ => None,
+        }
+    }
+
     /// Whether an agent may sensibly retry the same operation.
     pub fn is_retryable(&self) -> bool {
         matches!(self, Error::RefConflict { .. } | Error::LockTimeout(_))

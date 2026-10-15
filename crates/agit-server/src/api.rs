@@ -90,7 +90,6 @@ async fn auth(State(state): S, req: Request, next: Next) -> Response {
 
 pub fn router(state: Arc<AppState>, web_dir: Option<&std::path::Path>) -> Router {
     let api = Router::new()
-        .route("/health", get(health))
         .route("/repos", get(list_repos).post(create_repo))
         .route("/repos/{repo}", get(get_repo).delete(delete_repo))
         .route("/repos/{repo}/refs", get(list_refs))
@@ -160,7 +159,11 @@ pub fn router(state: Arc<AppState>, web_dir: Option<&std::path::Path>) -> Router
         .route("/repos/{repo}/agents", get(list_agents))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state);
-    let mut root = Router::new().nest("/api/v1", api);
+    // Health is public so load balancers and containers can probe without a token.
+    let mut root = Router::new().nest(
+        "/api/v1",
+        Router::new().route("/health", get(health)).merge(api),
+    );
     if let Some(dir) = web_dir {
         // Single-page app: unknown paths fall back to index.html.
         let index = dir.join("index.html");
@@ -279,6 +282,34 @@ async fn update_refs(
             Some(&agent),
             serde_json::json!({ "ref": u.name, "old": old, "new": u.new, "message": req.message }),
         )?;
+        // One `commit` event per new commit on a branch (oldest first, capped)
+        // so subscribers see what arrived, not only that the ref moved.
+        if let (true, Some(new)) = (u.name.starts_with(HEADS_PREFIX), u.new) {
+            let have = match old {
+                Some(o) => walk::commit_closure(&r.store, &[o], Some(20_000))?,
+                None => Default::default(),
+            };
+            let mut fresh: Vec<(ObjectId, agit_core::Commit)> = Vec::new();
+            let mut stack = vec![new];
+            let mut seen = std::collections::HashSet::new();
+            while let Some(id) = stack.pop() {
+                if have.contains(&id) || !seen.insert(id) || fresh.len() >= 100 {
+                    continue;
+                }
+                if let Ok(c) = r.store.read_commit(&id) {
+                    stack.extend(c.parents.iter().copied());
+                    fresh.push((id, c));
+                }
+            }
+            fresh.sort_by_key(|(_, c)| c.time_ms);
+            for (id, c) in fresh {
+                r.emit(
+                    "commit",
+                    c.agent.as_ref().map(|a| a.id.as_str()).or(Some(agent.as_str())),
+                    serde_json::json!({ "id": id, "branch": u.name.trim_start_matches(HEADS_PREFIX), "parents": c.parents, "summary": c.summary(), "intent": c.intent, "task": c.task, "author": c.author.name }),
+                )?;
+            }
+        }
         match u.new {
             Some(id) => resp.updated.push(RefEntry {
                 name: u.name.clone(),

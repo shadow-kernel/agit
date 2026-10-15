@@ -170,6 +170,13 @@ pub struct CheckpointResult {
     pub tree: ObjectId,
     pub previous: Option<ObjectId>,
     pub changes_vs_head: usize,
+    /// False when `if_changed` found nothing new.
+    #[serde(default = "default_true")]
+    pub created: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Snapshot the whole working tree (tracked and untracked) into a checkpoint
@@ -179,10 +186,37 @@ pub fn checkpoint(
     message: Option<String>,
     agent: Option<AgentInfo>,
 ) -> Result<CheckpointResult> {
+    checkpoint_opts(repo, message, agent, false)
+}
+
+/// Like [`checkpoint`]; with `if_changed` an unchanged tree (equal to the
+/// last checkpoint, or to HEAD when there is none) returns the existing
+/// checkpoint instead of creating a duplicate (`created == false`).
+pub fn checkpoint_opts(
+    repo: &Repository,
+    message: Option<String>,
+    agent: Option<AgentInfo>,
+    if_changed: bool,
+) -> Result<CheckpointResult> {
     let tree = worktree::snapshot_worktree(repo)?;
     let head = repo.head_commit()?;
     let ref_name = format!("{CHECKPOINTS_PREFIX}{}", repo.workspace());
     let previous = repo.refs().read(&ref_name)?;
+    if if_changed {
+        let last_tree = match previous {
+            Some(p) => Some(repo.store().read_commit(&p)?.tree),
+            None => repo.head_tree()?,
+        };
+        if last_tree == Some(tree) {
+            return Ok(CheckpointResult {
+                id: previous.unwrap_or(ObjectId::ZERO),
+                tree,
+                previous,
+                changes_vs_head: 0,
+                created: false,
+            });
+        }
+    }
     let author = repo.author()?;
     let actor = actor_of(agent.as_ref(), &author);
     let mut meta = BTreeMap::new();
@@ -216,6 +250,7 @@ pub fn checkpoint(
         tree,
         previous,
         changes_vs_head,
+        created: true,
     })
 }
 

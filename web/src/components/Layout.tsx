@@ -4,6 +4,8 @@ import { getApiMode, initApi, onApiMode, type ApiMode } from "../api/client";
 import { DEFAULT_BASE_URL, loadSettings, saveSettings, type Settings } from "../api/settings";
 import { Badge } from "./ui";
 import { Toasts, toast } from "./Toasts";
+import { NotificationBell } from "./Notifications";
+import { SearchBox } from "./SearchBox";
 
 export function useApiMode(): ApiMode {
   const [mode, setMode] = useState<ApiMode>(getApiMode());
@@ -20,7 +22,7 @@ export function Layout() {
       <footer className="footer">
         <span>agit web UI · talks only to the public API (<code>/api/v1</code>)</span>
         <span>
-          <a href="https://github.com/agit-vcs/agit" target="_blank" rel="noreferrer">source</a> · <kbd className="kbd">t</kbd> file finder
+          <a href="https://github.com/agit-vcs/agit" target="_blank" rel="noreferrer">source</a> · <kbd className="kbd">t</kbd> file finder · <kbd className="kbd">/</kbd> search
         </span>
       </footer>
       <Toasts />
@@ -56,6 +58,7 @@ function Header({ mode }: { mode: ApiMode }) {
       ) : null}
       <div className="spacer" />
       <div className="right">
+        {repo ? <SearchBox repo={repo} /> : null}
         {mode === "mock" ? (
           <Badge className="mock-badge" title="The server could not be reached (or VITE_AGIT_MOCK=1); showing fixture data.">
             mock data
@@ -63,6 +66,7 @@ function Header({ mode }: { mode: ApiMode }) {
         ) : mode === "unknown" ? (
           <Badge>connecting…</Badge>
         ) : null}
+        {repo ? <NotificationBell repo={repo} /> : null}
         <SettingsPopover />
       </div>
     </header>

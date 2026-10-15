@@ -125,8 +125,13 @@ pub enum KnowCmd {
     Tags,
 }
 
-fn client(repo: &Repository, remote: &str) -> Result<(agit_protocol::Client, String)> {
-    Ok(sync::client_for(repo, remote)?)
+fn client_as(
+    repo: &Repository,
+    remote: &str,
+    agent: Option<&str>,
+) -> Result<(agit_protocol::Client, String)> {
+    let (c, name) = sync::client_for(repo, remote)?;
+    Ok((c.with_agent(agent.map(str::to_string)), name))
 }
 
 pub fn run_remote(repo: &Repository, json: bool, cmd: RemoteCmd) -> Result<()> {
@@ -285,8 +290,14 @@ pub fn run_clone(json: bool, cwd: &Path, url: &str, dir: Option<PathBuf>) -> Res
     Ok(())
 }
 
-pub fn run_pr(repo: &Repository, json: bool, remote: &str, cmd: PrCmd) -> Result<()> {
-    let (c, name) = client(repo, remote)?;
+pub fn run_pr(
+    repo: &Repository,
+    json: bool,
+    remote: &str,
+    cmd: PrCmd,
+    agent: Option<&str>,
+) -> Result<()> {
+    let (c, name) = client_as(repo, remote, agent)?;
     match cmd {
         PrCmd::Create {
             title,
@@ -454,8 +465,14 @@ pub fn run_pr(repo: &Repository, json: bool, remote: &str, cmd: PrCmd) -> Result
     Ok(())
 }
 
-pub fn run_know(repo: &Repository, json: bool, remote: &str, cmd: KnowCmd) -> Result<()> {
-    let (c, name) = client(repo, remote)?;
+pub fn run_know(
+    repo: &Repository,
+    json: bool,
+    remote: &str,
+    cmd: KnowCmd,
+    agent: Option<&str>,
+) -> Result<()> {
+    let (c, name) = client_as(repo, remote, agent)?;
     match cmd {
         KnowCmd::Add {
             title,

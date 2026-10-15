@@ -128,6 +128,9 @@ pub enum Cmd {
     Checkpoint {
         #[arg(short, long)]
         message: Option<String>,
+        /// Do nothing when the tree equals the last checkpoint (or HEAD).
+        #[arg(long)]
+        if_changed: bool,
         #[command(subcommand)]
         cmd: Option<CheckpointCmd>,
         #[command(flatten)]
@@ -135,6 +138,8 @@ pub enum Cmd {
     },
     /// Restore the working tree to any commit or checkpoint.
     Restore { rev: String },
+    /// Print repository locations and state as JSON-friendly fields (works on an unborn branch).
+    Root,
     /// Show where a ref (default: HEAD) pointed over time, newest first.
     Reflog {
         #[arg(default_value = "HEAD")]
@@ -339,6 +344,8 @@ pub enum Cmd {
         remote: String,
         #[command(subcommand)]
         cmd: crate::remote::PrCmd,
+        #[command(flatten)]
+        agent: AgentArgs,
     },
     /// Linked repositories pinned to a commit (.agitmodules).
     Submodule {
@@ -372,6 +379,8 @@ pub enum Cmd {
         remote: String,
         #[command(subcommand)]
         cmd: crate::remote::KnowCmd,
+        #[command(flatten)]
+        agent: AgentArgs,
     },
 }
 
@@ -638,6 +647,19 @@ pub fn run(cli: Cli) -> Result<()> {
                 });
             }
         }
+        Cmd::Root => {
+            let repo = open(&cli.dir)?;
+            let head = repo.head_commit()?;
+            let info = serde_json::json!({
+                "work_dir": repo.work_dir(),
+                "common_dir": repo.common_dir(),
+                "workspace": repo.workspace(),
+                "branch": repo.current_branch()?,
+                "head": head,
+                "merge_in_progress": repo.merge_head()?.is_some(),
+            });
+            emit(json, &info, || println!("{}", repo.work_dir().display()));
+        }
         Cmd::Reflog { name, limit } => {
             let repo = open(&cli.dir)?;
             let mut entries = if name == "HEAD" {
@@ -738,13 +760,14 @@ pub fn run(cli: Cli) -> Result<()> {
         }
         Cmd::Checkpoint {
             message,
+            if_changed,
             cmd,
             agent,
         } => {
             let repo = open(&cli.dir)?;
             match cmd {
                 None => {
-                    let r = ops::checkpoint(&repo, message, agent.info())?;
+                    let r = ops::checkpoint_opts(&repo, message, agent.info(), if_changed)?;
                     emit(json, &r, || {
                         println!(
                             "checkpoint {} ({} file(s) differ from HEAD)",
@@ -1117,8 +1140,12 @@ pub fn run(cli: Cli) -> Result<()> {
             agent,
         } => crate::remote::run_pull(&open(&cli.dir)?, json, &remote, no_ff, agent.info())?,
         Cmd::Clone { url, dest } => crate::remote::run_clone(json, &cwd(&cli.dir)?, &url, dest)?,
-        Cmd::Pr { remote, cmd } => crate::remote::run_pr(&open(&cli.dir)?, json, &remote, cmd)?,
-        Cmd::Know { remote, cmd } => crate::remote::run_know(&open(&cli.dir)?, json, &remote, cmd)?,
+        Cmd::Pr { remote, cmd, agent } => {
+            crate::remote::run_pr(&open(&cli.dir)?, json, &remote, cmd, agent.agent.as_deref())?
+        }
+        Cmd::Know { remote, cmd, agent } => {
+            crate::remote::run_know(&open(&cli.dir)?, json, &remote, cmd, agent.agent.as_deref())?
+        }
         Cmd::Mcp { remote } => crate::mcp::serve(cwd(&cli.dir)?, remote)?,
         Cmd::Key { cmd } => run_key(&cli.dir, json, cmd)?,
         Cmd::Verify { rev } => {

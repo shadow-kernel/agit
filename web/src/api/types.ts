@@ -393,6 +393,8 @@ export interface Policy {
   allowed_push_agents: string[];
   /** 0 = unlimited. */
   max_files_per_commit: number;
+  /** Commits reaching a protected branch must carry a valid Ed25519 signature with a key registered under `/keys`. */
+  require_signed: boolean;
 }
 
 export const DEFAULT_POLICY: Policy = {
@@ -406,6 +408,7 @@ export const DEFAULT_POLICY: Policy = {
   allowed_merge_agents: [],
   allowed_push_agents: [],
   max_files_per_commit: 0,
+  require_signed: false,
 };
 
 // ---- Webhooks ---------------------------------------------------------------

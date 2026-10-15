@@ -20,7 +20,9 @@ export default function Knowledge() {
   useEffect(() => setQDraft(q), [q]);
   useEffect(() => setPathDraft(path), [path]);
 
-  const notes = useAsync(() => api.notes(name, { tags, path: path || undefined, q: q || undefined, limit: 100 }), [name, tags.join(","), path, q]);
+  const [limit, setLimit] = useState(50);
+  useEffect(() => setLimit(50), [name, tags.join(","), path, q]); // eslint-disable-line react-hooks/exhaustive-deps
+  const notes = useAsync(() => api.notes(name, { tags, path: path || undefined, q: q || undefined, limit }), [name, tags.join(","), path, q, limit]);
   const tagCounts = useAsync(() => api.tagCounts(name), [name], { silent: true });
 
   const update = (patch: Record<string, string>) => {
@@ -92,6 +94,12 @@ export default function Knowledge() {
             ))
           )}
         </div>
+        {notes.data && notes.data.length >= limit ? (
+          <div className="row load-more">
+            <span className="small muted">Showing the first {notes.data.length}</span>
+            <button className="btn" onClick={() => setLimit((l) => l + 50)} disabled={notes.loading}>{notes.loading ? "Loading…" : "Load more"}</button>
+          </div>
+        ) : null}
       </div>
       <aside className="sidebar">
         <ContextPanel initialPath={path} />

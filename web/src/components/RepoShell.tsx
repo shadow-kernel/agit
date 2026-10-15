@@ -73,6 +73,7 @@ export function RepoShell() {
           {tab(`${base}/agents`, "Agents")}
           {tab(`${base}/leases`, "Leases", ctx.activeLeases)}
           {tab(`${base}/knowledge`, "Knowledge")}
+          {tab(`${base}/settings`, "Settings")}
         </nav>
         {repo.loading && !repo.data ? <Skeleton lines={4} /> : <Outlet />}
       </main>

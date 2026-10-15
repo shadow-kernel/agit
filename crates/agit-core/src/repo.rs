@@ -662,7 +662,7 @@ impl Repository {
         } else {
             cwd.join(user_path)
         };
-        let abs = normalize_lexically(&abs);
+        let abs = resolve_existing_prefix(&normalize_lexically(&abs));
         let rel = abs
             .strip_prefix(&self.work_dir)
             .map_err(|_| Error::PathOutsideWorktree(user_path.to_path_buf()))?;
@@ -694,6 +694,27 @@ pub fn absolutize(p: &Path) -> Result<PathBuf> {
         Ok(c) => c,
         Err(_) => normalize_lexically(&abs),
     })
+}
+
+/// Canonicalize the longest existing prefix of `p` (so `/var/...` and
+/// `/private/var/...` compare equal on macOS) and re-append the rest.
+pub fn resolve_existing_prefix(p: &Path) -> PathBuf {
+    let mut existing = p.to_path_buf();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    while !existing.exists() {
+        match (existing.file_name(), existing.parent()) {
+            (Some(name), Some(parent)) => {
+                rest.push(name.to_os_string());
+                existing = parent.to_path_buf();
+            }
+            _ => return p.to_path_buf(),
+        }
+    }
+    let mut out = existing.canonicalize().unwrap_or(existing);
+    for part in rest.iter().rev() {
+        out.push(part);
+    }
+    out
 }
 
 pub fn normalize_lexically(p: &Path) -> PathBuf {

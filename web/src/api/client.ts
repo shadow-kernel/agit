@@ -229,8 +229,13 @@ function streamLive(repo: string, since: number, onEvent: (e: T.Event) => void, 
       const evs = await liveApi.events(repo, last, 200);
       evs.forEach(handle);
       onStatus?.("polling");
-    } catch {
+    } catch (e) {
       onStatus?.("error");
+      // 401/403/404 will not fix themselves: stop instead of polling a missing repo forever.
+      if (e instanceof ApiError && [401, 403, 404].includes(e.status)) {
+        closed = true;
+        return;
+      }
     }
     if (!closed) pollTimer = setTimeout(poll, 3000);
   };

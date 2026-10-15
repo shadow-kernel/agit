@@ -51,6 +51,25 @@ goes into writing the three changed tree objects as loose files (temp file +
 rename, about 100 us each on APFS) and loading/saving the index (about 0.3 ms
 each). Both are what pack segments and a leaner index encoding address.
 
+### Addendum: pack segments
+
+Objects now go into append-only pack segments (one per writer process,
+rolled every 1,024 objects) instead of one file per object; the segment
+index is published atomically on flush, which happens before every ref
+update and index save. Same workload as above:
+
+| Durability | per `add`+`commit` | commits/s | before (loose objects) |
+| --- | ---: | ---: | ---: |
+| default (`AGIT_FSYNC=refs`) | 5.8 ms | 173 | 134 |
+| `AGIT_FSYNC=none` | 3.4 ms | 298 | 370 |
+
+With fsync the pack store wins because three temp-file-plus-rename
+operations per commit are gone. Without fsync it is slightly slower than
+loose objects because each flush rewrites the segment index (at most 1,024
+entries, twice per commit); an append-only index is the next step. The
+remaining 4 to 5 ms at default durability is the single `fsync` of the ref
+file, which only a journal with group commit can amortize.
+
 ## What the numbers say
 
 - The single ref fsync is the dominant cost at default durability. This is

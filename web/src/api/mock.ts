@@ -5,6 +5,7 @@ import type { Api, StreamStatus } from "./client";
 import { ApiError } from "./client";
 import { loadSettings } from "./settings";
 import type * as T from "./types";
+import { DEFAULT_POLICY as T_DEFAULT_POLICY } from "./types";
 
 // ---- helpers -----------------------------------------------------------------
 
@@ -804,6 +805,8 @@ interface RepoState {
   pulls: T.Pull[];
   notes: T.Note[];
   rules: T.TagRule[];
+  policy: T.Policy;
+  webhooks: T.Webhook[];
   events: T.Event[];
 }
 
@@ -835,6 +838,23 @@ const shop: RepoState = {
     { pattern: "src/api/**", tags: ["area:api"] },
     { pattern: "**/*.ts", tags: ["lang:ts"] },
   ],
+  policy: {
+    protected_branches: ["main", "release/*"],
+    require_pull_request: true,
+    require_approvals: 1,
+    require_intent: true,
+    require_agent: false,
+    require_checks: false,
+    block_on_blockers: true,
+    allowed_merge_agents: ["reviewer-1", "planner-1"],
+    allowed_push_agents: [],
+    max_files_per_commit: 0,
+    require_signed: false,
+  },
+  webhooks: [
+    { id: "wh_3f9a1c2b", url: "https://ci.example.com/hooks/agit", kinds: ["commit", "pull.*"], active: true, has_secret: true, created_ms: at(5, 15, 10) },
+    { id: "wh_8d04e7aa", url: "https://hooks.slack.example/T000/B000/agit", kinds: [], active: true, has_secret: false, created_ms: at(2, 9) },
+  ],
   events: [],
 };
 
@@ -848,6 +868,8 @@ const docs: RepoState = {
   pulls: [],
   notes: [],
   rules: [{ pattern: "content/**", tags: ["area:content"] }],
+  policy: { ...T_DEFAULT_POLICY },
+  webhooks: [],
   events: [],
 };
 
@@ -1005,7 +1027,7 @@ docs.notes.push(note({ id: "n_docs_palette", title: "Palette source of truth is 
 // events: derive from history + leases + pulls, then sort by time
 function seedEvents(st: RepoState) {
   const evs: Omit<T.Event, "seq">[] = [];
-  evs.push({ time_ms: st.created_ms - 1000, kind: "repo.init", actor: "daniel", data: { name: st.name, default_branch: st.default_branch } });
+  evs.push({ time_ms: st.created_ms - 1000, kind: "repo.create", actor: "daniel", data: { name: st.name, default_branch: st.default_branch } });
   const seen = new Set<string>();
   for (const [branch, list] of st.branches) {
     for (const c of list) {
@@ -1013,7 +1035,7 @@ function seedEvents(st: RepoState) {
       seen.add(c.id);
       const actor = c.commit.agent?.id ?? c.commit.author.name.toLowerCase();
       evs.push({ time_ms: c.commit.time_ms, kind: c.commit.checkpoint ? "checkpoint" : c.commit.parents.length > 1 || c.commit.message.startsWith("Merge") ? "merge" : "commit", workspace: branch.startsWith("ws/") ? branch.slice(3) : "main", actor, data: { id: c.id, branch, intent: c.commit.intent, task: c.commit.task } });
-      evs.push({ time_ms: c.commit.time_ms + 5, kind: "ref.update", actor, data: { name: `refs/heads/${branch}`, old: c.commit.parents[0] ?? null, new: c.id } });
+      evs.push({ time_ms: c.commit.time_ms + 5, kind: "ref.update", actor, data: { ref: `refs/heads/${branch}`, old: c.commit.parents[0] ?? null, new: c.id, message: null } });
     }
   }
   for (const l of st.leases) evs.push({ time_ms: l.created_ms, kind: "lease.claim", workspace: l.workspace, actor: l.holder, data: { id: l.id, paths: l.paths, mode: l.mode, expires_ms: l.expires_ms } });
@@ -1057,7 +1079,7 @@ function ensureSimulation() {
         pushEvent(st, { kind: "lease.renew", workspace: l.workspace, actor: a.id, data: { id: l.id, expires_ms: l.expires_ms } });
       } else pushEvent(st, { kind: "head.switch", workspace: a.id, actor: a.id, data: { from: "main", to: `ws/${a.id}` } });
     } else if (roll === 2) pushEvent(st, { kind: "commit", workspace: a.id, actor: a.id, data: { id: hashId(`sim:${n}`), branch: `ws/${a.id}`, intent: intents[n % intents.length], task: `SHOP-${60 + (n % 12)}` } });
-    else if (roll === 3) pushEvent(st, { kind: "ref.update", actor: a.id, data: { name: `refs/heads/ws/${a.id}`, old: hashId(`sim:${n - 1}`), new: hashId(`sim:${n}`) } });
+    else if (roll === 3) pushEvent(st, { kind: "ref.update", actor: a.id, data: { ref: `refs/heads/ws/${a.id}`, old: hashId(`sim:${n - 1}`), new: hashId(`sim:${n}`), message: null } });
     else pushEvent(st, { kind: "lease.check", actor: a.id, data: { paths: ["src/api/server.ts"], allowed: a.id === "coder-1" } });
   }, 4500);
 }
@@ -1076,6 +1098,16 @@ function allCommits(st: RepoState): Map<string, BuiltCommit> {
 
 /** Resolve a rev (branch, tag, full or short id, refs/heads/x, HEAD) to a commit + its linear history. */
 function resolve(st: RepoState, rev: string): { commit: BuiltCommit; history: BuiltCommit[] } {
+  // `<base>~N` / `<base>^` walk first parents (mock history is linear per branch).
+  const nav = /^(.*?)((?:[~^]\d*)+)$/.exec(rev);
+  if (nav) {
+    const base = resolve(st, nav[1]);
+    let back = 0;
+    for (const m of nav[2].matchAll(/[~^](\d*)/g)) back += m[1] ? parseInt(m[1], 10) : 1;
+    const idx = base.history.length - 1 - back;
+    if (idx < 0) throw new ApiError(404, "object_not_found", `revision ${rev} not found`, false);
+    return { commit: base.history[idx], history: base.history.slice(0, idx + 1) };
+  }
   let r = rev;
   if (r === "HEAD" || r === "") r = st.default_branch;
   if (r.startsWith("refs/heads/")) r = r.slice("refs/heads/".length);
@@ -1145,9 +1177,9 @@ export const mockApi: Api = {
   async createRepo(body) {
     await latency();
     if (repos.has(body.name)) throw new ApiError(409, "already_exists", `repository ${body.name} already exists`, false);
-    const st: RepoState = { name: body.name, default_branch: body.default_branch ?? "main", created_ms: Date.now(), branches: new Map(), tags: [], leases: [], pulls: [], notes: [], rules: [], events: [] };
+    const st: RepoState = { name: body.name, default_branch: body.default_branch ?? "main", created_ms: Date.now(), branches: new Map(), tags: [], leases: [], pulls: [], notes: [], rules: [], policy: { ...T_DEFAULT_POLICY }, webhooks: [], events: [] };
     repos.set(st.name, st);
-    pushEvent(st, { kind: "repo.init", actor: actingAgent(), data: { name: st.name } });
+    pushEvent(st, { kind: "repo.create", actor: actingAgent(), data: { name: st.name } });
     return { name: st.name, default_branch: st.default_branch, head: null, created_ms: st.created_ms };
   },
   async repo(name) {
@@ -1224,7 +1256,7 @@ export const mockApi: Api = {
     }
     if (entries.size === 0 && p) notFound(`path ${p}`);
     const list = [...entries.values()].sort((a, b) => (a.mode === "dir") === (b.mode === "dir") ? a.name.localeCompare(b.name) : a.mode === "dir" ? -1 : 1);
-    return { kind: "tree", path: p, entries: list };
+    return { kind: "tree", path: p, id: hashId(`tree:${p}:${resolve(st, rev).commit.commit.tree}`), entries: list };
   },
   async diff(name, from, to) {
     await latency();
@@ -1250,7 +1282,8 @@ export const mockApi: Api = {
   async events(name, since = 0, limit = 100) {
     await sleep(60);
     const st = repoOf(name);
-    return st.events.filter((e) => e.seq > since).slice(0, limit);
+    const evs = st.events.filter((e) => e.seq > since);
+    return evs.length > limit ? evs.slice(evs.length - limit) : evs;
   },
   streamEvents(name, since, onEvent, onStatus?: (s: StreamStatus) => void) {
     const st = repoOf(name);
@@ -1384,6 +1417,7 @@ export const mockApi: Api = {
     const c: T.PullComment = { id: Math.max(0, ...pr.comments.map((x) => x.id)) + 1, author: actingAgent(), path: body.path ?? null, line: body.line ?? null, kind: body.kind, body: body.body, resolved: false, time_ms: Date.now() };
     pr.comments.push(c);
     pr.updated_ms = c.time_ms;
+    pushEvent(st, { kind: "pull.comment", actor: c.author, data: { number: n, comment: c.id, path: c.path, kind: c.kind } });
     return { ...c };
   },
   async resolvePullComment(name, n, id) {
@@ -1448,7 +1482,7 @@ export const mockApi: Api = {
     pr.merged_commit = mergedId;
     pr.updated_ms = Date.now();
     pushEvent(st, { kind: "pull.merge", actor: actingAgent(), data: { number: n, merged_commit: mergedId, strategy: body.strategy } });
-    pushEvent(st, { kind: "ref.update", actor: actingAgent(), data: { name: pr.target, new: mergedId } });
+    pushEvent(st, { kind: "ref.update", actor: actingAgent(), data: { ref: pr.target, old: pr.target_id, new: mergedId, message: null } });
     return { pr: structuredClone(pr), merged_commit: mergedId };
   },
   async closePull(name, n) {
@@ -1543,7 +1577,56 @@ export const mockApi: Api = {
       const d = diffBetween(st, pr.base_id, pr.source_id);
       if (d.changes.some((c) => patternCovers(path, c.path) || patternCovers(c.path, path))) open_pulls.push(structuredClone(pr));
     }
-    return { notes, recent_commits, leases, open_pulls };
+    const suggested_tags = [...new Set(st.rules.filter((r) => patternCovers(r.pattern, path)).flatMap((r) => r.tags))].sort();
+    return { path, notes, suggested_tags, recent_commits, leases, open_pulls };
+  },
+
+  async policy(name) {
+    await latency();
+    return structuredClone(repoOf(name).policy);
+  },
+  async putPolicy(name, policy) {
+    await latency();
+    const st = repoOf(name);
+    if (policy.require_approvals < 0 || policy.max_files_per_commit < 0) throw new ApiError(400, "invalid", "counts must be >= 0", false);
+    st.policy = { ...T_DEFAULT_POLICY, ...structuredClone(policy) };
+    pushEvent(st, { kind: "policy.update", actor: actingAgent(), data: { protected_branches: st.policy.protected_branches } });
+    return structuredClone(st.policy);
+  },
+
+  async webhooks(name) {
+    await latency();
+    return structuredClone(repoOf(name).webhooks);
+  },
+  async createWebhook(name, body) {
+    await latency();
+    const st = repoOf(name);
+    let url: URL;
+    try {
+      url = new URL(body.url);
+    } catch {
+      throw new ApiError(400, "invalid", "url must be absolute", false);
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") throw new ApiError(400, "invalid", "url must be http(s)", false);
+    const wh: T.Webhook = { id: "wh_" + hashId(`wh:${Date.now()}:${body.url}`).slice(0, 8), url: body.url, kinds: [...new Set(body.kinds ?? [])], active: true, has_secret: !!body.secret, created_ms: Date.now() };
+    st.webhooks.push(wh);
+    pushEvent(st, { kind: "webhook.create", actor: actingAgent(), data: { id: wh.id, url: wh.url, kinds: wh.kinds } });
+    return { ...wh };
+  },
+  async deleteWebhook(name, id) {
+    await latency();
+    const st = repoOf(name);
+    const idx = st.webhooks.findIndex((w) => w.id === id);
+    if (idx < 0) notFound(`webhook ${id}`);
+    const [wh] = st.webhooks.splice(idx, 1);
+    pushEvent(st, { kind: "webhook.delete", actor: actingAgent(), data: { id: wh.id, url: wh.url } });
+    return { deleted: id };
+  },
+  async testWebhook(name, id) {
+    await latency();
+    const st = repoOf(name);
+    if (!st.webhooks.some((w) => w.id === id)) notFound(`webhook ${id}`);
+    return { queued: true };
   },
 
   async agents(name) {
@@ -1559,6 +1642,7 @@ export const mockApi: Api = {
     for (const c of allCommits(st).values()) {
       if (!c.commit.agent) continue;
       const a = get(c.commit.agent.id);
+      if (!a.model && c.commit.agent.model) a.model = c.commit.agent.model;
       if (!c.commit.checkpoint) a.commits++;
       a.last_seen_ms = Math.max(a.last_seen_ms, c.commit.time_ms);
     }

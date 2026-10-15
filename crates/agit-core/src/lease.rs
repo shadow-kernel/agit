@@ -235,6 +235,31 @@ impl LeaseStore {
         }
         let _guard = self.lock()?;
         self.purge_expired_unlocked()?;
+        // Idempotent: an active lease of the same holder and mode that already
+        // covers every requested path is renewed instead of duplicated.
+        if let Some(existing) = self
+            .read_all_unlocked()?
+            .into_iter()
+            .filter(|l| l.holder == req.holder && l.mode == req.mode && !l.is_expired())
+            .find(|l| {
+                req.paths
+                    .iter()
+                    .all(|p| l.paths.contains(p) || (!has_glob(p) && l.covers(p)))
+            })
+        {
+            let mut renewed = existing;
+            if let Some(ttl) = req.ttl {
+                renewed.expires_ms = Some(now_ms() + ttl.as_millis() as i64);
+            }
+            if req.note.is_some() {
+                renewed.note = req.note;
+            }
+            write_atomic(
+                &self.path_for(&renewed.id),
+                &serde_json::to_vec_pretty(&renewed)?,
+            )?;
+            return Ok(renewed);
+        }
         if req.mode == LeaseMode::Exclusive {
             if let Some((other, path)) = self.find_conflict(&req.holder, &req.paths)? {
                 return Err(Error::LeaseConflict {
@@ -345,9 +370,13 @@ mod tests {
             .claim(req("agent-b", &["src/auth/login.rs"]))
             .unwrap_err();
         assert!(matches!(err, Error::LeaseConflict { .. }));
-        // Same holder may re-claim overlapping paths.
-        store.claim(req("agent-a", &["src/auth/x"])).unwrap();
-        // Disjoint path is fine.
+        // Same holder re-claiming a covered path gets the existing lease back
+        // (idempotent), not a duplicate.
+        let again = store.claim(req("agent-a", &["src/auth/x"])).unwrap();
+        assert_eq!(again.id, a.id);
+        // A path outside the existing lease creates a new one.
+        store.claim(req("agent-a", &["docs2"])).unwrap();
+        // Disjoint path is fine for another holder.
         store.claim(req("agent-b", &["src/db"])).unwrap();
         assert_eq!(store.list().unwrap().len(), 3);
         store.release(&a.id).unwrap();

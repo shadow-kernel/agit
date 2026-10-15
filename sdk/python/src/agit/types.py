@@ -186,16 +186,66 @@ class CommitEntry(Model):
         return (self.agent or {}).get("id")
 
 
+SIGNATURE_STATUSES = ("unsigned", "valid", "invalid")
+
+
+@dataclass
+class SignatureInfo(Model):
+    """Commit signature verdict (``CommitDetail.signature``).
+
+    ``status`` is ``unsigned``, ``valid`` or ``invalid``. ``key_id``, ``signer`` and
+    ``public_key`` are set for ``valid``; ``reason`` for ``invalid``. ``trusted`` is
+    ``True`` when the key is registered for the signer in the repository (``/keys``).
+    """
+
+    status: str = "unsigned"
+    key_id: str | None = None
+    signer: str | None = None
+    public_key: str | None = None
+    reason: str | None = None
+    trusted: bool = False
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    @property
+    def is_valid(self) -> bool:
+        return self.status == "valid"
+
+    @property
+    def is_trusted(self) -> bool:
+        """Valid signature with a key registered for the signer."""
+        return self.is_valid and self.trusted
+
+
+@dataclass
+class KeyEntry(Model):
+    """A public signing key registered for an agent (``GET /repos/{repo}/keys``)."""
+
+    agent: str = ""
+    key_id: str = ""
+    public_key: str = ""
+    added_ms: int = 0
+    added_by: str = ""
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+
 @dataclass
 class CommitDetail(Model):
-    """``GET /repos/{repo}/commits/{rev}``: ``{id, commit, changes, patch}``."""
+    """``GET /repos/{repo}/commits/{rev}``: ``{id, commit, changes, patch, signature?, notes}``."""
 
     id: str = ""
     commit: dict[str, Any] = field(default_factory=dict)
     changes: list[Change] = field(default_factory=list)
     patch: str = ""
+    #: Signature verdict; ``None`` when the server did not report one.
+    signature: SignatureInfo | None = None
+    #: Up to 10 notes linking this commit (drafts included) or covering a changed path.
+    notes: list[NoteSummary] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
-    _parsers = {"changes": _list_of(Change)}
+    _parsers = {
+        "changes": _list_of(Change),
+        "signature": _one(SignatureInfo),
+        "notes": lambda v: NoteSummary.list_from(v),
+    }
 
 
 @dataclass
@@ -375,12 +425,19 @@ class Note(Model):
     created_ms: int = 0
     updated_ms: int = 0
     superseded_by: str | None = None
+    #: Commit the note was written or last validated against (``None`` when unknown).
+    valid_at: str | None = None
+    #: Machine-generated note (e.g. from a merged PR) that has not been accepted yet.
+    draft: bool = False
+    #: Computed on read: a path covered by ``paths`` changed between ``valid_at`` and HEAD.
+    stale: bool = False
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
 
 @dataclass
 class NoteSummary(Model):
-    """A note without its body, plus a 200-char ``excerpt``."""
+    """A note without its body, plus a 200-char ``excerpt``, ``valid_at``, ``draft``, ``stale``
+    and, for ``q=`` searches, the BM25 ``score``."""
 
     id: str = ""
     title: str = ""
@@ -391,7 +448,20 @@ class NoteSummary(Model):
     updated_ms: int = 0
     excerpt: str = ""
     superseded_by: str | None = None
+    valid_at: str | None = None
+    draft: bool = False
+    stale: bool = False
+    #: BM25 relevance; only present for full-text (``q=``) queries.
+    score: float | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+
+@dataclass
+class StaleNote(NoteSummary):
+    """``GET /repos/{repo}/knowledge/stale``: a summary (``stale=True``) plus the covered paths
+    that changed between ``valid_at`` and the requested revision."""
+
+    changed_paths: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -425,8 +495,24 @@ class TagRule(Model):
 
 
 @dataclass
+class ContextFile(Model):
+    """One file of a context pack (``include=files``). ``truncated`` marks a cut made to fit the budget."""
+
+    path: str = ""
+    text: str = ""
+    truncated: bool = False
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+
+@dataclass
 class ContextResponse(Model):
-    """``GET /repos/{repo}/context?path=``: what to read before touching a path."""
+    """``GET /repos/{repo}/context?path=``: what to read before touching a path.
+
+    ``notes`` lists fresh notes first, then stale ones (``stale=True``); drafts are
+    excluded. ``agents_active`` are agents holding a lease on the path or who committed
+    to it in the last 24 hours. ``files`` is only filled with ``include=files``
+    (:meth:`~agit.Client.context_pack`).
+    """
 
     path: str = ""
     notes: list[NoteSummary] = field(default_factory=list)
@@ -434,13 +520,24 @@ class ContextResponse(Model):
     recent_commits: list[CommitEntry] = field(default_factory=list)
     leases: list[Lease] = field(default_factory=list)
     open_pulls: list[PullRequest] = field(default_factory=list)
+    agents_active: list[str] = field(default_factory=list)
+    files: list[ContextFile] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     _parsers = {
         "notes": _list_of(NoteSummary),
         "recent_commits": _list_of(CommitEntry),
         "leases": _list_of(Lease),
         "open_pulls": _list_of(PullRequest),
+        "files": _list_of(ContextFile),
     }
+
+    @property
+    def fresh_notes(self) -> list[NoteSummary]:
+        return [n for n in self.notes if not n.stale]
+
+    @property
+    def stale_notes(self) -> list[NoteSummary]:
+        return [n for n in self.notes if n.stale]
 
 
 # -- policy ------------------------------------------------------------------
@@ -460,6 +557,8 @@ class Policy(Model):
     allowed_merge_agents: list[str] = field(default_factory=list)
     allowed_push_agents: list[str] = field(default_factory=list)
     max_files_per_commit: int = 0
+    #: Commits reaching a protected branch need a valid signature with a key registered for the signer.
+    require_signed: bool = False
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -475,6 +574,7 @@ class Policy(Model):
             "allowed_merge_agents": list(self.allowed_merge_agents),
             "allowed_push_agents": list(self.allowed_push_agents),
             "max_files_per_commit": self.max_files_per_commit,
+            "require_signed": self.require_signed,
         }
 
 
@@ -514,11 +614,13 @@ __all__ = [
     "CommitEntry",
     "Comment",
     "Conflict",
+    "ContextFile",
     "ContextResponse",
     "DiffResponse",
     "Event",
     "FileStat",
     "Health",
+    "KeyEntry",
     "LEASE_MODES",
     "Lease",
     "MERGE_STRATEGIES",
@@ -536,6 +638,9 @@ __all__ = [
     "RefUpdateResponse",
     "RepoSummary",
     "Review",
+    "SIGNATURE_STATUSES",
+    "SignatureInfo",
+    "StaleNote",
     "TagCount",
     "TagRule",
     "as_list",

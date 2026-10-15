@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { useRepo } from "../components/RepoShell";
@@ -11,6 +12,9 @@ export default function Pulls() {
   const [sp, setSp] = useSearchParams();
   const state = (sp.get("state") || "open") as PullState | "all";
   const pulls = useAsync(() => api.pulls(name, state), [name, state]);
+  const PAGE = 25;
+  const [shown, setShown] = useState(PAGE);
+  useEffect(() => setShown(PAGE), [name, state]);
   const base = `/r/${encodeURIComponent(name)}`;
   const states: (PullState | "all")[] = ["open", "merged", "closed", "all"];
 
@@ -35,7 +39,7 @@ export default function Pulls() {
             Agents open pull requests with <code>POST /repos/{name}/pulls</code>.
           </EmptyState>
         ) : (
-          pulls.data?.map((p) => {
+          pulls.data?.slice(0, shown).map((p) => {
             const approvals = p.reviews.filter((r) => r.decision === "approve").length;
             const changesReq = p.reviews.some((r) => r.decision === "request_changes");
             const blockers = p.comments.filter((c) => c.kind === "blocker" && !c.resolved).length;
@@ -71,6 +75,12 @@ export default function Pulls() {
           })
         )}
       </div>
+      {pulls.data && pulls.data.length > shown ? (
+        <div className="row load-more">
+          <span className="small muted">Showing {shown} of {pulls.data.length}</span>
+          <button className="btn" onClick={() => setShown((s) => s + PAGE)}>Load more</button>
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -8,6 +8,7 @@ import { countdown, fullDate, timeAgo } from "../lib/format";
 import { useAsync, useNow } from "../lib/useAsync";
 
 const MAX_EVENTS = 200;
+const PAGE = 200;
 
 export default function Agents() {
   const { name } = useRepo();
@@ -21,16 +22,41 @@ export default function Agents() {
   const buffer = useRef<Event[]>([]);
   const pausedRef = useRef(false);
   pausedRef.current = paused;
+  const [cap, setCap] = useState(MAX_EVENTS);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [exhausted, setExhausted] = useState(false);
+
+  const loadOlder = async () => {
+    setLoadingOlder(true);
+    try {
+      const want = cap + PAGE;
+      const evs = await api.events(name, 0, want); // the server returns the last `limit` events
+      setEvents((xs) => {
+        const seen = new Set(xs.map((e) => e.seq));
+        const merged = [...xs, ...evs.filter((e) => !seen.has(e.seq))].sort((a, b) => b.seq - a.seq);
+        return merged.slice(0, want);
+      });
+      setCap(want);
+      if (evs.length < want) setExhausted(true);
+    } catch {
+      /* reported by the api layer */
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
 
   useEffect(() => {
     let alive = true;
     let unsub = () => {};
     setEvents([]);
-    // Initial backlog, then stream from the last seq.
+    setCap(MAX_EVENTS);
+    setExhausted(false);
+    // Initial backlog (the server returns the last `limit` events), then stream from the last seq.
     api
-      .events(name, 0, 1000)
+      .events(name, 0, MAX_EVENTS)
       .then((evs) => {
         if (!alive) return;
+        if (evs.length < MAX_EVENTS) setExhausted(true);
         const last = evs.slice(-MAX_EVENTS);
         setEvents(last.reverse());
         const since = evs.length ? evs[evs.length - 1].seq : 0;
@@ -42,7 +68,7 @@ export default function Agents() {
               buffer.current.push(e);
               return;
             }
-            setEvents((xs) => (xs.some((x) => x.seq === e.seq) ? xs : [e, ...xs].slice(0, MAX_EVENTS)));
+            setEvents((xs) => (xs.some((x) => x.seq === e.seq) ? xs : [e, ...xs].slice(0, Math.max(MAX_EVENTS, xs.length + 1))));
           },
           setStatus,
         );
@@ -126,6 +152,12 @@ export default function Agents() {
         </div>
         <div className="feed">
           {shown.length === 0 ? <EmptyState icon="◌" title={events.length ? "No events match the filter" : "Waiting for events"} /> : shown.map((e) => <EventRow key={e.seq} e={e} repo={name} now={now} />)}
+          {events.length > 0 && !exhausted ? (
+            <div className="row load-more" style={{ padding: 12 }}>
+              <span className="small muted">Oldest shown: #{events[events.length - 1]?.seq}</span>
+              <button className="btn sm" onClick={loadOlder} disabled={loadingOlder}>{loadingOlder ? "Loading…" : "Load older events"}</button>
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
@@ -141,12 +173,16 @@ function EventRow({ e, repo, now }: { e: Event; repo: string; now: number }) {
   if ((e.kind === "commit" || e.kind === "checkpoint" || e.kind === "merge") && str("id")) {
     summary = <><Sha id={str("id")} repo={repo} /> {str("branch") ? <span className="muted">on {str("branch")}</span> : null} {str("intent") ? <span className="intent truncate" style={{ maxWidth: 360 }}>{str("intent")}</span> : null}</>;
   } else if (e.kind.startsWith("pull.") && num("number") !== undefined) {
-    summary = <><Link to={`${base}/pulls/${num("number")}`}>#{num("number")}</Link> {str("title") ? <span className="truncate" style={{ maxWidth: 360 }}>{str("title")}</span> : null} {str("decision") ? <Badge>{str("decision")}</Badge> : null} {str("merged_commit") ? <Sha id={str("merged_commit")} repo={repo} /> : null}</>;
+    summary = <><Link to={`${base}/pulls/${num("number")}`}>#{num("number")}</Link> {str("title") ? <span className="truncate" style={{ maxWidth: 360 }}>{str("title")}</span> : null} {str("decision") ? <Badge>{str("decision")}</Badge> : null} {e.kind === "pull.comment" ? <><Badge>{str("kind") ?? "comment"}</Badge>{str("path") ? <code>{str("path")}</code> : null}</> : null} {str("merged_commit") ? <Sha id={str("merged_commit")} repo={repo} /> : null}</>;
   } else if (e.kind.startsWith("lease.")) {
     const paths = Array.isArray(d.paths) ? (d.paths as string[]) : [];
     summary = <>{paths.map((p) => <code key={p}>{p}</code>)} {str("mode") ? <span className="muted">{str("mode")}</span> : null} {num("expires_ms") ? <span className="muted">{num("expires_ms")! > now ? `expires in ${countdown(num("expires_ms")!, now)}` : "expired"}</span> : null} <Link className="small" to={`${base}/leases`}>leases</Link></>;
   } else if (e.kind === "ref.update") {
-    summary = <><code>{str("name")}</code> <span className="muted">→</span> <Sha id={str("new")} repo={repo} /></>;
+    summary = <><code>{str("ref") ?? str("name")}</code> <span className="muted">→</span> {str("new") ? <Sha id={str("new")} repo={repo} /> : <span className="muted">deleted</span>}{str("old") ? <span className="subtle small">was {str("old")!.slice(0, 8)}</span> : null}</>;
+  } else if (e.kind === "knowledge.rules") {
+    summary = <Link to={`${base}/settings/rules`}>{num("count") !== undefined ? `${num("count")} rules` : "rules updated"}</Link>;
+  } else if (e.kind === "policy.update") {
+    summary = <Link to={`${base}/settings`}>{Array.isArray(d.protected_branches) ? `protected: ${(d.protected_branches as string[]).join(", ") || "none"}` : "policy updated"}</Link>;
   } else if (e.kind === "note.create") {
     summary = <Link to={`${base}/knowledge/${encodeURIComponent(str("id") ?? "")}`}>{str("title") ?? str("id")}</Link>;
   } else {
