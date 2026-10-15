@@ -218,6 +218,7 @@ async fn push_clone_pull_pr_knowledge() {
                     commits: vec![c2.id],
                     pulls: vec![1],
                     confidence: Some(0.9),
+                    ..Default::default()
                 },
             )
             .unwrap();
@@ -559,6 +560,351 @@ async fn webhooks_deliver_signed_events() {
 
         c.delete_webhook("w", &wh.id).unwrap();
         assert!(c.webhooks("w").unwrap().is_empty());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn knowledge_layer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = start_server(&tmp.path().join("data")).await;
+    let tmp_path = tmp.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let c = Client::new(&base).with_agent(Some("agent-a".into()));
+        c.create_repo("k", Some("main")).unwrap();
+        let url = format!("{base}/repos/k");
+
+        // One commit with a few files.
+        let a = Repository::init(&tmp_path.join("a")).unwrap();
+        write(a.work_dir(), "README.md", "# k\n");
+        write(
+            a.work_dir(),
+            "src/auth/login.rs",
+            &format!(
+                "// login\n{}",
+                "pub fn login() -> bool { true }\n".repeat(8)
+            ),
+        );
+        write(a.work_dir(), "src/auth/session.rs", "pub struct Session;\n");
+        write(
+            a.work_dir(),
+            "src/db/pool.rs",
+            "pub const POOL: usize = 8;\n",
+        );
+        let c1 = commit_all(&a, "initial", "agent-a");
+        sync::add_remote(&a, "origin", &url).unwrap();
+        sync::push(&a, "origin", "main", false, false).unwrap();
+
+        ureq::put(&format!("{base}/repos/k/knowledge/rules"))
+            .set("X-Agit-Agent", "agent-a")
+            .send_json(serde_json::json!([
+                { "pattern": "src/auth/**", "tags": ["area:auth"] },
+                { "pattern": "src/db/**", "tags": ["area:db"] }
+            ]))
+            .unwrap();
+
+        // Notes default to valid_at = HEAD.
+        let n1 = c
+            .create_note(
+                "k",
+                &NoteCreate {
+                    title: "Session tokens rotate nightly".into(),
+                    body:
+                        "The SessionStore calls rotate_token() every night; the gateway reads them."
+                            .into(),
+                    tags: vec!["area:auth".into(), "kind:gotcha".into()],
+                    paths: vec!["src/auth/**".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(n1.valid_at, Some(c1.id));
+        assert!(!n1.stale && !n1.draft);
+        let n2 = c
+            .create_note(
+                "k",
+                &NoteCreate {
+                    title: "Connection pool sizing for the gateway".into(),
+                    body: "The pool holds eight connections.".into(),
+                    tags: vec!["area:db".into(), "kind:decision".into()],
+                    paths: vec!["src/db/**".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let n3 = c
+            .create_note(
+                "k",
+                &NoteCreate {
+                    title: "Unrelated".into(),
+                    body: "nothing to see".into(),
+                    tags: vec!["kind:howto".into()],
+                    commits: vec![c1.id],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(c
+            .create_note(
+                "k",
+                &NoteCreate {
+                    title: "bad valid_at".into(),
+                    valid_at: Some("00".repeat(32).parse().unwrap()),
+                    ..Default::default()
+                }
+            )
+            .is_err());
+
+        // Full-text search: ranked, tokenized (camelCase, snake_case, tags).
+        let hits = c.notes("k", "?q=rotate").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, n1.id);
+        assert!(hits[0].score.unwrap() > 0.0);
+        assert_eq!(c.notes("k", "?q=session%20store").unwrap()[0].id, n1.id);
+        assert_eq!(c.notes("k", "?q=SessionStore").unwrap()[0].id, n1.id);
+        assert_eq!(c.notes("k", "?q=area:auth").unwrap()[0].id, n1.id);
+        let hits = c.notes("k", "?q=pool").unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, n2.id);
+        assert!(c.notes("k", "?q=pool&tags=area:auth").unwrap().is_empty());
+        assert!(c.notes("k", "?tags=area:auth").unwrap()[0].score.is_none());
+        // Title hits outrank body hits.
+        let hits = c.notes("k", "?q=gateway").unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].id, n2.id);
+        assert!(hits[0].score.unwrap() > hits[1].score.unwrap());
+        // The index follows updates and deletes.
+        c.patch_note(
+            "k",
+            &n2.id,
+            &NotePatch {
+                body: Some("The pool rotates idle connections.".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(c.notes("k", "?q=rotate").unwrap().len(), 2);
+        assert_eq!(c.notes("k", "?q=nothing").unwrap().len(), 1);
+        c.delete_note("k", &n3.id).unwrap();
+        assert!(c.notes("k", "?q=nothing").unwrap().is_empty());
+        assert!(c.note("k", &n3.id).is_err());
+
+        // Linking filters.
+        let n4 = c
+            .create_note(
+                "k",
+                &NoteCreate {
+                    title: "About the first commit".into(),
+                    commits: vec![c1.id],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let linked = c.notes("k", &format!("?commit={}", c1.id)).unwrap();
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].id, n4.id);
+        let detail: CommitDetail = client_get(&base, &format!("/repos/k/commits/{}", c1.id));
+        assert!(detail.notes.iter().any(|n| n.id == n4.id));
+
+        // Staleness: change a covered path, note n1 becomes stale.
+        assert!(c.stale_notes("k", None).unwrap().is_empty());
+        write(
+            a.work_dir(),
+            "src/auth/login.rs",
+            "pub fn login() -> bool { false }\n",
+        );
+        let c2 = commit_all(&a, "flip login", "agent-a");
+        sync::push(&a, "origin", "main", false, false).unwrap();
+        let stale = c.stale_notes("k", None).unwrap();
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].note.id, n1.id);
+        assert!(stale[0].note.stale);
+        assert_eq!(stale[0].changed_paths, vec!["src/auth/login.rs"]);
+        assert!(c.note("k", &n1.id).unwrap().stale);
+        assert!(!c.note("k", &n2.id).unwrap().stale);
+        let detail: CommitDetail = client_get(&base, &format!("/repos/k/commits/{}", c2.id));
+        assert!(detail.notes.iter().any(|n| n.id == n1.id));
+        assert!(!detail.notes.iter().any(|n| n.id == n2.id));
+        // Context marks stale notes and lists fresh ones first.
+        let fresh = c
+            .create_note(
+                "k",
+                &NoteCreate {
+                    title: "Login returns false for now".into(),
+                    paths: vec!["src/auth/login.rs".into()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let ctx = c.context("k", "src/auth/login.rs").unwrap();
+        assert_eq!(ctx.notes.len(), 2);
+        assert_eq!(ctx.notes[0].id, fresh.id);
+        assert!(!ctx.notes[0].stale);
+        assert_eq!(ctx.notes[1].id, n1.id);
+        assert!(ctx.notes[1].stale);
+        assert_eq!(ctx.agents_active, vec!["agent-a"]);
+        assert!(ctx.files.is_empty());
+        // Validate against HEAD (and explicitly against an older rev).
+        let v = c.validate_note("k", &n1.id, None).unwrap();
+        assert_eq!(v.valid_at, Some(c2.id));
+        assert!(!v.stale);
+        assert!(c.stale_notes("k", None).unwrap().is_empty());
+        // Against the older commit both notes written at c2 are stale.
+        assert_eq!(
+            c.stale_notes("k", Some(&c1.id.to_string())).unwrap().len(),
+            2
+        );
+        let v = c
+            .validate_note("k", &n1.id, Some(&c1.id.to_string()))
+            .unwrap();
+        assert_eq!(v.valid_at, Some(c1.id));
+        assert!(v.stale);
+
+        // Context pack: files within a budget, agents from leases and commits.
+        c.claim_lease(
+            "k",
+            &LeaseCreate {
+                holder: "agent-z".into(),
+                paths: vec!["src/auth".into()],
+                mode: Default::default(),
+                ttl_secs: Some(60),
+                note: None,
+            },
+        )
+        .unwrap();
+        let pack = c.context_pack("k", "src/auth/login.rs", None).unwrap();
+        assert_eq!(pack.agents_active, vec!["agent-a", "agent-z"]);
+        assert_eq!(pack.files.len(), 2);
+        assert_eq!(pack.files[0].path, "src/auth/login.rs");
+        assert!(pack.files[0].text.contains("false"));
+        assert!(!pack.files[0].truncated);
+        assert_eq!(pack.files[1].path, "src/auth/session.rs");
+        assert!(c
+            .context_pack("k", "src/auth/login.rs", Some(1))
+            .unwrap()
+            .files
+            .is_empty());
+        let mut without_files = pack.clone();
+        without_files.files.clear();
+        let used = serde_json::to_string(&without_files).unwrap().len();
+        let tight = c
+            .context_pack("k", "src/auth/login.rs", Some(used / 4 + 20))
+            .unwrap();
+        assert_eq!(tight.files.len(), 1);
+        assert!(tight.files[0].truncated);
+        let dir_pack = c.context_pack("k", "src/db", None).unwrap();
+        assert_eq!(dir_pack.files.len(), 1);
+        assert_eq!(dir_pack.files[0].path, "src/db/pool.rs");
+
+        // Drafts from merges.
+        let (b, _) = sync::clone(&url, &tmp_path.join("b")).unwrap();
+        ops::switch(&b, "feature/db", true, false).unwrap();
+        write(
+            b.work_dir(),
+            "src/db/pool.rs",
+            "pub const POOL: usize = 16;\n",
+        );
+        write(b.work_dir(), "src/db/migrate.rs", "pub fn migrate() {}\n");
+        write(b.work_dir(), "CHANGELOG.md", "- bigger pool\n");
+        commit_all(&b, "bigger pool", "agent-b");
+        sync::push(&b, "origin", "feature/db", false, false).unwrap();
+        let bc = Client::new(&base).with_agent(Some("agent-b".into()));
+        let pr = bc
+            .create_pull(
+                "k",
+                &PullCreate {
+                    title: "Double the pool".into(),
+                    body: Some("More connections.".into()),
+                    intent: Some("handle more load".into()),
+                    task: Some("T-9".into()),
+                    source: "feature/db".into(),
+                    target: None,
+                },
+            )
+            .unwrap();
+        let rv = Client::new(&base).with_agent(Some("reviewer-1".into()));
+        rv.review_pull(
+            "k",
+            pr.number,
+            &ReviewCreate {
+                decision: ReviewDecision::Approve,
+                body: "fine".into(),
+            },
+        )
+        .unwrap();
+        let m = rv
+            .merge_pull("k", pr.number, &MergeRequest::default())
+            .unwrap();
+        assert!(c
+            .notes("k", &format!("?pull={}", pr.number))
+            .unwrap()
+            .is_empty());
+        let drafts = c
+            .notes("k", &format!("?drafts=1&pull={}", pr.number))
+            .unwrap();
+        assert_eq!(drafts.len(), 1);
+        assert!(drafts[0].draft);
+        let d = c.note("k", &drafts[0].id).unwrap();
+        assert_eq!(d.title, "Double the pool");
+        assert_eq!(d.author, "reviewer-1");
+        assert_eq!(d.confidence, 0.4);
+        assert_eq!(d.valid_at, Some(m.merged_commit));
+        assert_eq!(d.commits, vec![m.merged_commit]);
+        assert_eq!(d.pulls, vec![pr.number]);
+        assert_eq!(d.tags, vec!["kind:change", "area:db"]);
+        assert_eq!(d.paths, vec!["CHANGELOG.md", "src/db/**"]);
+        for needle in [
+            "Intent: handle more load",
+            "Task: T-9",
+            "- src/db/migrate.rs (A)",
+            "- src/db/pool.rs (M)",
+            "- reviewer-1: approve - fine",
+        ] {
+            assert!(d.body.contains(needle), "missing {needle:?} in {}", d.body);
+        }
+        // Drafts stay out of tag counts and context until accepted.
+        assert!(!c.tags("k").unwrap().iter().any(|t| t.tag == "kind:change"));
+        assert!(c
+            .context("k", "src/db/pool.rs")
+            .unwrap()
+            .notes
+            .iter()
+            .all(|n| n.id != d.id));
+        let detail: CommitDetail =
+            client_get(&base, &format!("/repos/k/commits/{}", m.merged_commit));
+        assert!(detail.notes.iter().any(|n| n.id == d.id));
+        let accepted = c
+            .accept_note(
+                "k",
+                &d.id,
+                Some(&NotePatch {
+                    confidence: Some(0.9),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        assert!(!accepted.draft);
+        assert_eq!(accepted.confidence, 0.9);
+        assert_eq!(
+            c.notes("k", &format!("?pull={}", pr.number)).unwrap().len(),
+            1
+        );
+        assert!(c.tags("k").unwrap().iter().any(|t| t.tag == "kind:change"));
+        assert_eq!(c.notes("k", "?q=double%20pool").unwrap()[0].id, d.id);
+
+        let events = c.events("k", 0).unwrap();
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        for k in [
+            "note.create",
+            "note.update",
+            "note.delete",
+            "note.validate",
+            "note.draft",
+            "note.accept",
+        ] {
+            assert!(kinds.contains(&k), "missing event {k} in {kinds:?}");
+        }
     })
     .await
     .unwrap();

@@ -350,6 +350,8 @@ impl<'a> PullStore<'a> {
             ));
         }
         let ff_possible = pr.base_id == Some(pr.target_id);
+        // Change set for the knowledge draft below; best effort only.
+        let changes = self.changes(&pr).unwrap_or_default();
         let merged_commit = match req.strategy {
             MergeStrategy::Ff => {
                 if !ff_possible {
@@ -404,6 +406,17 @@ impl<'a> PullStore<'a> {
         self.save(&pr)?;
         self.repo.emit("ref.update", Some(&actor.id), serde_json::json!({ "ref": pr.target, "new": merged_commit, "op": "merge", "pull": pr.number }))?;
         self.repo.emit("pull.merge", Some(&actor.id), serde_json::json!({ "number": pr.number, "commit": merged_commit, "strategy": req.strategy }))?;
+        drop(_g);
+        // Knowledge hook: a draft note summarizing the merge (docs/API.md,
+        // "Knowledge notes"). Failing to draft must not fail the merge.
+        if let Err(err) = crate::knowledge::NoteStore::new(self.repo).draft_from_merge(
+            &pr,
+            merged_commit,
+            &changes,
+            &actor.id,
+        ) {
+            tracing::warn!(pull = pr.number, %err, "could not draft a knowledge note for the merge");
+        }
         Ok(MergeResponse { pr, merged_commit })
     }
 

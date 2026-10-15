@@ -146,6 +146,9 @@ pub struct CommitDetail {
     pub commit: Commit,
     pub changes: Vec<Change>,
     pub patch: String,
+    /// Notes linking this commit or covering a path it changed (at most 10).
+    #[serde(default)]
+    pub notes: Vec<NoteSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -427,6 +430,16 @@ pub struct Note {
     pub updated_ms: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
+    /// Commit the note was written or last validated against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_at: Option<ObjectId>,
+    /// Drafts are machine-generated (e.g. from a merged pull request) and
+    /// hidden from listings until accepted.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draft: bool,
+    /// Computed on read: a path covered by `paths` changed between `valid_at` and HEAD.
+    #[serde(default)]
+    pub stale: bool,
 }
 
 fn default_confidence() -> f32 {
@@ -445,6 +458,15 @@ pub struct NoteSummary {
     pub excerpt: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_at: Option<ObjectId>,
+    #[serde(default)]
+    pub draft: bool,
+    #[serde(default)]
+    pub stale: bool,
+    /// BM25 relevance; present only for full-text queries (`q=`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
 }
 
 impl From<&Note> for NoteSummary {
@@ -460,8 +482,27 @@ impl From<&Note> for NoteSummary {
             updated_ms: n.updated_ms,
             excerpt,
             superseded_by: n.superseded_by.clone(),
+            valid_at: n.valid_at,
+            draft: n.draft,
+            stale: n.stale,
+            score: None,
         }
     }
+}
+
+/// A stale note together with the covered paths that changed since `valid_at`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StaleNote {
+    #[serde(flatten)]
+    pub note: NoteSummary,
+    pub changed_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ValidateRequest {
+    /// Revision to validate against (default HEAD).
+    #[serde(default)]
+    pub rev: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -479,6 +520,11 @@ pub struct NoteCreate {
     pub pulls: Vec<u64>,
     #[serde(default)]
     pub confidence: Option<f32>,
+    /// Defaults to HEAD of the default branch when it exists.
+    #[serde(default)]
+    pub valid_at: Option<ObjectId>,
+    #[serde(default)]
+    pub draft: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -516,11 +562,25 @@ pub struct TagRule {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextResponse {
     pub path: String,
+    /// Fresh notes first, stale notes (`stale: true`) after them.
     pub notes: Vec<NoteSummary>,
     pub suggested_tags: Vec<String>,
     pub recent_commits: Vec<CommitEntry>,
     pub leases: Vec<Lease>,
     pub open_pulls: Vec<PullRequest>,
+    /// Agents holding a lease on the path or who committed to it in the last 24h.
+    #[serde(default)]
+    pub agents_active: Vec<String>,
+    /// File contents (only with `include=files`), trimmed to the token budget.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<ContextFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextFile {
+    pub path: String,
+    pub text: String,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -1,17 +1,18 @@
 //! HTTP routes (docs/API.md).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
 use agit_core::diff::{change_stats, diff_trees, is_binary, render_patch};
-use agit_core::events::Event;
+use agit_core::events::{now_ms, Event};
 use agit_core::lease::{pattern_covers, LeaseRequest};
 use agit_core::object::Object;
 use agit_core::ops::{log_store, LogOptions};
 use agit_core::refs::{HEADS_PREFIX, TAGS_PREFIX};
-use agit_core::{Error, ObjectId};
+use agit_core::store::ObjectStore;
+use agit_core::{EntryMode, Error, ObjectId};
 use agit_protocol::stream;
 use agit_protocol::types::*;
 use agit_protocol::walk;
@@ -65,6 +66,11 @@ fn actor_of(headers: &HeaderMap) -> Actor {
             .and_then(|v| v.to_str().ok())
             .map(str::to_string),
     }
+}
+
+/// `?key=1` or `?key=true`.
+fn flag(q: &HashMap<String, String>, key: &str) -> bool {
+    q.get(key).is_some_and(|v| v == "1" || v == "true")
 }
 
 async fn auth(State(state): S, req: Request, next: Next) -> Response {
@@ -127,6 +133,15 @@ pub fn router(state: Arc<AppState>, web_dir: Option<&std::path::Path>) -> Router
             "/repos/{repo}/knowledge/notes/{id}",
             get(get_note).patch(patch_note).delete(delete_note),
         )
+        .route(
+            "/repos/{repo}/knowledge/notes/{id}/validate",
+            post(validate_note),
+        )
+        .route(
+            "/repos/{repo}/knowledge/notes/{id}/accept",
+            post(accept_note),
+        )
+        .route("/repos/{repo}/knowledge/stale", get(stale_notes))
         .route("/repos/{repo}/knowledge/tags", get(list_tags_kb))
         .route(
             "/repos/{repo}/knowledge/rules",
@@ -480,11 +495,13 @@ async fn get_commit(
     };
     let changes = diff_trees(&r.store, parent_tree.as_ref(), Some(&c.tree))?;
     let patch = render_patch(&r.store, &changes, 3)?;
+    let notes = NoteStore::new(&r).for_commit(id, &changes, 10)?;
     Ok(Json(CommitDetail {
         id,
         commit: c,
         changes,
         patch,
+        notes,
     }))
 }
 
@@ -876,12 +893,19 @@ async fn list_notes(
             .unwrap_or_default(),
         path: q.get("path").cloned().filter(|s| !s.is_empty()),
         q: q.get("q").cloned().filter(|s| !s.is_empty()),
+        commit: match q.get("commit").filter(|s| !s.is_empty()) {
+            Some(c) => Some(r.resolve(c)?),
+            None => None,
+        },
+        pull: q.get("pull").and_then(|p| p.parse().ok()),
         limit: q.get("limit").and_then(|l| l.parse().ok()).unwrap_or(100),
-        include_superseded: q
-            .get("include_superseded")
-            .is_some_and(|v| v == "1" || v == "true"),
+        include_superseded: flag(&q, "include_superseded"),
+        include_drafts: flag(&q, "drafts"),
     };
-    Ok(Json(NoteStore::new(&r).query(&query)?))
+    let out = tokio::task::spawn_blocking(move || NoteStore::new(&r).query(&query))
+        .await
+        .map_err(|e| ApiErr::BadRequest(e.to_string()))??;
+    Ok(Json(out))
 }
 
 async fn create_note(
@@ -922,6 +946,49 @@ async fn delete_note(
     Ok(Json(serde_json::json!({ "deleted": id })))
 }
 
+async fn validate_note(
+    State(st): S,
+    Path((repo, id)): Path<(String, String)>,
+    Agent(agent): Agent,
+    body: Option<Json<ValidateRequest>>,
+) -> ApiResult<Json<Note>> {
+    let r = st.get(&repo)?;
+    let rev = body.and_then(|b| b.0.rev).filter(|s| !s.is_empty());
+    Ok(Json(NoteStore::new(&r).validate(
+        &id,
+        rev.as_deref(),
+        &agent,
+    )?))
+}
+
+async fn accept_note(
+    State(st): S,
+    Path((repo, id)): Path<(String, String)>,
+    Agent(agent): Agent,
+    body: Option<Json<NotePatch>>,
+) -> ApiResult<Json<Note>> {
+    let r = st.get(&repo)?;
+    Ok(Json(NoteStore::new(&r).accept(
+        &id,
+        body.map(|b| b.0),
+        &agent,
+    )?))
+}
+
+async fn stale_notes(
+    State(st): S,
+    Path(repo): Path<String>,
+    Query(q): Query<HashMap<String, String>>,
+) -> ApiResult<Json<Vec<StaleNote>>> {
+    let r = st.get(&repo)?;
+    let rev = q.get("rev").cloned().filter(|s| !s.is_empty());
+    let drafts = flag(&q, "drafts");
+    let out = tokio::task::spawn_blocking(move || NoteStore::new(&r).stale(rev.as_deref(), drafts))
+        .await
+        .map_err(|e| ApiErr::BadRequest(e.to_string()))??;
+    Ok(Json(out))
+}
+
 async fn list_tags_kb(State(st): S, Path(repo): Path<String>) -> ApiResult<Json<Vec<TagCount>>> {
     let r = st.get(&repo)?;
     Ok(Json(NoteStore::new(&r).tags()?))
@@ -942,6 +1009,11 @@ async fn put_rules(
     Ok(Json(NoteStore::new(&r).set_rules(rules, &agent)?))
 }
 
+/// Default context budget in approximate tokens (4 characters per token).
+const CONTEXT_DEFAULT_BUDGET: usize = 6000;
+const CONTEXT_MAX_SIBLINGS: usize = 5;
+const ACTIVE_WINDOW_MS: i64 = 24 * 3600 * 1000;
+
 async fn get_context(
     State(st): S,
     Path(repo): Path<String>,
@@ -953,32 +1025,37 @@ async fn get_context(
         .map(|p| p.trim_matches('/').to_string())
         .ok_or_else(|| ApiErr::BadRequest("missing `path`".into()))?;
     let limit = q.get("limit").and_then(|l| l.parse().ok()).unwrap_or(10);
+    let budget: usize = q
+        .get("budget")
+        .and_then(|b| b.parse().ok())
+        .unwrap_or(CONTEXT_DEFAULT_BUDGET);
+    let include_files = q
+        .get("include")
+        .is_some_and(|v| v.split(',').any(|x| x.trim() == "files"));
     let resp = tokio::task::spawn_blocking(move || -> ApiResult<ContextResponse> {
-        let notes = NoteStore::new(&r).query(&NoteQuery {
+        let ns = NoteStore::new(&r);
+        let mut notes = ns.query(&NoteQuery {
             path: Some(path.clone()),
             limit,
             ..Default::default()
         })?;
-        let suggested_tags = NoteStore::new(&r).suggested_tags(&path)?;
-        let recent_commits = match r.head()? {
+        // Fresh notes first; the query order (newest update first) is kept within each group.
+        notes.sort_by_key(|n| n.stale);
+        let suggested_tags = ns.suggested_tags(&path)?;
+        let head = r.head()?;
+        let log = match head {
             Some(h) => log_store(
                 &r.store,
                 &[h],
                 &LogOptions {
-                    limit: Some(limit),
+                    limit: Some(limit.max(100)),
                     path: Some(path.clone()),
                     ..Default::default()
                 },
-            )?
-            .into_iter()
-            .map(|e| CommitEntry {
-                id: e.id,
-                commit: e.commit,
-            })
-            .collect(),
+            )?,
             None => vec![],
         };
-        let leases = r
+        let leases: Vec<_> = r
             .leases
             .list()?
             .into_iter()
@@ -988,19 +1065,172 @@ async fn get_context(
                     .any(|p| pattern_covers(p, &path) || pattern_covers(&path, p))
             })
             .collect();
+        let since = now_ms() - ACTIVE_WINDOW_MS;
+        let mut active: BTreeSet<String> = leases.iter().map(|l| l.holder.clone()).collect();
+        for e in log.iter().filter(|e| e.commit.time_ms >= since) {
+            active.insert(match &e.commit.agent {
+                Some(a) => a.id.clone(),
+                None => e.commit.author.name.clone(),
+            });
+        }
+        let recent_commits = log
+            .into_iter()
+            .take(limit)
+            .map(|e| CommitEntry {
+                id: e.id,
+                commit: e.commit,
+            })
+            .collect();
         let open_pulls = PullStore::new(&r).open_touching(&path)?;
-        Ok(ContextResponse {
-            path,
+        let mut resp = ContextResponse {
+            path: path.clone(),
             notes,
             suggested_tags,
             recent_commits,
             leases,
             open_pulls,
-        })
+            agents_active: active.into_iter().collect(),
+            files: vec![],
+        };
+        if include_files {
+            if let Some(h) = head {
+                let used = serde_json::to_string(&resp)?.len();
+                let remaining = (budget * 4).saturating_sub(used);
+                resp.files = context_files(&r, h, &path, remaining)?;
+            }
+        }
+        Ok(resp)
     })
     .await
     .map_err(|e| ApiErr::BadRequest(e.to_string()))??;
     Ok(Json(resp))
+}
+
+fn lookup_path(
+    store: &ObjectStore,
+    root: ObjectId,
+    path: &str,
+) -> ApiResult<Option<(EntryMode, ObjectId)>> {
+    let mut cur = (EntryMode::Dir, root);
+    if path.is_empty() {
+        return Ok(Some(cur));
+    }
+    for part in path.split('/') {
+        if !cur.0.is_dir() {
+            return Ok(None);
+        }
+        let t = store.read_tree(&cur.1)?;
+        match t.get(part) {
+            Some(e) => cur = (e.mode, e.id),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(cur))
+}
+
+/// The file at `path` (when it is one) plus up to five sibling files in the
+/// same directory, most recently touched first, trimmed to `budget_chars`.
+/// Later files are cut first; a file that does not fit at all is dropped.
+fn context_files(
+    r: &RepoHandle,
+    head: ObjectId,
+    path: &str,
+    budget_chars: usize,
+) -> ApiResult<Vec<ContextFile>> {
+    let store = &r.store;
+    let root = store.read_commit(&head)?.tree;
+    let (dir, target) = match lookup_path(store, root, path)? {
+        Some((mode, _)) if mode.is_dir() => (path.to_string(), None),
+        Some((mode, id)) if !mode.is_submodule() => (
+            path.rsplit_once('/')
+                .map(|(d, _)| d)
+                .unwrap_or("")
+                .to_string(),
+            Some((path.to_string(), id)),
+        ),
+        _ => return Ok(vec![]),
+    };
+    let mut candidates: Vec<(String, ObjectId)> = Vec::new();
+    if let Some(t) = &target {
+        candidates.push(t.clone());
+    }
+    let dir_tree = match lookup_path(store, root, &dir)? {
+        Some((mode, id)) if mode.is_dir() => store.read_tree(&id)?,
+        _ => return Ok(vec![]),
+    };
+    let mut siblings: Vec<(String, ObjectId)> = dir_tree
+        .entries()
+        .iter()
+        .filter(|e| !e.mode.is_dir() && !e.mode.is_submodule())
+        .map(|e| {
+            let p = if dir.is_empty() {
+                e.name.clone()
+            } else {
+                format!("{dir}/{}", e.name)
+            };
+            (p, e.id)
+        })
+        .filter(|(p, _)| Some(p.as_str()) != target.as_ref().map(|t| t.0.as_str()))
+        .collect();
+    // Most recently touched first: walk recent commits touching the directory.
+    let mut recency: HashMap<String, usize> = HashMap::new();
+    let log = log_store(
+        store,
+        &[head],
+        &LogOptions {
+            limit: Some(100),
+            path: if dir.is_empty() {
+                None
+            } else {
+                Some(dir.clone())
+            },
+            ..Default::default()
+        },
+    )?;
+    for (rank, e) in log.iter().enumerate() {
+        let parent_tree = match e.commit.parents.first() {
+            Some(p) => Some(store.read_commit(p)?.tree),
+            None => None,
+        };
+        for c in diff_trees(store, parent_tree.as_ref(), Some(&e.commit.tree))? {
+            recency.entry(c.path).or_insert(rank);
+        }
+    }
+    siblings.sort_by(|a, b| {
+        let ra = recency.get(&a.0).copied().unwrap_or(usize::MAX);
+        let rb = recency.get(&b.0).copied().unwrap_or(usize::MAX);
+        ra.cmp(&rb).then_with(|| a.0.cmp(&b.0))
+    });
+    candidates.extend(siblings.into_iter().take(CONTEXT_MAX_SIBLINGS));
+
+    let mut out = Vec::new();
+    let mut remaining = budget_chars;
+    for (p, id) in candidates {
+        if remaining == 0 {
+            break;
+        }
+        let bytes = store.read_blob(&id)?;
+        if is_binary(&bytes) {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        // Per-file overhead for the JSON wrapper and the path.
+        let overhead = p.len() + 40;
+        if remaining <= overhead {
+            break;
+        }
+        let room = remaining - overhead;
+        let total = text.chars().count();
+        let take = total.min(room);
+        let cut: String = text.chars().take(take).collect();
+        remaining -= overhead + take;
+        out.push(ContextFile {
+            path: p,
+            text: cut,
+            truncated: take < total,
+        });
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------

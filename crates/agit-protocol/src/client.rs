@@ -295,6 +295,50 @@ impl Client {
     pub fn create_note(&self, repo: &str, req: &NoteCreate) -> Result<Note> {
         self.send_json("POST", &format!("/repos/{repo}/knowledge/notes"), req)
     }
+    pub fn patch_note(&self, repo: &str, id: &str, patch: &NotePatch) -> Result<Note> {
+        self.send_json(
+            "PATCH",
+            &format!("/repos/{repo}/knowledge/notes/{id}"),
+            patch,
+        )
+    }
+    pub fn delete_note(&self, repo: &str, id: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .req("DELETE", &format!("/repos/{repo}/knowledge/notes/{id}"))
+            .call()
+            .map_err(map_err)?;
+        resp.into_json()
+            .map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
+    }
+    /// Notes whose covered paths changed since their `valid_at` (against `rev`, default HEAD).
+    pub fn stale_notes(&self, repo: &str, rev: Option<&str>) -> Result<Vec<StaleNote>> {
+        let q = rev
+            .map(|r| format!("?rev={}", urlencode(r)))
+            .unwrap_or_default();
+        self.get_json(&format!("/repos/{repo}/knowledge/stale{q}"))
+    }
+    /// Mark a note as valid at `rev` (default HEAD).
+    pub fn validate_note(&self, repo: &str, id: &str, rev: Option<&str>) -> Result<Note> {
+        self.send_json(
+            "POST",
+            &format!("/repos/{repo}/knowledge/notes/{id}/validate"),
+            &ValidateRequest {
+                rev: rev.map(str::to_string),
+            },
+        )
+    }
+    /// Accept a draft note, optionally editing it with `patch` on the way.
+    pub fn accept_note(&self, repo: &str, id: &str, patch: Option<&NotePatch>) -> Result<Note> {
+        let body = match patch {
+            Some(p) => serde_json::to_value(p)?,
+            None => serde_json::json!({}),
+        };
+        self.send_json(
+            "POST",
+            &format!("/repos/{repo}/knowledge/notes/{id}/accept"),
+            &body,
+        )
+    }
     pub fn webhooks(&self, repo: &str) -> Result<Vec<Webhook>> {
         self.get_json(&format!("/repos/{repo}/webhooks"))
     }
@@ -320,6 +364,19 @@ impl Client {
     }
     pub fn context(&self, repo: &str, path: &str) -> Result<ContextResponse> {
         self.get_json(&format!("/repos/{repo}/context?path={}", urlencode(path)))
+    }
+    /// Context plus file contents, trimmed to `budget` approximate tokens (default 6000).
+    pub fn context_pack(
+        &self,
+        repo: &str,
+        path: &str,
+        budget: Option<usize>,
+    ) -> Result<ContextResponse> {
+        let b = budget.map(|b| format!("&budget={b}")).unwrap_or_default();
+        self.get_json(&format!(
+            "/repos/{repo}/context?path={}&include=files{b}",
+            urlencode(path)
+        ))
     }
 
     // -- misc --

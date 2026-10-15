@@ -519,6 +519,7 @@ impl Server {
                                 .get("confidence")
                                 .and_then(|x| x.as_f64())
                                 .map(|x| x as f32),
+                            ..Default::default()
                         },
                     )?,
                 )?

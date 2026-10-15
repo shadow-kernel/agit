@@ -30,6 +30,8 @@ pub struct RepoHandle {
     pub tx: broadcast::Sender<Event>,
     /// Serializes pull-request and knowledge file mutations.
     pub write_lock: Mutex<()>,
+    /// Lazily built full-text index and staleness diff cache for notes.
+    pub knowledge: crate::knowledge::KnowledgeCache,
 }
 
 impl RepoHandle {
@@ -57,6 +59,7 @@ impl RepoHandle {
             dir,
             tx,
             write_lock: Mutex::new(()),
+            knowledge: Default::default(),
         })
     }
 
