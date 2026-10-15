@@ -1,8 +1,22 @@
 # RFC 0003: Knowledge base
 
-- Status: **Draft**
+- Status: **Partially implemented** (server-side, see below)
 - Phase: 4
 - Depends on: RFC 0001 (object model)
+
+## Implementation status
+
+What exists today lives in `agit-server` (`crates/agit-server/src/knowledge.rs`) and is specified in `docs/API.md`, section "Knowledge notes":
+
+- Notes are **mutable JSON files** under `<repo>/knowledge/notes/`, not `0x04` note objects on `refs/knowledge/<branch>`. They do not clone, branch or merge with the code yet. Tag rules are `knowledge/rules.json` (`[{pattern, tags}]`), not `rules.toml`.
+- Typed tags (`namespace:value`) are validated; the reserved namespaces are a convention, not enforced. Links are the fields `paths`, `commits` and `pulls`; `symbol`, `note` and `url` links do not exist. Supersession is the mutable field `superseded_by`.
+- `valid_from` exists as `valid_at` (default HEAD at creation). The server computes `stale` on read by diffing the trees of `valid_at` and HEAD against the note's `paths` (the "confidence decay" open question is answered with a boolean instead of a decay). `GET /knowledge/stale` lists stale notes with the changed paths; `POST /knowledge/notes/{id}/validate` moves `valid_at` forward.
+- Full-text search is an in-memory per-repository BM25 index (no tantivy), built lazily and maintained on writes. Queries combine `q` with `tags`, `path`, `commit` and `pull` filters.
+- Draft notes are generated from merged pull requests (`draft: true`, `note.draft` event) and must be accepted or deleted.
+- Context packs: `GET /context?path=&include=files&budget=` returns notes (fresh first), recent commits, leases, open PRs, active agents and budgeted file contents; `agit know context` is the CLI form.
+- Commit detail (`GET /commits/{rev}`) lists notes linking the commit or covering its changed paths.
+
+Not implemented: note objects in the object store, the knowledge tree and `refs/knowledge/*`, versioned note history, cross-branch knowledge, `symbol` links, and the `agit know link`/`--since`/`--until` CLI forms. The design below is unchanged and remains the target.
 
 ## Summary
 

@@ -42,7 +42,8 @@ repeated frames `kind:u8 | len:u32 big-endian | payload`. kind 1 blob, 2 tree, 3
 
 ## Browsing (read-only, used by the web UI)
 - `GET /repos/{repo}/commits?rev=main&limit=50&agent=&task=&path=` -> `[{id, ...commit}]`
-- `GET /repos/{repo}/commits/{rev}` -> `{id, commit, changes:[...], patch}`
+- `GET /repos/{repo}/commits/{rev}` -> `{id, commit, changes:[...], patch, notes:[note summary]}`
+  `notes` holds up to 10 knowledge notes: those linking the commit in `commits` (drafts included) first, then accepted notes whose `paths` cover a changed path.
 - `GET /repos/{repo}/tree/{rev}?path=src/x` -> directory: `{kind:"tree", path, entries:[{name,mode,id,size}]}`
   or file: `{kind:"blob", path, id, size, binary, text?}`
 - `GET /repos/{repo}/diff?from=<rev>&to=<rev>` -> `{changes, patch, stats}`
@@ -51,7 +52,7 @@ repeated frames `kind:u8 | len:u32 big-endian | payload`. kind 1 blob, 2 tree, 3
 ## Events
 - `GET /repos/{repo}/events?since=<seq>&limit=` -> `[event]`
 - `GET /repos/{repo}/events/stream?since=<seq>` -> `text/event-stream`; each message is a plain `data:` line with the event JSON (`id:` is the seq; no `event:` name, so `EventSource.onmessage` works). Without `since` only live events are sent; with `since=N` events with `seq > N` are replayed first.
-Event kinds mirror the CLI plus `ref.update`, `pull.open`, `pull.review`, `pull.merge`, `pull.close`, `note.create`.
+Event kinds mirror the CLI plus `ref.update`, `pull.open`, `pull.review`, `pull.merge`, `pull.close`, `note.create`, `note.update`, `note.delete`, `note.validate`, `note.draft`, `note.accept`, `knowledge.rules`.
 
 ## Leases (server-wide coordination between agents)
 - `GET /repos/{repo}/leases` -> `[lease]`
@@ -107,19 +108,41 @@ Note object:
 ```json
 {"id":"n_...","title":"...","body":"markdown","tags":["area:auth","kind:gotcha"],
  "paths":["src/auth/**"],"commits":["<id>"],"pulls":[3],
- "author":"agent1","confidence":0.9,"created_ms":0,"updated_ms":0,"superseded_by":null}
+ "author":"agent1","confidence":0.9,"created_ms":0,"updated_ms":0,"superseded_by":null,
+ "valid_at":"<id>","draft":false,"stale":false}
 ```
-- `GET /repos/{repo}/knowledge/notes?tags=a,b&path=src/auth/login.rs&q=text&limit=` -> `[note summary]`
-  (summary = note without body, plus `excerpt`). `tags` means all tags must match. `path` matches notes whose `paths` cover it.
-- `GET /repos/{repo}/knowledge/notes/{id}` -> note
-- `POST /repos/{repo}/knowledge/notes` -> note
-- `PATCH /repos/{repo}/knowledge/notes/{id}` -> note
-- `DELETE /repos/{repo}/knowledge/notes/{id}`
-- `GET /repos/{repo}/knowledge/tags` -> `[{tag, count}]`
+- `valid_at`: commit the note was written or last validated against. Defaults to HEAD of the default branch at creation (when one exists); a given value must be an object the server has (412 `object_not_found`).
+- `stale` (computed on every read, never stored): `true` when any path covered by `paths` differs between `valid_at` and HEAD. Notes without `valid_at` or without `paths` are never stale. The per-commit-pair diff is cached in memory.
+- `draft`: machine-generated note (see "Drafts from merges"). Drafts are hidden from listings, context and tag counts until accepted. The note object omits `draft` when false; summaries always carry it.
+
+Summary = note without `body`, plus `excerpt` (first 200 chars), `valid_at`, `draft`, `stale`, and `score` (BM25 relevance, only present for `q=` queries).
+
+- `GET /repos/{repo}/knowledge/notes?tags=a,b&path=src/auth/login.rs&q=text&commit=<rev>&pull=<n>&drafts=1&include_superseded=1&limit=` -> `[note summary]`
+  - `q`: full-text search over title, body, tags and paths with BM25 ranking (title weight 3, tags 2, body and paths 1). Tokens are lowercase unicode alphanumeric runs; camelCase and snake_case words are indexed both whole and split (`SessionStore` -> `sessionstore`, `session`, `store`); `namespace:value` tags are indexed whole as well as split. Query terms match exactly, and terms of 3+ characters also match as prefixes at half weight. Results come best first with `score` set; without `q` results are ordered by `updated_ms` descending and `score` is absent. The index is built per repository in memory at the first query and kept current on create/patch/delete.
+  - `tags`: all listed tags must be present. `path`: notes whose `paths` cover it. `commit`: notes listing that commit (any revision syntax). `pull`: notes listing that PR number. All of these are post-filters applied in rank order.
+  - `drafts=1` includes drafts, `include_superseded=1` includes superseded notes. `limit` defaults to 100.
+- `GET /repos/{repo}/knowledge/notes/{id}` -> note (with `stale`)
+- `POST /repos/{repo}/knowledge/notes` `{title, body?, tags?, paths?, commits?, pulls?, confidence?, valid_at?, draft?}` -> note (201). Emits `note.create`.
+- `PATCH /repos/{repo}/knowledge/notes/{id}` `{title?, body?, tags?, paths?, commits?, pulls?, confidence?, superseded_by?}` -> note. Emits `note.update`.
+- `DELETE /repos/{repo}/knowledge/notes/{id}` -> `{deleted: id}`. Emits `note.delete`. Deleting a draft discards it.
+- `POST /repos/{repo}/knowledge/notes/{id}/validate` `{rev?}` -> note. Sets `valid_at` to `rev` (default HEAD) and bumps `updated_ms`: the caller confirms the note still holds there. Emits `note.validate`.
+- `POST /repos/{repo}/knowledge/notes/{id}/accept` body optional, same shape as PATCH -> note. Clears `draft`, applying the patch first when given. Emits `note.accept`.
+- `GET /repos/{repo}/knowledge/stale?rev=HEAD&drafts=1` -> `[{...note summary, stale:true, changed_paths:[...]}]`
+  Non-superseded notes (drafts only with `drafts=1`) whose covered paths changed between their `valid_at` and `rev`; `changed_paths` lists those paths.
+- `GET /repos/{repo}/knowledge/tags` -> `[{tag, count}]` over accepted (non-draft) notes.
 - `GET /repos/{repo}/knowledge/rules` / `PUT` -> `[{pattern:"src/auth/**", tags:["area:auth"]}]`
-  Tag rules tell agents which tags to attach when writing notes about a path.
-- `GET /repos/{repo}/context?path=src/auth/login.rs&limit=` -> `{notes:[summary], recent_commits:[...], leases:[...], open_pulls:[...]}`
+  Tag rules tell agents which tags to attach when writing notes about a path. Emits `knowledge.rules`.
+
+### Drafts from merges
+Every `POST /pulls/{n}/merge` that succeeds also creates a draft note (`draft: true`) and emits `note.draft` `{id, title, pull, commit, tags, paths}`; a failure to draft is logged and never fails the merge. The draft has: `title` = PR title; `body` = `Intent:`/`Task:` lines, the PR body, a `Changed files:` bullet list (`- path (A|M|D|T)`) and a `Reviews:` list with each reviewer's latest decision; `tags` = `kind:change` plus the tags the rules suggest for the changed paths; `paths` = the changed files' directories as `dir/**` (root-level files by name), deduplicated; `pulls` = `[n]`; `commits` = `[merged_commit]`; `author` = the merging agent; `confidence` = 0.4; `valid_at` = the merged commit. Find them with `GET /knowledge/notes?drafts=1&pull=<n>`, then `accept` (optionally editing) or `DELETE`. There is currently no switch to turn drafting off.
+
+### Context
+- `GET /repos/{repo}/context?path=src/auth/login.rs&limit=&include=files&budget=6000` ->
+  `{path, notes:[summary], suggested_tags, recent_commits:[...], leases:[...], open_pulls:[...], agents_active:[...], files?:[{path, text, truncated}]}`
   One call that returns what an agent should read before touching a path.
+  - `notes`: notes covering the path, fresh ones first, then stale ones (`stale: true`); drafts excluded. `limit` (default 10) caps notes and `recent_commits`.
+  - `agents_active`: sorted agent ids that hold a lease overlapping the path or committed to it in the last 24 hours (agent id, or author name for commits without an agent).
+  - `include=files` adds `files`: the file at `path` (when it is a file) followed by up to 5 sibling files in the same directory (or, for a directory, up to 5 of its files), most recently touched first; binary files are skipped. The whole response is kept within `budget * 4` characters (`budget` is approximate tokens, default 6000): the file texts are trimmed last-first, `truncated: true` marks a cut file, and files that do not fit at all are dropped. Note bodies are never included, only excerpts. Without `include=files` the field is omitted.
 
 ## Activity
 - `GET /repos/{repo}/agents` -> `[{id, commits, last_seen_ms, open_pulls, leases}]` derived from commits and events.
