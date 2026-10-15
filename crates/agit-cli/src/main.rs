@@ -7,6 +7,7 @@
 
 mod cli;
 mod output;
+mod remote;
 
 use std::process::ExitCode;
 

@@ -255,6 +255,58 @@ pub enum Cmd {
     Fsck,
     /// Get or set configuration (user.name, user.email, default_branch).
     Config { key: Option<String>, value: Option<String> },
+    /// Manage server remotes.
+    Remote {
+        #[command(subcommand)]
+        cmd: crate::remote::RemoteCmd,
+    },
+    /// Upload a branch to a remote (compare-and-swap on the remote ref).
+    Push {
+        #[arg(default_value = "origin")]
+        remote: String,
+        /// Branch to push (default: current).
+        branch: Option<String>,
+        #[arg(short, long)]
+        force: bool,
+        /// Create the remote repository if it does not exist.
+        #[arg(long)]
+        create: bool,
+    },
+    /// Download branches and tags from a remote into refs/remotes/<remote>/.
+    Fetch {
+        #[arg(default_value = "origin")]
+        remote: String,
+        branches: Vec<String>,
+    },
+    /// Fetch the current branch and merge it.
+    Pull {
+        #[arg(default_value = "origin")]
+        remote: String,
+        #[arg(long)]
+        no_ff: bool,
+        #[command(flatten)]
+        agent: AgentArgs,
+    },
+    /// Clone a repository from a server URL (.../api/v1/repos/<name>).
+    Clone {
+        url: String,
+        /// Destination directory (default: repository name).
+        dest: Option<PathBuf>,
+    },
+    /// Pull requests on the remote.
+    Pr {
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        #[command(subcommand)]
+        cmd: crate::remote::PrCmd,
+    },
+    /// Knowledge base on the remote: notes, tags, context for a path.
+    Know {
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        #[command(subcommand)]
+        cmd: crate::remote::KnowCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -647,6 +699,13 @@ pub fn run(cli: Cli) -> Result<()> {
             }
         }
         Cmd::Lease { cmd } => run_lease(&cli.dir, json, cmd)?,
+        Cmd::Remote { cmd } => crate::remote::run_remote(&open(&cli.dir)?, json, cmd)?,
+        Cmd::Push { remote, branch, force, create } => crate::remote::run_push(&open(&cli.dir)?, json, &remote, branch, force, create)?,
+        Cmd::Fetch { remote, branches } => crate::remote::run_fetch(&open(&cli.dir)?, json, &remote, &branches)?,
+        Cmd::Pull { remote, no_ff, agent } => crate::remote::run_pull(&open(&cli.dir)?, json, &remote, no_ff, agent.info())?,
+        Cmd::Clone { url, dest } => crate::remote::run_clone(json, &cwd(&cli.dir)?, &url, dest)?,
+        Cmd::Pr { remote, cmd } => crate::remote::run_pr(&open(&cli.dir)?, json, &remote, cmd)?,
+        Cmd::Know { remote, cmd } => crate::remote::run_know(&open(&cli.dir)?, json, &remote, cmd)?,
         Cmd::Ws { cmd } => run_ws(&cli.dir, json, cmd)?,
         Cmd::Events { since, follow, kind } => {
             let repo = open(&cli.dir)?;

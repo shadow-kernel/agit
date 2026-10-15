@@ -1,0 +1,202 @@
+//! Server + client end-to-end: push, clone, pull, pull requests, knowledge.
+
+use std::fs;
+use std::path::Path;
+use std::sync::Arc;
+
+use agit_core::ops::{self, CommitOptions};
+use agit_core::worktree;
+use agit_core::{AgentInfo, Repository};
+use agit_protocol::sync;
+use agit_protocol::types::*;
+use agit_protocol::Client;
+
+#[path = "../src/api.rs"]
+#[allow(dead_code)]
+mod api;
+#[path = "../src/error.rs"]
+#[allow(dead_code)]
+mod error;
+#[path = "../src/knowledge.rs"]
+#[allow(dead_code)]
+mod knowledge;
+#[path = "../src/pulls.rs"]
+#[allow(dead_code)]
+mod pulls;
+#[path = "../src/state.rs"]
+#[allow(dead_code)]
+mod state;
+
+fn write(root: &Path, rel: &str, content: &str) {
+    let p = root.join(rel);
+    fs::create_dir_all(p.parent().unwrap()).unwrap();
+    fs::write(p, content).unwrap();
+}
+
+fn commit_all(repo: &Repository, msg: &str, agent: &str) -> ops::CommitResult {
+    worktree::add(repo, &[], false).unwrap();
+    ops::commit(
+        repo,
+        CommitOptions {
+            message: msg.into(),
+            intent: Some(format!("intent: {msg}")),
+            agent: Some(AgentInfo { id: agent.into(), model: Some("test-model".into()), ..Default::default() }),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+async fn start_server(data: &Path) -> String {
+    let st = Arc::new(state::AppState::open(data.to_path_buf(), None).unwrap());
+    let app = api::router(st, None);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}/api/v1")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn push_clone_pull_pr_knowledge() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = start_server(&tmp.path().join("data")).await;
+    let tmp_path = tmp.path().to_path_buf();
+
+    tokio::task::spawn_blocking(move || {
+        let client = Client::new(&base);
+        assert_eq!(client.health().unwrap().status, "ok");
+        client.create_repo("demo", Some("main")).unwrap();
+        let url = format!("{base}/repos/demo");
+
+        // Agent A: local repo, two commits, push (creates the remote branch).
+        let a = Repository::init(&tmp_path.join("a")).unwrap();
+        write(a.work_dir(), "README.md", "# demo\n");
+        write(a.work_dir(), "src/lib.rs", "pub fn one() -> u32 { 1 }\n");
+        commit_all(&a, "initial", "agent-a");
+        write(a.work_dir(), "src/lib.rs", "pub fn one() -> u32 { 1 }\npub fn two() -> u32 { 2 }\n");
+        let c2 = commit_all(&a, "add two", "agent-a");
+        sync::add_remote(&a, "origin", &url).unwrap();
+        let p = sync::push(&a, "origin", "main", false, false).unwrap();
+        assert!(!p.up_to_date);
+        assert!(p.objects_sent >= 6);
+        assert_eq!(p.new, c2.id);
+        let p = sync::push(&a, "origin", "main", false, false).unwrap();
+        assert!(p.up_to_date);
+        assert_eq!(client.repo("demo").unwrap().head, Some(c2.id));
+
+        // Agent B: clone, branch, change, push, open PR.
+        let (b, f) = sync::clone(&url, &tmp_path.join("b")).unwrap();
+        assert!(f.objects_received >= 6);
+        assert_eq!(fs::read_to_string(b.work_dir().join("README.md")).unwrap(), "# demo\n");
+        assert_eq!(b.head_commit().unwrap(), Some(c2.id));
+        ops::switch(&b, "feature/three", true, false).unwrap();
+        write(b.work_dir(), "src/three.rs", "pub fn three() -> u32 { 3 }\n");
+        let c3 = commit_all(&b, "add three", "agent-b");
+        sync::push(&b, "origin", "feature/three", false, false).unwrap();
+        let bclient = Client::new(&base).with_agent(Some("agent-b".into()));
+        let pr = bclient
+            .create_pull("demo", &PullCreate { title: "Add three".into(), body: Some("adds three()".into()), intent: Some("complete numbers".into()), task: Some("T-3".into()), source: "feature/three".into(), target: None })
+            .unwrap();
+        assert_eq!(pr.number, 1);
+        assert_eq!(pr.author.id, "agent-b");
+        let d = bclient.pull("demo", 1).unwrap();
+        assert!(d.mergeable);
+        assert_eq!(d.commits.len(), 1);
+        assert_eq!(d.commits[0].id, c3.id);
+        assert_eq!(d.changes.len(), 1);
+        assert_eq!(d.changes[0].path, "src/three.rs");
+
+        // Meanwhile agent A moves main forward (so the PR needs a real merge).
+        write(a.work_dir(), "README.md", "# demo\n\nmore\n");
+        let c4 = commit_all(&a, "readme", "agent-a");
+        sync::push(&a, "origin", "main", false, false).unwrap();
+        // Stale push from B's clone of main must be rejected as non-fast-forward.
+        ops::switch(&b, "main", false, false).unwrap();
+        write(b.work_dir(), "other.txt", "x\n");
+        commit_all(&b, "stale", "agent-b");
+        let err = sync::push(&b, "origin", "main", false, false).unwrap_err();
+        assert!(err.to_string().contains("non-fast-forward"), "{err}");
+
+        // Review + merge the PR server-side.
+        let reviewer = Client::new(&base).with_agent(Some("reviewer-1".into()));
+        reviewer.comment_pull("demo", 1, &CommentCreate { path: Some("src/three.rs".into()), line: Some(1), kind: CommentKind::Suggestion, body: "consider const".into() }).unwrap();
+        let pr = reviewer.review_pull("demo", 1, &ReviewCreate { decision: ReviewDecision::Approve, body: "lgtm".into() }).unwrap();
+        assert_eq!(pr.reviews.len(), 1);
+        let m = reviewer.merge_pull("demo", 1, &MergeRequest::default()).unwrap();
+        assert_eq!(m.pr.state, PullState::Merged);
+        let merged = m.merged_commit;
+        assert_eq!(client.repo("demo").unwrap().head, Some(merged));
+        assert!(matches!(reviewer.merge_pull("demo", 1, &MergeRequest::default()), Err(_)));
+
+        // Agent A pulls the merge: fast-forward over c4.
+        let (_f, mr) = sync::pull(&a, "origin", Default::default()).unwrap();
+        assert!(matches!(mr, ops::MergeResult::FastForward { to, .. } if to == merged));
+        assert!(a.work_dir().join("src/three.rs").exists());
+        let head = a.store().read_commit(&merged).unwrap();
+        assert_eq!(head.parents, vec![c4.id, c3.id]);
+        assert_eq!(head.meta.get("agit.pull").and_then(|v| v.as_u64()), Some(1));
+
+        // Agent B pulls main: its stale commit gets merged with the remote.
+        let (_f, mr) = sync::pull(&b, "origin", Default::default()).unwrap();
+        assert!(matches!(mr, ops::MergeResult::Merged { .. }));
+        assert!(b.work_dir().join("src/three.rs").exists());
+
+        // Knowledge: rules, notes, context.
+        let kclient = Client::new(&base).with_agent(Some("agent-a".into()));
+        let rules: Vec<TagRule> = ureq::put(&format!("{base}/repos/demo/knowledge/rules"))
+            .set("X-Agit-Agent", "agent-a")
+            .send_json(serde_json::json!([{ "pattern": "src/**", "tags": ["area:core", "lang:rust"] }]))
+            .unwrap()
+            .into_json()
+            .unwrap();
+        assert_eq!(rules.len(), 1);
+        let n = kclient
+            .create_note("demo", &NoteCreate { title: "numbers are u32".into(), body: "All number helpers return u32 on purpose.".into(), tags: vec!["area:core".into(), "kind:decision".into()], paths: vec!["src/**".into()], commits: vec![c2.id], pulls: vec![1], confidence: Some(0.9) })
+            .unwrap();
+        assert!(kclient.create_note("demo", &NoteCreate { title: "bad".into(), tags: vec!["Bad Tag".into()], ..Default::default() }).is_err());
+        let found = kclient.notes("demo", "?tags=kind:decision").unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, n.id);
+        assert!(kclient.notes("demo", "?tags=kind:gotcha").unwrap().is_empty());
+        let ctx = kclient.context("demo", "src/lib.rs").unwrap();
+        assert_eq!(ctx.notes.len(), 1);
+        assert_eq!(ctx.suggested_tags, vec!["area:core", "lang:rust"]);
+        assert!(ctx.recent_commits.iter().any(|c| c.id == c2.id));
+        assert_eq!(kclient.tags("demo").unwrap().len(), 2);
+
+        // Leases through the server.
+        let l = kclient.claim_lease("demo", &LeaseCreate { holder: "agent-a".into(), paths: vec!["src/lib.rs".into()], mode: Default::default(), ttl_secs: Some(60), note: None }).unwrap();
+        let err = bclient.claim_lease("demo", &LeaseCreate { holder: "agent-b".into(), paths: vec!["src".into()], mode: Default::default(), ttl_secs: Some(60), note: None }).unwrap_err();
+        assert!(matches!(err, agit_core::Error::LeaseConflict { .. }));
+        kclient.release_lease("demo", &l.id).unwrap();
+
+        // Events recorded on the server.
+        let events = client.events("demo", 0).unwrap();
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+        for k in ["repo.create", "ref.update", "pull.open", "pull.review", "pull.merge", "note.create", "lease.claim", "lease.release"] {
+            assert!(kinds.contains(&k), "missing event {k} in {kinds:?}");
+        }
+
+        // Browsing endpoints.
+        let commits: Vec<CommitEntry> = client_get(&base, "/repos/demo/commits?limit=10&agent=agent-b");
+        assert!(commits.iter().all(|c| c.commit.agent.as_ref().unwrap().id == "agent-b"));
+        let tree: TreeResponse = client_get(&base, "/repos/demo/tree/main?path=src");
+        match tree {
+            TreeResponse::Tree { entries, .. } => assert!(entries.iter().any(|e| e.name == "three.rs")),
+            _ => panic!("expected tree"),
+        }
+        let blob: TreeResponse = client_get(&base, "/repos/demo/tree/main?path=src/three.rs");
+        match blob {
+            TreeResponse::Blob { text, .. } => assert!(text.unwrap().contains("three")),
+            _ => panic!("expected blob"),
+        }
+        let agents: Vec<AgentActivity> = client_get(&base, "/repos/demo/agents");
+        assert!(agents.iter().any(|a| a.id == "agent-a" && a.commits >= 3));
+    })
+    .await
+    .unwrap();
+}
+
+fn client_get<T: serde::de::DeserializeOwned>(base: &str, path: &str) -> T {
+    ureq::get(&format!("{base}{path}")).call().unwrap().into_json().unwrap()
+}

@@ -46,6 +46,11 @@ pub struct UserConfig {
     pub email: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RemoteConfig {
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub format_version: u32,
@@ -53,6 +58,8 @@ pub struct Config {
     pub default_branch: String,
     #[serde(default)]
     pub user: UserConfig,
+    #[serde(default)]
+    pub remotes: std::collections::BTreeMap<String, RemoteConfig>,
 }
 
 fn default_branch() -> String {
@@ -65,6 +72,7 @@ impl Default for Config {
             format_version: FORMAT_VERSION,
             default_branch: default_branch(),
             user: UserConfig::default(),
+            remotes: Default::default(),
         }
     }
 }

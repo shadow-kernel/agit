@@ -1,0 +1,33 @@
+[package]
+name = "agit-server"
+description = "agit hosting server: repositories, refs, pull requests, leases, events and knowledge over HTTP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "agit-server"
+path = "src/main.rs"
+
+[dependencies]
+agit-core = { path = "../agit-core" }
+agit-protocol = { path = "../agit-protocol" }
+axum.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+uuid.workspace = true
+globset.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+ureq.workspace = true

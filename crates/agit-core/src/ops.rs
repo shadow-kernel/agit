@@ -271,7 +271,11 @@ impl PartialOrd for ByTime {
 }
 
 pub fn log(repo: &Repository, start: &[ObjectId], opts: &LogOptions) -> Result<Vec<LogEntry>> {
-    let store = repo.store();
+    log_store(repo.store(), start, opts)
+}
+
+/// Same as [`log`] but for a bare object store (server side).
+pub fn log_store(store: &crate::store::ObjectStore, start: &[ObjectId], opts: &LogOptions) -> Result<Vec<LogEntry>> {
     let mut heap = BinaryHeap::new();
     let mut seen = HashSet::new();
     for s in start {

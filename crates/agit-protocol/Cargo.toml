@@ -1,0 +1,18 @@
+[package]
+name = "agit-protocol"
+description = "Wire types, object streams and HTTP client for agit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+agit-core = { path = "../agit-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

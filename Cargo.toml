@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/agit-core", "crates/agit-cli"]
+members = ["crates/agit-core", "crates/agit-cli", "crates/agit-protocol", "crates/agit-server"]
 
 [workspace.package]
 version = "0.1.0"
@@ -27,6 +27,14 @@ clap = { version = "4", features = ["derive", "env"] }
 globset = "0.4"
 uuid = { version = "1", features = ["v4"] }
 hostname = "0.4"
+ureq = { version = "2", features = ["json"] }
+axum = { version = "0.8", features = ["json", "macros"] }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures = "0.3"
 
 [profile.release]
 lto = "fat"

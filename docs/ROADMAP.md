@@ -1,3 +1,5 @@
+> Status update 2026-10-15: Phase 0 is complete. Parts of Phases 2, 3 and 4 shipped early as a single-node server (`crates/agit-server`): clone/push/pull with CAS refs, pull requests with reviews and server-side merge, server-wide leases, SSE event stream, and a file-backed knowledge base with typed tags, tag rules and a `context` endpoint. Raft replication, blob tiers, policies, webhooks and the git bridge remain open. The web UI is in progress in `web/`.
+
 # agit roadmap
 
 Six phases, each with concrete deliverables, acceptance criteria, and benchmark targets. A phase is done when every acceptance criterion is met and the benchmarks for that phase are published in this repository with the exact hardware and commands used.

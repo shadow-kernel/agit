@@ -4,13 +4,13 @@
 
 agit is an open-source version control system and platform that keeps the git mental model (init, add, commit, branch, merge, push, pull) and rebuilds everything underneath for a world where the committers are AI agents making thousands of tiny changes in parallel. Every command speaks JSON, every error has a stable code, every commit carries intent and agent identity, and agents coordinate through leases, workspaces, checkpoints and a live event stream instead of discovering conflicts after the fact. The throughput target is 100,000 micro-commits per second platform-wide.
 
-> **Status: Phase 0, local core.** The object model, index, commit, status, diff, branch, merge, leases, events, workspaces, checkpoints and JSON output are implemented in Rust. No server, no web UI yet. First local measurements against git are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). See [Roadmap](#roadmap).
+> **Status: Phase 0 local core complete, Phase 2/3 server in progress.** Implemented in Rust: object model, index, commit, status, diff, branch, merge, leases, events, workspaces, checkpoints, JSON output, and a hosting server (`agit-server`) with clone/push/pull, compare-and-swap ref updates, pull requests with reviews and server-side merge, server-wide leases, an event stream (SSE), and a first file-backed knowledge base with typed tags and tag rules. The web UI lives in `web/`. First local measurements against git are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). See [Roadmap](#roadmap).
 
 Legend used throughout this document and the docs:
 
 | Mark | Meaning |
 | --- | --- |
-| ✅ | built, in `crates/agit-core` and `crates/agit-cli` today |
+| ✅ | built, in `crates/agit-core`, `crates/agit-cli`, `crates/agit-protocol` or `crates/agit-server` today |
 | 🚧 | in progress on `main` |
 | 📋 | planned, designed in `docs/` but not implemented |
 
@@ -182,6 +182,34 @@ agit fsck
 
 Full command list in Phase 0: `init, add, rm, reset, status, commit, checkpoint (list | restore), restore, log, show, diff, branch, switch` (alias `checkout`), `merge, tag, cat-file, ls-tree, lease (claim | release | list | renew | check), ws (new | list | remove), events, rev-parse, fsck, config`. Every one of them takes `--json` and `-C <dir>`.
 
+### Server quick start ✅
+
+Run a server, push a repository to it, clone it elsewhere, open and merge a pull request, and leave a knowledge note. The HTTP contract is in [docs/API.md](docs/API.md).
+
+```sh
+agit-server --data-dir ./agit-data --listen 127.0.0.1:7878 &
+
+cd demo
+agit remote add origin http://127.0.0.1:7878/api/v1/repos/demo
+agit push --create                       # creates the remote repository
+
+cd .. && agit clone http://127.0.0.1:7878/api/v1/repos/demo demo-b && cd demo-b
+agit switch -c feature/x
+echo 'x' > x.txt && agit add -A
+AGIT_AGENT=coder-1 agit commit -m "Add x" --intent "Provide x for the importer"
+AGIT_AGENT=coder-1 agit pr create --push -t "Add x" --intent "Provide x for the importer" --task DEMO-7
+AGIT_AGENT=reviewer-1 agit pr review 1 --decision approve -b "lgtm"
+AGIT_AGENT=reviewer-1 agit pr merge 1    # three-way merge on the server, CAS on main
+agit switch main && agit pull            # fast-forward
+
+AGIT_AGENT=coder-1 agit know add -t "x.txt is consumed by the importer" \
+  --tag kind:decision --tag area:import --path x.txt
+agit know context x.txt                  # notes, recent commits, leases, open PRs for a path
+curl -N http://127.0.0.1:7878/api/v1/repos/demo/events/stream?since=0   # live events (SSE)
+```
+
+Set `AGIT_SERVER_TOKEN` on the server and `AGIT_TOKEN` on clients for bearer authentication. `agit-server --web-dir web/dist` serves the web UI from the same process.
+
 ## Core concepts
 
 ### Objects ✅
@@ -232,7 +260,7 @@ Every state change appends one JSON line to `.agit/events.jsonl` with a monotoni
 
 `intent` answers "why", separate from the message's "what". `task` links to a ticket. `agent` identifies who (or what) produced the commit, with model, run id and the principal it acted on behalf of. `meta` is a namespaced JSON map (`tool.name`, `ci.result`) for anything else; `agit commit --meta key=value` sets entries and parses the value as JSON when it can. All of this is in the commit object itself, so it survives clone, push and export, and provenance queries like `agit log --agent coder-2`, `agit log --task PROJ-123` and `agit log --path src/auth` need no external database.
 
-### Knowledge base 📋
+### Knowledge base 🚧 (server-side notes, tags, rules and context ✅; in-repo objects and semantic search 📋)
 
 Notes (title, markdown body, typed tags, links to paths/symbols/commits/PRs, validity range, author or agent, confidence) stored as versioned objects next to the code and indexed server-side. Tag rules map path patterns to tags so an agent knows what to read before touching a path and what to tag after. Designed in [RFC 0003](docs/rfcs/0003-knowledge-base.md).
 
@@ -318,17 +346,17 @@ Mutating server operations will accept an idempotency key so a retried push afte
 
 ## Platform
 
-Everything in this section is 📋 planned (Phases 2 and 3) and designed in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the RFCs.
+Status per item is marked. The first server exists today (`crates/agit-server`, single node, file-backed); the distributed design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the RFCs.
 
-**Server (`crates/agit-server`).** Repositories, organisations, permissions, and short-lived scoped tokens per agent. Per-repository append-only commit log replicated with Raft; ref CAS decided at the log head; content-addressed blob store with a local disk tier and an S3-compatible tier, deduplicated across repositories; horizontal sharding by repository. Streaming pack protocol over HTTP/2 and gRPC (`crates/agit-protocol`).
+**Server (`crates/agit-server`).** ✅ today: repositories, compare-and-swap ref updates (atomic multi-ref), object upload/fetch with want/have negotiation, browsing endpoints (tree, commits, diff), server-wide leases, event log with SSE stream, bearer-token auth, static hosting of the web UI. 📋 next: organisations, permissions and short-lived scoped tokens per agent, per-repository append-only commit log replicated with Raft, ref CAS decided at the log head; content-addressed blob store with a local disk tier and an S3-compatible tier, deduplicated across repositories; horizontal sharding by repository. Streaming pack protocol over HTTP/2 and gRPC (`crates/agit-protocol`).
 
-**Pull requests and reviews.** A PR is a structured object: title, intent, task, agent, reviewers, checks, decision log. Review comments are structured too: path, range, kind (`question`, `suggestion`, `blocker`), resolution. Agents open, review and merge PRs through the same API humans use; policies decide which agents may merge what. [RFC 0005](docs/rfcs/0005-pull-requests-and-reviews.md).
+**Pull requests and reviews.** ✅ today: structured PRs (title, intent, task, author agent), structured comments (path, line, kind, resolution), reviews (approve / request changes / comment), checks, mergeability with conflict preview, server-side merge (three-way or fast-forward) with CAS on the target branch, `agit pr create|list|view|review|comment|merge|close`. 📋 next: policies and required checks. A PR is a structured object: title, intent, task, agent, reviewers, checks, decision log. Review comments are structured too: path, range, kind (`question`, `suggestion`, `blocker`), resolution. Agents open, review and merge PRs through the same API humans use; policies decide which agents may merge what. [RFC 0005](docs/rfcs/0005-pull-requests-and-reviews.md).
 
 **Policies.** Which agent may push to which branch, require `intent`, require passing checks, maximum files per commit, and similar rules, enforced server-side at ref update time.
 
-**Web UI (`web/`).** Clean, GitHub-like, fast. Code browsing with syntax highlighting and symbol navigation, history and blame, diffs, PRs and reviews, branches and workspaces, live agent activity from the event stream, a lease board showing who is working where, and a knowledge browser. TypeScript and React with server-side rendering. The UI uses only the public API that agents use; there are no private endpoints. [RFC 0006](docs/rfcs/0006-web-ui.md).
+**Web UI (`web/`).** 🚧 first version in `web/` (Vite + React + TypeScript; code browsing, commits, PRs, agents, leases, knowledge). Clean, GitHub-like, fast. Code browsing with syntax highlighting and symbol navigation, history and blame, diffs, PRs and reviews, branches and workspaces, live agent activity from the event stream, a lease board showing who is working where, and a knowledge browser. TypeScript and React with server-side rendering. The UI uses only the public API that agents use; there are no private endpoints. [RFC 0006](docs/rfcs/0006-web-ui.md).
 
-**Webhooks and event streaming.** The server's event log is exposed over SSE and WebSocket, and pushed to webhooks.
+**Webhooks and event streaming.** ✅ SSE stream (`/events/stream?since=`) and polling (`/events?since=`). 📋 WebSocket and webhooks.
 
 **Git bridge (`crates/agit-git-bridge`).** `agit git import <url>`, `agit git export`, and bidirectional sync with a git-compatible SHA mapping table so teams can adopt agit incrementally.
 
@@ -422,9 +450,9 @@ Planned sub-repositories: `agit-server`, `agit-protocol`, `agit-knowledge`, `agi
 | --- | --- | --- |
 | 0 | Local core: objects, index, commit, status, diff, branch, merge, leases, events, workspaces, checkpoints, JSON output, tests | ✅ / 🚧 |
 | 1 | Performance: pack segments, journal + group commit, mmap ref table, parallel status at 1M files, published benchmarks vs git | 📋 |
-| 2 | Protocol + server: clone/push/pull, auth, Raft log, blob tiers | 📋 |
-| 3 | Platform: PRs, reviews, policies, webhooks, event streaming, web UI (code browsing first, then PRs), git bridge | 📋 |
-| 4 | Knowledge base + AI integration: notes, tags, query API, context packs, MCP server, SDKs | 📋 |
+| 2 | Protocol + server: clone/push/pull, auth, Raft log, blob tiers | 🚧 (clone/push/pull, CAS refs, token auth ✅; Raft, blob tiers 📋) |
+| 3 | Platform: PRs, reviews, policies, webhooks, event streaming, web UI (code browsing first, then PRs), git bridge | 🚧 (PRs, reviews, SSE ✅; web UI 🚧; policies, webhooks, git bridge 📋) |
+| 4 | Knowledge base + AI integration: notes, tags, query API, context packs, MCP server, SDKs | 🚧 (notes, typed tags, tag rules, query API, `context` endpoint ✅; MCP server, SDKs 📋) |
 | 5 | Self-hosting: agit repo managed by agit, 1.0 format freeze, spec | 📋 |
 
 Deliverables, acceptance criteria and benchmark targets per phase are in [docs/ROADMAP.md](docs/ROADMAP.md).

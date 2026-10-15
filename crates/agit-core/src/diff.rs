@@ -345,3 +345,36 @@ mod tests {
         assert!(unified("bin", b"\0\x01", b"\0\x02", 3).is_none());
     }
 }
+
+/// Render a unified patch for `changes` using blobs from the store only.
+pub fn render_patch(store: &ObjectStore, changes: &[Change], context: usize) -> Result<String> {
+    let mut out = String::new();
+    for c in changes {
+        let old = match &c.old {
+            Some(s) => store.read_blob(&s.id).unwrap_or_default(),
+            None => vec![],
+        };
+        let new = match &c.new {
+            Some(s) => store.read_blob(&s.id).unwrap_or_default(),
+            None => vec![],
+        };
+        match unified(&c.path, &old, &new, context) {
+            Some(p) => out.push_str(&p),
+            None => out.push_str(&format!("Binary files a/{0} and b/{0} differ\n", c.path)),
+        }
+    }
+    Ok(out)
+}
+
+/// (path, added, removed) per change, from the store only.
+pub fn change_stats(store: &ObjectStore, changes: &[Change]) -> Vec<(String, usize, usize)> {
+    changes
+        .iter()
+        .map(|c| {
+            let old = c.old.as_ref().and_then(|s| store.read_blob(&s.id).ok()).unwrap_or_default();
+            let new = c.new.as_ref().and_then(|s| store.read_blob(&s.id).ok()).unwrap_or_default();
+            let (a, d) = line_stats(&old, &new);
+            (c.path.clone(), a, d)
+        })
+        .collect()
+}
