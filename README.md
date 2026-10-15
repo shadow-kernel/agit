@@ -212,6 +212,17 @@ Set `AGIT_SERVER_TOKEN` on the server and `AGIT_TOKEN` on clients for bearer aut
 
 ### Web UI quick start ✅
 
+| Repository home | Pull request |
+| --- | --- |
+| ![repo home](docs/screenshots/repo-home.png) | ![pull request](docs/screenshots/pull-request.png) |
+
+| Commits with agent, intent and task | Knowledge base |
+| --- | --- |
+| ![commits](docs/screenshots/commits.png) | ![knowledge](docs/screenshots/knowledge.png) |
+
+(Screenshots from mock mode, which ships with the UI.)
+
+
 ```sh
 cd web && pnpm install && pnpm build && cd ..
 agit-server --data-dir ./agit-data --web-dir web/dist     # UI at http://127.0.0.1:7878/
