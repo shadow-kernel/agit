@@ -489,6 +489,7 @@ pub fn run_know(repo: &Repository, json: bool, remote: &str, cmd: KnowCmd) -> Re
                     commits,
                     pulls: vec![],
                     confidence,
+                    ..Default::default()
                 },
             )?;
             emit(json, &n, || println!("note {} created: {}", n.id, n.title));
