@@ -77,6 +77,9 @@ pub enum Error {
     #[error("lock timeout: {0}")]
     LockTimeout(PathBuf),
 
+    #[error("policy violation: {0}")]
+    PolicyViolation(String),
+
     #[error("{0}")]
     Invalid(String),
 
@@ -120,6 +123,7 @@ impl Error {
             WorkspaceExists(_) => "workspace_exists",
             WorkspaceNotFound(_) => "workspace_not_found",
             LockTimeout(_) => "lock_timeout",
+            PolicyViolation(_) => "policy_violation",
             Invalid(_) => "invalid",
             IoAt { .. } | Io(_) => "io",
             Serde(_) => "serde",

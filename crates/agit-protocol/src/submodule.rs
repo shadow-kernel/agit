@@ -9,6 +9,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::sync;
 
+/// Resolve a submodule URL: relative local paths are relative to the parent
+/// repository's working directory, not the process cwd.
+fn resolve_url(repo: &Repository, url: &str) -> String {
+    if sync::is_local_url(url) {
+        let p = Path::new(url.strip_prefix("file://").unwrap_or(url));
+        if p.is_relative() {
+            return repo.work_dir().join(p).display().to_string();
+        }
+    }
+    url.to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubmoduleUpdate {
     pub path: String,
@@ -32,7 +44,7 @@ pub fn add(repo: &Repository, url: &str, path: &str, branch: Option<&str>) -> Re
     if abs.exists() && std::fs::read_dir(&abs).map(|mut d| d.next().is_some()).unwrap_or(true) {
         return Err(Error::Invalid(format!("{path} exists and is not empty")));
     }
-    let (nested, _) = sync::clone(url, &abs)?;
+    let (nested, _) = sync::clone(&resolve_url(repo, url), &abs)?;
     if let Some(b) = branch {
         if nested.current_branch()?.as_deref() != Some(b) {
             agit_core::ops::switch(&nested, b, false, true)?;
@@ -66,7 +78,7 @@ pub fn update(repo: &Repository, paths: Option<&[String]>) -> Result<Vec<Submodu
         let nested = match submodule::open_nested(repo, &m.path)? {
             Some(r) => r,
             None => {
-                let (r, _) = sync::clone(&m.url, &abs)?;
+                let (r, _) = sync::clone(&resolve_url(repo, &m.url), &abs)?;
                 out.push(SubmoduleUpdate { path: m.path.clone(), action: "cloned".into(), commit: r.head_commit()? });
                 r
             }

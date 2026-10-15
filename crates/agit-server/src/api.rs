@@ -112,6 +112,7 @@ pub fn router(state: Arc<AppState>, web_dir: Option<&std::path::Path>) -> Router
         .route("/repos/{repo}/knowledge/notes/{id}", get(get_note).patch(patch_note).delete(delete_note))
         .route("/repos/{repo}/knowledge/tags", get(list_tags_kb))
         .route("/repos/{repo}/knowledge/rules", get(get_rules).put(put_rules))
+        .route("/repos/{repo}/policy", get(get_policy).put(put_policy))
         .route("/repos/{repo}/context", get(get_context))
         .route("/repos/{repo}/agents", get(list_agents))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
@@ -186,6 +187,12 @@ async fn update_refs(State(st): S, Path(repo): Path<String>, Agent(agent): Agent
         }
     }
     let olds: Vec<Option<ObjectId>> = req.updates.iter().map(|u| r.refs.read(&u.name)).collect::<Result<_, _>>()?;
+    {
+        let ps = crate::policy::PolicyStore::new(&r);
+        for (u, old) in req.updates.iter().zip(olds.iter()) {
+            ps.check_push(&u.name, *old, u.new, &agent)?;
+        }
+    }
     let updates: Vec<(String, agit_core::refs::Expect, Option<ObjectId>)> =
         req.updates.iter().map(|u| (u.name.clone(), u.expect.to_core(), u.new)).collect();
     r.refs.update_many(&updates)?;
@@ -589,6 +596,20 @@ async fn get_context(State(st): S, Path(repo): Path<String>, Query(q): Query<Has
     .await
     .map_err(|e| ApiErr::BadRequest(e.to_string()))??;
     Ok(Json(resp))
+}
+
+// ---------------------------------------------------------------------------
+// policy
+// ---------------------------------------------------------------------------
+
+async fn get_policy(State(st): S, Path(repo): Path<String>) -> ApiResult<Json<Policy>> {
+    let r = st.get(&repo)?;
+    Ok(Json(crate::policy::PolicyStore::new(&r).get()?))
+}
+
+async fn put_policy(State(st): S, Path(repo): Path<String>, Agent(agent): Agent, Json(p): Json<Policy>) -> ApiResult<Json<Policy>> {
+    let r = st.get(&repo)?;
+    Ok(Json(crate::policy::PolicyStore::new(&r).set(p, &agent)?))
 }
 
 // ---------------------------------------------------------------------------

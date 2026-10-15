@@ -20,6 +20,9 @@ mod error;
 #[path = "../src/knowledge.rs"]
 #[allow(dead_code)]
 mod knowledge;
+#[path = "../src/policy.rs"]
+#[allow(dead_code)]
+mod policy;
 #[path = "../src/pulls.rs"]
 #[allow(dead_code)]
 mod pulls;
@@ -199,4 +202,71 @@ async fn push_clone_pull_pr_knowledge() {
 
 fn client_get<T: serde::de::DeserializeOwned>(base: &str, path: &str) -> T {
     ureq::get(&format!("{base}{path}")).call().unwrap().into_json().unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policies_are_enforced() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = start_server(&tmp.path().join("data")).await;
+    let tmp_path = tmp.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let admin = Client::new(&base).with_agent(Some("admin".into()));
+        admin.create_repo("p", Some("main")).unwrap();
+        let url = format!("{base}/repos/p");
+        let a = Repository::init(&tmp_path.join("a")).unwrap();
+        write(a.work_dir(), "f.txt", "1\n");
+        commit_all(&a, "one", "agent-a");
+        sync::add_remote(&a, "origin", &url).unwrap();
+        sync::push(&a, "origin", "main", false, false).unwrap();
+
+        let policy = Policy {
+            protected_branches: vec!["main".into()],
+            require_pull_request: true,
+            require_approvals: 1,
+            require_intent: true,
+            ..Default::default()
+        };
+        admin.set_policy("p", &policy).unwrap();
+        assert_eq!(admin.policy("p").unwrap(), policy);
+
+        // Direct push to main is now refused.
+        write(a.work_dir(), "f.txt", "2\n");
+        commit_all(&a, "two", "agent-a");
+        let err = sync::push(&a, "origin", "main", false, false).unwrap_err();
+        assert!(matches!(err, agit_core::Error::PolicyViolation(_)), "{err}");
+
+        // Feature branch + PR works; author approval does not count.
+        ops::create_branch(&a, "feat", None).unwrap();
+        sync::push(&a, "origin", "feat", false, false).unwrap();
+        let ca = Client::new(&base).with_agent(Some("agent-a".into()));
+        let pr = ca.create_pull("p", &PullCreate { title: "two".into(), body: None, intent: None, task: None, source: "feat".into(), target: None }).unwrap();
+        let err = ca.merge_pull("p", pr.number, &MergeRequest::default()).unwrap_err();
+        assert!(err.to_string().contains("approval"), "{err}");
+        ca.review_pull("p", pr.number, &ReviewCreate { decision: ReviewDecision::Approve, body: String::new() }).unwrap();
+        let err = ca.merge_pull("p", pr.number, &MergeRequest::default()).unwrap_err();
+        assert!(err.to_string().contains("approval"), "{err}");
+        let rv = Client::new(&base).with_agent(Some("reviewer".into()));
+        rv.comment_pull("p", pr.number, &CommentCreate { path: None, line: None, kind: CommentKind::Blocker, body: "wait".into() }).unwrap();
+        rv.review_pull("p", pr.number, &ReviewCreate { decision: ReviewDecision::Approve, body: String::new() }).unwrap();
+        let err = ca.merge_pull("p", pr.number, &MergeRequest::default()).unwrap_err();
+        assert!(err.to_string().contains("blocker"), "{err}");
+        // Resolve the blocker, then merge succeeds (commits carry intent).
+        let d = ca.pull("p", pr.number).unwrap();
+        let cid = d.pr.comments[0].id;
+        ureq::post(&format!("{base}/repos/p/pulls/{}/comments/{cid}/resolve", pr.number)).set("X-Agit-Agent", "reviewer").call().unwrap();
+        ca.merge_pull("p", pr.number, &MergeRequest::default()).unwrap();
+
+        // A commit without intent is rejected on a protected branch (via PR too).
+        ops::switch(&a, "feat", false, false).unwrap();
+        write(a.work_dir(), "g.txt", "x\n");
+        worktree::add(&a, &[], false).unwrap();
+        ops::commit(&a, CommitOptions { message: "no intent".into(), ..Default::default() }).unwrap();
+        sync::push(&a, "origin", "feat", false, false).unwrap();
+        let pr2 = ca.create_pull("p", &PullCreate { title: "three".into(), body: None, intent: None, task: None, source: "feat".into(), target: None }).unwrap();
+        rv.review_pull("p", pr2.number, &ReviewCreate { decision: ReviewDecision::Approve, body: String::new() }).unwrap();
+        let err = ca.merge_pull("p", pr2.number, &MergeRequest::default()).unwrap_err();
+        assert!(err.to_string().contains("intent"), "{err}");
+    })
+    .await
+    .unwrap();
 }

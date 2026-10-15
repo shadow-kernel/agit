@@ -59,6 +59,7 @@ impl ApiErr {
                     CoreError::Invalid(_) | CoreError::InvalidRefName(_) | CoreError::InvalidObjectId(_)
                     | CoreError::AmbiguousRevision(_) | CoreError::NothingToCommit => StatusCode::BAD_REQUEST,
                     CoreError::LockTimeout(_) => StatusCode::SERVICE_UNAVAILABLE,
+                    CoreError::PolicyViolation(_) => StatusCode::FORBIDDEN,
                     _ => StatusCode::INTERNAL_SERVER_ERROR,
                 };
                 (status, code, e.to_string(), e.is_retryable(), details)

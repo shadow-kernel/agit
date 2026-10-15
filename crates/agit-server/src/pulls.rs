@@ -245,6 +245,7 @@ impl<'a> PullStore<'a> {
             return Err(Error::Invalid("pull request is not open".into()));
         }
         self.refresh(&mut pr)?;
+        crate::policy::PolicyStore::new(self.repo).check_merge(&pr, &actor.id)?;
         let store = &self.repo.store;
         if is_ancestor(store, &pr.source_id, &pr.target_id)? {
             return Err(Error::Invalid("source is already contained in target; nothing to merge".into()));

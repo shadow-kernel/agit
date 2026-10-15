@@ -84,6 +84,17 @@ PR object:
 - `POST /repos/{repo}/pulls/{n}/close` -> pr
 - `POST /repos/{repo}/pulls/{n}/update` `{title?, body?, intent?, task?}` -> pr
 
+## Policy
+Per-repository rules enforced at `refs/update` (direct pushes) and `pulls/{n}/merge`. Violations are `403 policy_violation`.
+```json
+{"protected_branches":["main","release/*"],"require_pull_request":true,"require_approvals":1,
+ "require_intent":true,"require_agent":false,"require_checks":false,"block_on_blockers":true,
+ "allowed_merge_agents":[],"allowed_push_agents":[],"max_files_per_commit":0}
+```
+- `GET /repos/{repo}/policy` -> policy (defaults when unset)
+- `PUT /repos/{repo}/policy` -> policy
+Rules: protected branches cannot be deleted; with `require_pull_request` they only move through PR merges; approvals count the latest decision per reviewer and exclude the PR author; any `request_changes` blocks; unresolved `blocker` comments block when `block_on_blockers`; `require_intent`/`require_agent`/`max_files_per_commit` are checked on every new commit the update introduces.
+
 ## Knowledge notes
 Note object:
 ```json

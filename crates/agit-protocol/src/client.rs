@@ -59,6 +59,7 @@ fn map_err(e: ureq::Error) -> Error {
                         b.error.details.as_ref().and_then(|d| d.get("count")).and_then(|v| v.as_u64()).unwrap_or(1) as usize,
                     ),
                     "already_exists" => Error::AlreadyExists(b.error.message.into()),
+                    "policy_violation" => Error::PolicyViolation(b.error.message),
                     _ => Error::Invalid(format!("server error {status} [{}]: {}", b.error.code, b.error.message)),
                 },
                 Err(_) => Error::Invalid(format!("server error {status}: {body}")),
@@ -211,6 +212,12 @@ impl Client {
     }
     pub fn create_note(&self, repo: &str, req: &NoteCreate) -> Result<Note> {
         self.send_json("POST", &format!("/repos/{repo}/knowledge/notes"), req)
+    }
+    pub fn policy(&self, repo: &str) -> Result<Policy> {
+        self.get_json(&format!("/repos/{repo}/policy"))
+    }
+    pub fn set_policy(&self, repo: &str, policy: &Policy) -> Result<Policy> {
+        self.send_json("PUT", &format!("/repos/{repo}/policy"), policy)
     }
     pub fn tags(&self, repo: &str) -> Result<Vec<TagCount>> {
         self.get_json(&format!("/repos/{repo}/knowledge/tags"))

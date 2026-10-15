@@ -523,6 +523,62 @@ pub struct ContextResponse {
     pub open_pulls: Vec<PullRequest>,
 }
 
+/// Repository policy, enforced server-side at ref updates and PR merges.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Policy {
+    /// Full ref names (e.g. `refs/heads/main`) or branch globs (`release/*`).
+    #[serde(default)]
+    pub protected_branches: Vec<String>,
+    /// Protected branches only move through pull request merges.
+    #[serde(default)]
+    pub require_pull_request: bool,
+    /// Minimum number of distinct approving reviewers (excluding the PR author) to merge into a protected branch.
+    #[serde(default)]
+    pub require_approvals: u32,
+    /// Every commit pushed to a protected branch must carry `intent`.
+    #[serde(default)]
+    pub require_intent: bool,
+    /// Every commit pushed to a protected branch must carry an `agent` identity.
+    #[serde(default)]
+    pub require_agent: bool,
+    /// All checks must be `success` (and at least one must exist) before merging a PR into a protected branch.
+    #[serde(default)]
+    pub require_checks: bool,
+    /// Unresolved `blocker` comments prevent merging.
+    #[serde(default = "default_true")]
+    pub block_on_blockers: bool,
+    /// Only these agent ids may merge into protected branches (empty = anyone).
+    #[serde(default)]
+    pub allowed_merge_agents: Vec<String>,
+    /// Only these agent ids may push directly to protected branches (empty = anyone, subject to require_pull_request).
+    #[serde(default)]
+    pub allowed_push_agents: Vec<String>,
+    /// Reject commits touching more than this many files (0 = unlimited).
+    #[serde(default)]
+    pub max_files_per_commit: u32,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Policy {
+            protected_branches: vec![],
+            require_pull_request: false,
+            require_approvals: 0,
+            require_intent: false,
+            require_agent: false,
+            require_checks: false,
+            block_on_blockers: true,
+            allowed_merge_agents: vec![],
+            allowed_push_agents: vec![],
+            max_files_per_commit: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentActivity {
     pub id: String,

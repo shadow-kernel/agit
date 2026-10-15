@@ -208,7 +208,16 @@ agit know context x.txt                  # notes, recent commits, leases, open P
 curl -N http://127.0.0.1:7878/api/v1/repos/demo/events/stream?since=0   # live events (SSE)
 ```
 
-Set `AGIT_SERVER_TOKEN` on the server and `AGIT_TOKEN` on clients for bearer authentication. `agit-server --web-dir web/dist` serves the web UI from the same process.
+Set `AGIT_SERVER_TOKEN` on the server and `AGIT_TOKEN` on clients for bearer authentication.
+
+### Web UI quick start ✅
+
+```sh
+cd web && pnpm install && pnpm build && cd ..
+agit-server --data-dir ./agit-data --web-dir web/dist     # UI at http://127.0.0.1:7878/
+# or, for development with hot reload against a running server:
+cd web && pnpm dev                                        # http://localhost:5173
+```
 
 ## Core concepts
 
@@ -371,9 +380,9 @@ Status per item is marked. The first server exists today (`crates/agit-server`, 
 
 **Pull requests and reviews.** ✅ today: structured PRs (title, intent, task, author agent), structured comments (path, line, kind, resolution), reviews (approve / request changes / comment), checks, mergeability with conflict preview, server-side merge (three-way or fast-forward) with CAS on the target branch, `agit pr create|list|view|review|comment|merge|close`. 📋 next: policies and required checks. A PR is a structured object: title, intent, task, agent, reviewers, checks, decision log. Review comments are structured too: path, range, kind (`question`, `suggestion`, `blocker`), resolution. Agents open, review and merge PRs through the same API humans use; policies decide which agents may merge what. [RFC 0005](docs/rfcs/0005-pull-requests-and-reviews.md).
 
-**Policies.** Which agent may push to which branch, require `intent`, require passing checks, maximum files per commit, and similar rules, enforced server-side at ref update time.
+**Policies.** ✅ per-repository policy (`GET/PUT /repos/{repo}/policy`): protected branches (names or globs), pull-request-only, minimum approvals (latest decision per reviewer, author excluded), block on `request_changes` and unresolved `blocker` comments, required checks, allowed merge/push agents, `require_intent`, `require_agent`, `max_files_per_commit`. Enforced at ref update and PR merge; violations are `403 policy_violation`.
 
-**Web UI (`web/`).** 🚧 first version in `web/` (Vite + React + TypeScript; code browsing, commits, PRs, agents, leases, knowledge). Clean, GitHub-like, fast. Code browsing with syntax highlighting and symbol navigation, history and blame, diffs, PRs and reviews, branches and workspaces, live agent activity from the event stream, a lease board showing who is working where, and a knowledge browser. TypeScript and React with server-side rendering. The UI uses only the public API that agents use; there are no private endpoints. [RFC 0006](docs/rfcs/0006-web-ui.md).
+**Web UI (`web/`).** ✅ first version: Vite + React + TypeScript, no UI kit, light and dark. Code browsing with syntax highlighting and a file finder, commits with agent/intent/task filters, commit diffs, pull requests with conversation, reviews, inline comments and merge, live agent activity from the SSE stream, a lease board with expiry countdowns, and the knowledge browser with tag filters and the per-path context panel. Runs against the server or in mock mode (`VITE_AGIT_MOCK=1`); `agit-server --web-dir web/dist` serves it from the same process. 📋 next: blame, symbol navigation, server-side rendering. Clean, GitHub-like, fast. Code browsing with syntax highlighting and symbol navigation, history and blame, diffs, PRs and reviews, branches and workspaces, live agent activity from the event stream, a lease board showing who is working where, and a knowledge browser. TypeScript and React with server-side rendering. The UI uses only the public API that agents use; there are no private endpoints. [RFC 0006](docs/rfcs/0006-web-ui.md).
 
 **Webhooks and event streaming.** ✅ SSE stream (`/events/stream?since=`) and polling (`/events?since=`). 📋 WebSocket and webhooks.
 
@@ -470,7 +479,7 @@ Planned sub-repositories: `agit-server`, `agit-protocol`, `agit-knowledge`, `agi
 | 0 | Local core: objects, index, commit, status, diff, branch, merge, leases, events, workspaces, checkpoints, JSON output, tests | ✅ / 🚧 |
 | 1 | Performance: pack segments, journal + group commit, mmap ref table, parallel status at 1M files, published benchmarks vs git | 📋 |
 | 2 | Protocol + server: clone/push/pull, auth, Raft log, blob tiers | 🚧 (clone/push/pull, CAS refs, token auth ✅; Raft, blob tiers 📋) |
-| 3 | Platform: PRs, reviews, policies, webhooks, event streaming, web UI (code browsing first, then PRs), git bridge | 🚧 (PRs, reviews, SSE ✅; web UI 🚧; policies, webhooks, git bridge 📋) |
+| 3 | Platform: PRs, reviews, policies, webhooks, event streaming, web UI (code browsing first, then PRs), git bridge | 🚧 (PRs, reviews, SSE, policies, web UI v1 ✅; webhooks, git bridge 📋) |
 | 4 | Knowledge base + AI integration: notes, tags, query API, context packs, MCP server, SDKs | 🚧 (notes, typed tags, tag rules, query API, `context` endpoint, MCP server ✅; SDKs 📋) |
 | 5 | Self-hosting: agit repo managed by agit, 1.0 format freeze, spec | 📋 |
 

@@ -3,6 +3,7 @@
 mod api;
 mod error;
 mod knowledge;
+mod policy;
 mod pulls;
 mod state;
 
