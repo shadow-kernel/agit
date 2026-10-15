@@ -40,23 +40,24 @@ export function parseUnifiedDiff(patch: string): FileDiff[] {
   let hunk: DiffHunk | null = null;
   let oldNo = 0, newNo = 0;
 
-  const startFile = (oldPath: string | null, newPath: string | null) => {
-    cur = { oldPath, newPath, path: newPath ?? oldPath ?? "?", hunks: [], additions: 0, deletions: 0, binary: false };
-    files.push(cur);
+  const startFile = (oldPath: string | null, newPath: string | null): FileDiff => {
+    const f: FileDiff = { oldPath, newPath, path: newPath ?? oldPath ?? "?", hunks: [], additions: 0, deletions: 0, binary: false };
+    files.push(f);
     hunk = null;
+    return f;
   };
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (line.startsWith("diff --git ")) {
       const m = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
-      startFile(m ? m[1] : null, m ? m[2] : null);
+      cur = startFile(m ? m[1] : null, m ? m[2] : null);
       continue;
     }
     if (line.startsWith("--- ") && (lines[i + 1] ?? "").startsWith("+++ ")) {
       const o = stripPrefix(line.slice(4));
       const n = stripPrefix(lines[i + 1].slice(4));
-      if (!cur || cur.hunks.length > 0) startFile(o, n);
+      if (!cur || cur.hunks.length > 0) cur = startFile(o, n);
       else {
         cur.oldPath = o;
         cur.newPath = n;
@@ -71,11 +72,11 @@ export function parseUnifiedDiff(patch: string): FileDiff[] {
     }
     const hm = HUNK.exec(line);
     if (hm) {
-      if (!cur) startFile(null, null);
+      if (!cur) cur = startFile(null, null);
       oldNo = parseInt(hm[1], 10);
       newNo = parseInt(hm[3], 10);
       hunk = { header: line, oldStart: oldNo, newStart: newNo, lines: [] };
-      cur!.hunks.push(hunk);
+      cur.hunks.push(hunk);
       continue;
     }
     if (!hunk || !cur) continue;

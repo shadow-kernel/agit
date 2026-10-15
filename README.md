@@ -336,9 +336,19 @@ Agents pay per token. Planned views trim output to what a model needs: `agit dif
 
 `agit context <path|task>` returns, in one call, the files relevant to a path or task, their recent history, open leases on them, related PRs, and the knowledge notes whose tags match. One request instead of eight.
 
-### MCP server and SDKs 📋
+### MCP server ✅ and SDKs 📋
 
-`agit mcp` will expose repository operations and the knowledge base as MCP tools. Python and TypeScript SDKs (`sdk/`) will wrap the local CLI and the server API behind one typed interface. Until then, shell out to `agit … --json`; the contract is the same one the SDKs will use.
+`agit mcp` runs a Model Context Protocol server over stdio with 32 tools: status, log, show, diff, read_file, ls, add, commit (with intent/task/agent), checkpoint, restore, branches, switch, merge, leases (claim/release/list/check), events, workspaces, push, pull, pull requests (create/list/view/review/comment/merge), context, and knowledge (search/get/add). Tool results carry the same JSON as the CLI; failures come back as `isError` with the same error codes.
+
+Register it in an MCP client, started inside a repository:
+
+```json
+{ "mcpServers": { "agit": { "command": "agit", "args": ["mcp"], "env": { "AGIT_AGENT": "coder-1", "AGIT_MODEL": "my-model" } } } }
+```
+
+The server's `instructions` describe the intended loop: `agit_context(path)` before editing, `agit_lease_claim` for the paths you will change, `agit_checkpoint` before risky edits, `agit_add` + `agit_commit` with intent and task, `agit_pr_create` when done, `agit_know_add` to record what you learned.
+
+Python and TypeScript SDKs over the HTTP API are planned in `sdk/`.
 
 ### Idempotency 📋
 
@@ -452,7 +462,7 @@ Planned sub-repositories: `agit-server`, `agit-protocol`, `agit-knowledge`, `agi
 | 1 | Performance: pack segments, journal + group commit, mmap ref table, parallel status at 1M files, published benchmarks vs git | 📋 |
 | 2 | Protocol + server: clone/push/pull, auth, Raft log, blob tiers | 🚧 (clone/push/pull, CAS refs, token auth ✅; Raft, blob tiers 📋) |
 | 3 | Platform: PRs, reviews, policies, webhooks, event streaming, web UI (code browsing first, then PRs), git bridge | 🚧 (PRs, reviews, SSE ✅; web UI 🚧; policies, webhooks, git bridge 📋) |
-| 4 | Knowledge base + AI integration: notes, tags, query API, context packs, MCP server, SDKs | 🚧 (notes, typed tags, tag rules, query API, `context` endpoint ✅; MCP server, SDKs 📋) |
+| 4 | Knowledge base + AI integration: notes, tags, query API, context packs, MCP server, SDKs | 🚧 (notes, typed tags, tag rules, query API, `context` endpoint, MCP server ✅; SDKs 📋) |
 | 5 | Self-hosting: agit repo managed by agit, 1.0 format freeze, spec | 📋 |
 
 Deliverables, acceptance criteria and benchmark targets per phase are in [docs/ROADMAP.md](docs/ROADMAP.md).

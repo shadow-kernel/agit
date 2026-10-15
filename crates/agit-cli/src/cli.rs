@@ -300,6 +300,12 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: crate::remote::PrCmd,
     },
+    /// Run as an MCP server over stdio (tools for AI agents).
+    Mcp {
+        /// Remote used by pr/know/context tools.
+        #[arg(long, default_value = "origin")]
+        remote: String,
+    },
     /// Knowledge base on the remote: notes, tags, context for a path.
     Know {
         #[arg(long, default_value = "origin")]
@@ -706,6 +712,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Cmd::Clone { url, dest } => crate::remote::run_clone(json, &cwd(&cli.dir)?, &url, dest)?,
         Cmd::Pr { remote, cmd } => crate::remote::run_pr(&open(&cli.dir)?, json, &remote, cmd)?,
         Cmd::Know { remote, cmd } => crate::remote::run_know(&open(&cli.dir)?, json, &remote, cmd)?,
+        Cmd::Mcp { remote } => crate::mcp::serve(cwd(&cli.dir)?, remote)?,
         Cmd::Ws { cmd } => run_ws(&cli.dir, json, cmd)?,
         Cmd::Events { since, follow, kind } => {
             let repo = open(&cli.dir)?;

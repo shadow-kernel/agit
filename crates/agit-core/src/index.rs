@@ -14,7 +14,8 @@ use crate::object::{EntryMode, Tree, TreeEntry};
 use crate::refs::write_atomic_bulk;
 use crate::store::ObjectStore;
 
-const MAGIC: &[u8; 4] = b"AGI1";
+const MAGIC_V1: &[u8; 4] = b"AGI1";
+const MAGIC: &[u8; 4] = b"AGI2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexEntry {
@@ -34,6 +35,34 @@ pub struct IndexEntry {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Index {
     entries: BTreeMap<String, IndexEntry>,
+    /// Cached tree ids per directory ("" is the root). An entry is dropped
+    /// whenever a path under that directory changes, so a valid entry means
+    /// the directory's tree object is already in the store. This makes
+    /// `write_tree` cost proportional to the change, not the repository.
+    tree_cache: BTreeMap<String, (ObjectId, u64)>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct IndexFile<'a> {
+    entries: Vec<std::borrow::Cow<'a, IndexEntry>>,
+    tree_cache: Vec<(String, ObjectId, u64)>,
+}
+
+fn ancestors(path: &str) -> impl Iterator<Item = &str> {
+    let mut cur = path;
+    std::iter::from_fn(move || {
+        match cur.rfind('/') {
+            Some(i) => {
+                cur = &cur[..i];
+                Some(cur)
+            }
+            None if !cur.is_empty() => {
+                cur = "";
+                Some("")
+            }
+            None => None,
+        }
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,9 +123,10 @@ impl Index {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Index::new()),
             Err(e) => return Err(Error::IoAt { path: path.to_path_buf(), source: e }),
         };
-        if bytes.len() < 4 + 32 || &bytes[..4] != MAGIC {
+        if bytes.len() < 4 + 32 || (&bytes[..4] != MAGIC && &bytes[..4] != MAGIC_V1) {
             return Err(Error::Invalid(format!("corrupt index at {}", path.display())));
         }
+        let v1 = &bytes[..4] == MAGIC_V1;
         let (body, sum) = bytes.split_at(bytes.len() - 32);
         let actual = Hasher::new().update(body).finalize();
         if actual.as_bytes() != sum {
@@ -105,17 +135,28 @@ impl Index {
                 path.display()
             )));
         }
-        let list: Vec<IndexEntry> = bincode::deserialize(&body[4..])?;
+        if v1 {
+            let list: Vec<IndexEntry> = bincode::deserialize(&body[4..])?;
+            return Ok(Index {
+                entries: list.into_iter().map(|e| (e.path.clone(), e)).collect(),
+                tree_cache: BTreeMap::new(),
+            });
+        }
+        let file: IndexFile<'static> = bincode::deserialize(&body[4..])?;
         Ok(Index {
-            entries: list.into_iter().map(|e| (e.path.clone(), e)).collect(),
+            entries: file.entries.into_iter().map(|e| (e.path.clone(), e.into_owned())).collect(),
+            tree_cache: file.tree_cache.into_iter().map(|(p, id, n)| (p, (id, n))).collect(),
         })
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        let list: Vec<&IndexEntry> = self.entries.values().collect();
-        let mut body = Vec::with_capacity(list.len() * 96 + 4);
+        let file = IndexFile {
+            entries: self.entries.values().map(std::borrow::Cow::Borrowed).collect(),
+            tree_cache: self.tree_cache.iter().map(|(p, (id, n))| (p.clone(), *id, *n)).collect(),
+        };
+        let mut body = Vec::with_capacity(self.entries.len() * 96 + 4);
         body.extend_from_slice(MAGIC);
-        bincode::serialize_into(&mut body, &list)?;
+        bincode::serialize_into(&mut body, &file)?;
         let sum = Hasher::new().update(&body).finalize();
         body.extend_from_slice(sum.as_bytes());
         write_atomic_bulk(path, &body)
@@ -134,11 +175,30 @@ impl Index {
     }
 
     pub fn insert(&mut self, entry: IndexEntry) {
+        let changed = self.entries.get(&entry.path).is_none_or(|e| e.id != entry.id || e.mode != entry.mode || e.size != entry.size);
+        if changed {
+            self.invalidate(&entry.path);
+        }
         self.entries.insert(entry.path.clone(), entry);
     }
 
     pub fn remove(&mut self, path: &str) -> Option<IndexEntry> {
-        self.entries.remove(path)
+        let e = self.entries.remove(path);
+        if e.is_some() {
+            self.invalidate(path);
+        }
+        e
+    }
+
+    fn invalidate(&mut self, path: &str) {
+        for a in ancestors(path) {
+            self.tree_cache.remove(a);
+        }
+    }
+
+    /// Number of cached directory trees (for diagnostics and tests).
+    pub fn cached_trees(&self) -> usize {
+        self.tree_cache.len()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &IndexEntry> {
@@ -182,16 +242,37 @@ impl Index {
         for e in self.entries.values() {
             builder.insert(&e.path, e.mode, e.id, e.size);
         }
-        builder.write(store)
+        builder.write_cached(store, &self.tree_cache)
+    }
+
+    /// Like [`write_tree`](Self::write_tree) but also refreshes the tree
+    /// cache so the next call is cheap. Requires `&mut self`.
+    pub fn write_tree_cached(&mut self, store: &ObjectStore) -> Result<ObjectId> {
+        if self.has_conflicts() {
+            return Err(Error::Invalid(format!(
+                "index has unresolved conflicts: {:?}",
+                self.conflicted_paths()
+            )));
+        }
+        let mut builder = TreeBuilder::default();
+        for e in self.entries.values() {
+            builder.insert(&e.path, e.mode, e.id, e.size);
+        }
+        let mut cache = std::mem::take(&mut self.tree_cache);
+        let id = builder.write_with_cache(store, &mut cache)?;
+        self.tree_cache = cache;
+        Ok(id)
     }
 
     /// Replace the index with the contents of `tree_id` (stat info cleared,
     /// so the next status will re-hash every file once).
     pub fn from_tree(store: &ObjectStore, tree_id: &ObjectId) -> Result<Index> {
         let mut idx = Index::new();
+        let mut cache = BTreeMap::new();
         let mut stack = vec![(String::new(), *tree_id)];
         while let Some((prefix, tid)) = stack.pop() {
             let tree = store.read_tree(&tid)?;
+            cache.insert(prefix.clone(), (tid, tree.len() as u64));
             for e in tree.into_entries() {
                 let path = if prefix.is_empty() {
                     e.name
@@ -213,6 +294,7 @@ impl Index {
                 }
             }
         }
+        idx.tree_cache = cache;
         Ok(idx)
     }
 }
@@ -250,7 +332,19 @@ impl TreeBuilder {
         self.files.push((path.to_string(), mode, id, size));
     }
 
-    pub fn write(mut self, store: &ObjectStore) -> Result<ObjectId> {
+    pub fn write(self, store: &ObjectStore) -> Result<ObjectId> {
+        let mut cache = BTreeMap::new();
+        self.write_with_cache(store, &mut cache)
+    }
+
+    /// Write using a read-only cache of known directory tree ids.
+    pub fn write_cached(self, store: &ObjectStore, cache: &BTreeMap<String, (ObjectId, u64)>) -> Result<ObjectId> {
+        let mut c = cache.clone();
+        self.write_with_cache(store, &mut c)
+    }
+
+    /// Write, consulting and updating `cache` (dir path -> (tree id, entries)).
+    pub fn write_with_cache(mut self, store: &ObjectStore, cache: &mut BTreeMap<String, (ObjectId, u64)>) -> Result<ObjectId> {
         self.files.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
         let mut root = Node::default();
         for (path, mode, id, size) in self.files {
@@ -269,7 +363,7 @@ impl TreeBuilder {
                 }
             }
         }
-        root.write(store)
+        root.write(store, "", cache)
     }
 }
 
@@ -280,11 +374,15 @@ struct Node {
 }
 
 impl Node {
-    fn write(self, store: &ObjectStore) -> Result<ObjectId> {
+    fn write(self, store: &ObjectStore, path: &str, cache: &mut BTreeMap<String, (ObjectId, u64)>) -> Result<ObjectId> {
+        if let Some((id, _)) = cache.get(path) {
+            return Ok(*id);
+        }
         let mut entries = self.files;
         for (name, node) in self.dirs {
             let count = node.files.len() + node.dirs.len();
-            let id = node.write(store)?;
+            let child_path = if path.is_empty() { name.clone() } else { format!("{path}/{name}") };
+            let id = node.write(store, &child_path, cache)?;
             entries.push(TreeEntry {
                 name,
                 mode: EntryMode::Dir,
@@ -292,7 +390,10 @@ impl Node {
                 size: count as u64,
             });
         }
-        store.write_tree(&Tree::from_entries(entries))
+        let n = entries.len() as u64;
+        let id = store.write_tree(&Tree::from_entries(entries))?;
+        cache.insert(path.to_string(), (id, n));
+        Ok(id)
     }
 }
 
@@ -337,8 +438,20 @@ mod tests {
         assert!(root.get("src").unwrap().mode.is_dir());
         let flat = flatten_tree(&store, &tree_id).unwrap();
         assert_eq!(flat.len(), 3);
-        let again = Index::from_tree(&store, &tree_id).unwrap();
+        let mut again = Index::from_tree(&store, &tree_id).unwrap();
         assert_eq!(again.len(), 3);
+        assert_eq!(again.cached_trees(), 3); // "", src, src/lib
         assert_eq!(again.write_tree(&store).unwrap(), tree_id);
+        // Changing one file invalidates exactly its ancestors.
+        let blob2 = store.write(crate::object::ObjectKind::Blob, b"y").unwrap();
+        again.insert(IndexEntry { path: "src/lib/a.rs".into(), id: blob2, mode: EntryMode::File, size: 1, mtime_ns: 2, ino: 1, conflict: false });
+        assert_eq!(again.cached_trees(), 0);
+        let t2 = again.write_tree_cached(&store).unwrap();
+        assert_ne!(t2, tree_id);
+        assert_eq!(again.cached_trees(), 3);
+        again.save(&path).unwrap();
+        let loaded = Index::load(&path).unwrap();
+        assert_eq!(loaded.cached_trees(), 3);
+        assert_eq!(loaded.write_tree(&store).unwrap(), t2);
     }
 }

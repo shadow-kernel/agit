@@ -41,6 +41,16 @@ Per-step breakdown with `AGIT_FSYNC=none`
 | of which event append | 0.18 |
 | `status` on 2,000 files (warm stat cache) | 8.0 |
 
+### Addendum: cached trees in the index
+
+After adding the tree cache (`AGI2` index format, directory tree ids cached and
+invalidated per changed path), `write_tree` on a 2,000-file tree drops from
+0.95 ms to 0.79 ms per commit; with nothing changed it costs 0.34 ms, which is
+the cost of rebuilding the in-memory directory structure. The remaining time
+goes into writing the three changed tree objects as loose files (temp file +
+rename, about 100 us each on APFS) and loading/saving the index (about 0.3 ms
+each). Both are what pack segments and a leaner index encoding address.
+
 ## What the numbers say
 
 - The single ref fsync is the dominant cost at default durability. This is

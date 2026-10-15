@@ -75,7 +75,7 @@ pub fn commit(repo: &Repository, opts: CommitOptions) -> Result<CommitResult> {
             worktree::add(repo, &paths, true)?;
         }
     }
-    let index = repo.load_index()?;
+    let mut index = repo.load_index()?;
     if index.has_conflicts() {
         return Err(Error::Invalid(format!(
             "unresolved conflicts: {}",
@@ -85,7 +85,12 @@ pub fn commit(repo: &Repository, opts: CommitOptions) -> Result<CommitResult> {
     let head = repo.head_commit()?;
     let head_tree = repo.head_tree()?;
     let merge_head = repo.merge_head()?;
-    let tree = index.write_tree(repo.store())?;
+    let cached_before = index.cached_trees();
+    let tree = index.write_tree_cached(repo.store())?;
+    if index.cached_trees() != cached_before {
+        // Persist the refreshed tree cache; best effort (it is only a cache).
+        let _ = repo.save_index(&index);
+    }
     let changes = diff_trees(repo.store(), head_tree.as_ref(), Some(&tree))?;
     if changes.is_empty() && merge_head.is_none() && !opts.allow_empty {
         return Err(Error::NothingToCommit);

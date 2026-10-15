@@ -6,6 +6,7 @@
 //! (merge/lease/dirty worktree), 75 retryable (lock timeout, ref conflict).
 
 mod cli;
+mod mcp;
 mod output;
 mod remote;
 

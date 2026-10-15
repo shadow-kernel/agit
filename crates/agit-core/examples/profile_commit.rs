@@ -23,6 +23,7 @@ fn main() {
         let t = Instant::now(); worktree::add(&repo, &[rel], false).unwrap(); t_add += t.elapsed().as_secs_f64();
         let t = Instant::now(); let idx = repo.load_index().unwrap(); t_load += t.elapsed().as_secs_f64();
         let t = Instant::now(); let tree = idx.write_tree(repo.store()).unwrap(); t_wt += t.elapsed().as_secs_f64();
+        if i == 0 { let t = Instant::now(); for _ in 0..100 { idx.write_tree(repo.store()).unwrap(); } println!("write_tree fully cached: {:.3} ms (cached dirs: {})", t.elapsed().as_secs_f64()*10.0, idx.cached_trees()); }
         let t = Instant::now(); let ht = repo.head_tree().unwrap(); agit_core::diff::diff_trees(repo.store(), ht.as_ref(), Some(&tree)).unwrap(); t_diff += t.elapsed().as_secs_f64();
         let t = Instant::now(); repo.author().unwrap(); t_author += t.elapsed().as_secs_f64();
         let t = Instant::now(); repo.events().append("x", None, None, serde_json::json!({})).unwrap(); t_ev += t.elapsed().as_secs_f64();
