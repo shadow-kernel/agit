@@ -1,0 +1,19 @@
+# .agitmodules: maps submodule paths in this repository to their source
+# repositories (TOML). See docs/rfcs/0007-submodules.md.
+#
+# agit is developed as a monorepo today. Each top-level component is designed
+# to be split into its own repository later and linked back here as a
+# submodule entry (tree mode 0o160000, pinning one commit). Candidates:
+#
+#   crates/agit-server, crates/agit-protocol, crates/agit-knowledge,
+#   crates/agit-git-bridge, web, sdk/python, sdk/typescript, spec
+#
+# When that happens, entries will look like this:
+#
+# [submodule."web"]
+# path = "web"
+# url = "https://github.com/agit-vcs/agit-web"
+# branch = "main"
+# update = "checkout"   # checkout | rebase | merge | none
+#
+# No submodules are configured yet.

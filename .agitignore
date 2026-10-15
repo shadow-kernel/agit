@@ -1,0 +1,12 @@
+# Rust
+target/
+
+# Node / web / sdk
+node_modules/
+
+# OS
+.DS_Store
+
+# Logs and scratch
+*.log
+/tmp/

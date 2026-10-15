@@ -1,0 +1,25 @@
+[package]
+name = "agit-core"
+description = "Core library of agit: a content-addressed version control system optimized for AI agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+blake3.workspace = true
+zstd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+thiserror.workspace = true
+rayon.workspace = true
+ignore.workspace = true
+diffy.workspace = true
+hex.workspace = true
+fs2.workspace = true
+tempfile.workspace = true
+globset.workspace = true
+uuid.workspace = true
+hostname.workspace = true
