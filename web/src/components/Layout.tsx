@@ -22,7 +22,7 @@ export function Layout() {
       <footer className="footer">
         <span>agit web UI · talks only to the public API (<code>/api/v1</code>)</span>
         <span>
-          <a href="https://github.com/agit-vcs/agit" target="_blank" rel="noreferrer">source</a> · <kbd className="kbd">t</kbd> file finder · <kbd className="kbd">/</kbd> search
+          <a href="https://github.com/shadow-kernel/agit" target="_blank" rel="noreferrer">source</a> · <kbd className="kbd">t</kbd> file finder · <kbd className="kbd">/</kbd> search
         </span>
       </footer>
       <Toasts />

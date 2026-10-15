@@ -181,7 +181,7 @@ Operations:
 
 Report vulnerabilities privately through GitHub's vulnerability reporting
 for this repository:
-<https://github.com/agit-vcs/agit/security/advisories/new>. If that page is
+<https://github.com/shadow-kernel/agit/security/advisories/new>. If that page is
 unavailable, contact a maintainer listed in the repository directly and ask
 for a private channel. Please do not file public issues for security
 problems.

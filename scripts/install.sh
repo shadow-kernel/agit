@@ -1,13 +1,13 @@
 #!/bin/sh
 # agit installer.
 #
-# Downloads a release tarball from https://github.com/agit-vcs/agit/releases,
+# Downloads a release tarball from https://github.com/shadow-kernel/agit/releases,
 # verifies its SHA-256 against the published .sha256 file and installs the
 # `agit` and `agit-server` binaries.
 #
-#   curl -fsSL https://raw.githubusercontent.com/agit-vcs/agit/main/scripts/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/agit-vcs/agit/main/scripts/install.sh | sh -s -- --version v0.1.0
-#   curl -fsSL https://raw.githubusercontent.com/agit-vcs/agit/main/scripts/install.sh | sudo sh -s -- --prefix /usr/local
+#   curl -fsSL https://raw.githubusercontent.com/shadow-kernel/agit/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/shadow-kernel/agit/main/scripts/install.sh | sh -s -- --version v0.1.0
+#   curl -fsSL https://raw.githubusercontent.com/shadow-kernel/agit/main/scripts/install.sh | sudo sh -s -- --prefix /usr/local
 #
 # Options (each also has an environment variable for curl | sh use):
 #   --version <tag|X.Y.Z>  AGIT_VERSION   release to install (default: latest)
@@ -23,7 +23,7 @@
 
 set -eu
 
-REPO="${AGIT_REPO:-agit-vcs/agit}"
+REPO="${AGIT_REPO:-shadow-kernel/agit}"
 BASE_URL="https://github.com/${REPO}/releases"
 VERSION="${AGIT_VERSION:-}"
 PREFIX="${AGIT_PREFIX:-}"
@@ -34,11 +34,11 @@ BINARIES="agit agit-server"
 
 usage() {
     cat <<'USAGE'
-agit installer: downloads a release from https://github.com/agit-vcs/agit/releases,
+agit installer: downloads a release from https://github.com/shadow-kernel/agit/releases,
 verifies its SHA-256 and installs `agit` and `agit-server`.
 
-  curl -fsSL https://raw.githubusercontent.com/agit-vcs/agit/main/scripts/install.sh | sh
-  curl -fsSL https://raw.githubusercontent.com/agit-vcs/agit/main/scripts/install.sh | sh -s -- --version v0.1.0
+  curl -fsSL https://raw.githubusercontent.com/shadow-kernel/agit/main/scripts/install.sh | sh
+  curl -fsSL https://raw.githubusercontent.com/shadow-kernel/agit/main/scripts/install.sh | sh -s -- --version v0.1.0
 
 Options (each also has an environment variable for curl | sh use):
   --version <tag|X.Y.Z>  AGIT_VERSION   release to install (default: latest)

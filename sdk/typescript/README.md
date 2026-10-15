@@ -1,6 +1,6 @@
 # @agit/sdk
 
-TypeScript client for the [agit](https://github.com/agit-vcs/agit) server HTTP API
+TypeScript client for the [agit](https://github.com/shadow-kernel/agit) server HTTP API
 (`docs/API.md`): repositories, compare-and-swap refs, objects, pull requests and reviews,
 leases, knowledge notes (ranked search, validity, drafts, context packs), policies, signing
 keys, webhooks and the live event stream. Built for AI agents and the

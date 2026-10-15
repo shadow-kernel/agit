@@ -100,10 +100,13 @@ export const fixtures = {
   ids: { A: ID_A, B: ID_B },
 };
 
+type NoteFixture = Record<string, unknown> & { body: string; draft?: boolean; stale?: boolean };
+type SummaryFixture = Record<string, unknown> & { excerpt: string; draft: boolean; stale: boolean; score?: number };
+
 /** Note summary as the server builds it: no body, excerpt, `draft`/`stale` always present. */
-function summary(note: Record<string, unknown> & { body: string }, extra: Record<string, unknown> = {}) {
+function summary(note: NoteFixture, extra: Record<string, unknown> = {}): SummaryFixture {
   const { body: _b, ...rest } = note;
-  return { ...rest, excerpt: note.body.slice(0, 200), draft: Boolean(note.draft), stale: Boolean(note.stale), ...extra };
+  return { ...rest, excerpt: note.body.slice(0, 200), draft: Boolean(note.draft), stale: Boolean(note.stale), ...extra } as SummaryFixture;
 }
 
 function json(res: ServerResponse, status: number, body: unknown) {
@@ -321,7 +324,7 @@ export async function startFakeServer(): Promise<FakeServer> {
       case route === "GET /api/v1/repos/demo/knowledge/notes": {
         const q = url.searchParams;
         if (q.get("commit") === "nope") return error(res, 404, "unknown_revision", "unknown revision nope");
-        const all = [fixtures.note, fixtures.draft];
+        const all: (typeof fixtures.note & { draft?: boolean })[] = [fixtures.note, fixtures.draft];
         const flag = (k: string) => ["1", "true"].includes(q.get(k) ?? "");
         const out = all
           .filter((n) => !n.draft || flag("drafts"))
@@ -336,8 +339,7 @@ export async function startFakeServer(): Promise<FakeServer> {
       case route === "POST /api/v1/repos/demo/knowledge/notes": {
         const b = body as { valid_at?: string; draft?: boolean };
         if (b.valid_at === "c".repeat(64)) return error(res, 412, "object_not_found", "object not found");
-        const { draft: _d, ...base } = fixtures.note;
-        const created: Record<string, unknown> = { ...base, id: "n_2", ...(body as object), author: req.headers["x-agit-agent"] ?? "anonymous", stale: false };
+        const created: Record<string, unknown> = { ...fixtures.note, id: "n_2", ...(body as object), author: req.headers["x-agit-agent"] ?? "anonymous", stale: false };
         if (!b.draft) delete created.draft; // the server omits `draft` when false
         return json(res, 201, created);
       }

@@ -74,7 +74,7 @@ FROM ${RUNTIME_IMAGE} AS final
 
 LABEL org.opencontainers.image.title="agit" \
       org.opencontainers.image.description="Version control and collaboration for AI agents: agit-server, agit CLI and web UI" \
-      org.opencontainers.image.source="https://github.com/agit-vcs/agit" \
+      org.opencontainers.image.source="https://github.com/shadow-kernel/agit" \
       org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
 # git: `agit git import|export` shells out to it. curl: the HEALTHCHECK below.

@@ -4,12 +4,12 @@
 #   - agit-web-<version>.tar.gz (+ .sha256): the built web UI
 #   - SHA256SUMS, agit.rb (Homebrew formula with real hashes)
 #   - a GitHub release with generated notes
-#   - ghcr.io/agit-vcs/agit:<version>, :<major.minor> and :latest (amd64 + arm64)
+#   - ghcr.io/shadow-kernel/agit:<version>, :<major.minor> and :latest (amd64 + arm64)
 #   - @agit/sdk on npm and agit-sdk on PyPI, only when NPM_TOKEN / PYPI_TOKEN exist
 #
 # Required repository settings:
 #   - Actions > General > Workflow permissions: "Read and write" (release + GHCR)
-#   - Packages: the first push creates ghcr.io/agit-vcs/agit; make it public afterwards
+#   - Packages: the first push creates ghcr.io/shadow-kernel/agit; make it public afterwards
 #   - Optional secrets: NPM_TOKEN (npm automation token), PYPI_TOKEN (PyPI API token)
 
 name: Release
@@ -24,7 +24,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  IMAGE: ghcr.io/agit-vcs/agit
+  IMAGE: ghcr.io/shadow-kernel/agit
 
 jobs:
   # ---------------------------------------------------------------------------

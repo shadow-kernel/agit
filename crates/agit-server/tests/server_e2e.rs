@@ -14,6 +14,9 @@ use agit_protocol::Client;
 #[path = "../src/api.rs"]
 #[allow(dead_code)]
 mod api;
+#[path = "../src/auth.rs"]
+#[allow(dead_code)]
+mod auth;
 #[path = "../src/error.rs"]
 #[allow(dead_code)]
 mod error;
@@ -1013,6 +1016,167 @@ async fn knowledge_layer() {
         ] {
             assert!(kinds.contains(&k), "missing event {k} in {kinds:?}");
         }
+    })
+    .await
+    .unwrap();
+}
+
+async fn start_server_with_token(data: &Path, token: &str) -> String {
+    let st = Arc::new(state::AppState::open(data.to_path_buf(), Some(token.to_string())).unwrap());
+    let app = api::router(st, None);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://{addr}/api/v1")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_tokens_bind_identity_and_limit_access() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = start_server_with_token(&tmp.path().join("data"), "root-secret").await;
+    let tmp_path = tmp.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        // No token: health is public, everything else is refused.
+        let anon = Client::new(&base).with_token(Some("".into()));
+        assert_eq!(
+            ureq::get(&format!("{base}/health"))
+                .call()
+                .unwrap()
+                .status(),
+            200
+        );
+        let err = ureq::get(&format!("{base}/repos")).call().unwrap_err();
+        assert!(matches!(err, ureq::Error::Status(403, _)));
+        let _ = anon;
+
+        let root = Client::new(&base).with_token(Some("root-secret".into()));
+        assert!(root.whoami().unwrap().root);
+        root.create_repo("t", Some("main")).unwrap();
+        root.create_repo("other", Some("main")).unwrap();
+
+        // A write token bound to agent-a on repo t.
+        let created = root
+            .create_token(&TokenCreate {
+                name: "agent-a laptop".into(),
+                agent: Some("agent-a".into()),
+                scopes: vec![Scope {
+                    repo: "t".into(),
+                    access: Access::Write,
+                }],
+                ttl_secs: None,
+            })
+            .unwrap();
+        assert!(created.token.starts_with("agit_"));
+        let a = Client::new(&base)
+            .with_token(Some(created.token.clone()))
+            .with_agent(Some("someone-else".into()));
+        let me = a.whoami().unwrap();
+        assert_eq!(
+            me.agent.as_deref(),
+            Some("agent-a"),
+            "bound identity must win over the header"
+        );
+        assert!(!me.root);
+        assert_eq!(
+            a.list_repos().unwrap().len(),
+            1,
+            "listing is filtered by scope"
+        );
+
+        // Acting as agent-a even though the header claims someone else.
+        let l = a
+            .claim_lease(
+                "t",
+                &LeaseCreate {
+                    holder: "x".into(),
+                    paths: vec!["src".into()],
+                    mode: Default::default(),
+                    ttl_secs: Some(60),
+                    note: None,
+                },
+            )
+            .unwrap();
+        let ev = root.events("t", 0).unwrap();
+        assert!(ev
+            .iter()
+            .any(|e| e.kind == "lease.claim" && e.actor.as_deref() == Some("agent-a")));
+        a.release_lease("t", &l.id).unwrap();
+
+        // Scope limits: no access to `other`, no admin on `t`.
+        assert!(matches!(
+            a.repo("other"),
+            Err(agit_core::Error::Forbidden(_))
+        ));
+        assert!(matches!(
+            a.set_policy("t", &Policy::default()),
+            Err(agit_core::Error::Forbidden(_))
+        ));
+        assert!(matches!(
+            a.create_token(&TokenCreate {
+                name: "x".into(),
+                agent: None,
+                scopes: vec![Scope {
+                    repo: "t".into(),
+                    access: Access::Read
+                }],
+                ttl_secs: None
+            }),
+            Err(agit_core::Error::Forbidden(_))
+        ));
+
+        // Read-only token can read but not write.
+        let ro = root
+            .create_token(&TokenCreate {
+                name: "reader".into(),
+                agent: None,
+                scopes: vec![Scope {
+                    repo: "*".into(),
+                    access: Access::Read,
+                }],
+                ttl_secs: Some(3600),
+            })
+            .unwrap();
+        let r = Client::new(&base).with_token(Some(ro.token.clone()));
+        assert_eq!(r.list_repos().unwrap().len(), 2);
+        assert!(matches!(
+            r.claim_lease(
+                "t",
+                &LeaseCreate {
+                    holder: "r".into(),
+                    paths: vec!["a".into()],
+                    mode: Default::default(),
+                    ttl_secs: None,
+                    note: None
+                }
+            ),
+            Err(agit_core::Error::Forbidden(_))
+        ));
+
+        // Expired token is rejected; deleted token too.
+        let exp = root
+            .create_token(&TokenCreate {
+                name: "short".into(),
+                agent: None,
+                scopes: vec![Scope {
+                    repo: "*".into(),
+                    access: Access::Read,
+                }],
+                ttl_secs: Some(0),
+            })
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(Client::new(&base)
+            .with_token(Some(exp.token))
+            .list_repos()
+            .is_err());
+        assert_eq!(root.tokens().unwrap().len(), 3);
+        root.delete_token(&created.info.id).unwrap();
+        assert!(a.list_repos().is_err());
+
+        // Audit log has entries.
+        let audit = fs::read_to_string(tmp_path.join("data/audit.jsonl")).unwrap();
+        assert!(audit.lines().count() >= 5);
+        assert!(audit.contains("\"status\":403"));
     })
     .await
     .unwrap();

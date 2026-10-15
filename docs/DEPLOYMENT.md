@@ -46,7 +46,7 @@ the bearer token is the only authentication, and TLS is the proxy's job.
 Install the release binaries (both `agit` and `agit-server`):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/agit-vcs/agit/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/shadow-kernel/agit/main/scripts/install.sh | sh
 # options: --version v0.1.0, --prefix /usr/local, --bin-dir DIR, --dry-run
 ```
 
@@ -79,7 +79,7 @@ agit push --create
 
 ## Docker
 
-Images are published to `ghcr.io/agit-vcs/agit` for `linux/amd64` and
+Images are published to `ghcr.io/shadow-kernel/agit` for `linux/amd64` and
 `linux/arm64`, tagged `<version>`, `<major.minor>` and `latest`. The image
 contains `agit-server`, the `agit` CLI, `git` (for `agit git import|export`)
 and the built web UI, runs as the unprivileged user `agit` (uid/gid 10001), and
@@ -90,13 +90,13 @@ docker run -d --name agit \
   -p 127.0.0.1:7878:7878 \
   -v agit-data:/data \
   -e AGIT_SERVER_TOKEN="$(openssl rand -hex 32)" \
-  ghcr.io/agit-vcs/agit:0.1.0
+  ghcr.io/shadow-kernel/agit:0.1.0
 docker logs -f agit
 ```
 
 Image defaults: `AGIT_DATA_DIR=/data`, `AGIT_LISTEN=0.0.0.0:7878`,
 `AGIT_WEB_DIR=/opt/agit/web`, `RUST_LOG=info,tower_http=info`. Container
-arguments are passed to `agit-server`, so `docker run ... ghcr.io/agit-vcs/agit
+arguments are passed to `agit-server`, so `docker run ... ghcr.io/shadow-kernel/agit
 --help` works. `tini` is PID 1, so `docker stop` delivers SIGTERM promptly.
 
 Bind mounts instead of a named volume need to be writable by uid 10001:
@@ -110,7 +110,7 @@ Use the CLI from the image (for example, to import a git repository on a host
 without agit installed):
 
 ```sh
-docker run --rm -v "$PWD":/work -w /work --entrypoint agit ghcr.io/agit-vcs/agit:0.1.0 --version
+docker run --rm -v "$PWD":/work -w /work --entrypoint agit ghcr.io/shadow-kernel/agit:0.1.0 --version
 docker exec agit agit --version
 ```
 
@@ -351,7 +351,7 @@ backups the same way on a schedule.
 3. Replace the binary and restart:
    - binary/systemd: install the new `agit-server` (and `agit`), unpack the
      new web tarball if you serve the UI, `systemctl restart agit-server`;
-   - Docker: `docker pull ghcr.io/agit-vcs/agit:<version>`, recreate the
+   - Docker: `docker pull ghcr.io/shadow-kernel/agit:<version>`, recreate the
      container (`docker compose pull && docker compose up -d`); the volume
      carries the data.
 4. Check `GET /api/v1/health` reports the new version and `agit pull` works

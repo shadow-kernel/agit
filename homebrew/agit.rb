@@ -1,40 +1,40 @@
 # Homebrew formula for agit. Template: the release workflow renders a copy
 # with the real version and SHA-256 values and attaches it to every GitHub
 # release as `agit.rb`. To publish, copy that rendered file into a tap
-# (for example github.com/agit-vcs/homebrew-tap as Formula/agit.rb) so users
+# (for example github.com/shadow-kernel/homebrew-tap as Formula/agit.rb) so users
 # can run:
 #
-#   brew install agit-vcs/tap/agit
+#   brew install shadow-kernel/tap/agit
 #
 # Or install straight from the release asset:
 #
-#   brew install --formula https://github.com/agit-vcs/agit/releases/download/v0.1.0/agit.rb
+#   brew install --formula https://github.com/shadow-kernel/agit/releases/download/v0.1.0/agit.rb
 #
 # Placeholders SHA256_<TARGET> are replaced by .github/workflows/release.yml.
 class Agit < Formula
   desc "Version control and collaboration for AI agents, with git's workflow"
-  homepage "https://github.com/agit-vcs/agit"
+  homepage "https://github.com/shadow-kernel/agit"
   version "0.1.0"
   license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
     on_arm do
-      url "https://github.com/agit-vcs/agit/releases/download/v#{version}/agit-#{version}-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/shadow-kernel/agit/releases/download/v#{version}/agit-#{version}-aarch64-apple-darwin.tar.gz"
       sha256 "SHA256_AARCH64_APPLE_DARWIN"
     end
     on_intel do
-      url "https://github.com/agit-vcs/agit/releases/download/v#{version}/agit-#{version}-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/shadow-kernel/agit/releases/download/v#{version}/agit-#{version}-x86_64-apple-darwin.tar.gz"
       sha256 "SHA256_X86_64_APPLE_DARWIN"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/agit-vcs/agit/releases/download/v#{version}/agit-#{version}-aarch64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/shadow-kernel/agit/releases/download/v#{version}/agit-#{version}-aarch64-unknown-linux-gnu.tar.gz"
       sha256 "SHA256_AARCH64_UNKNOWN_LINUX_GNU"
     end
     on_intel do
-      url "https://github.com/agit-vcs/agit/releases/download/v#{version}/agit-#{version}-x86_64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/shadow-kernel/agit/releases/download/v#{version}/agit-#{version}-x86_64-unknown-linux-gnu.tar.gz"
       sha256 "SHA256_X86_64_UNKNOWN_LINUX_GNU"
     end
   end
@@ -64,7 +64,7 @@ class Agit < Formula
       Start a local server with:
         brew services start agit
       Data: #{var}/agit. Deployment and security notes:
-        https://github.com/agit-vcs/agit/blob/main/docs/DEPLOYMENT.md
+        https://github.com/shadow-kernel/agit/blob/main/docs/DEPLOYMENT.md
     EOS
   end
 

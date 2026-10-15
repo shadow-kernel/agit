@@ -170,7 +170,8 @@ export interface CommitEntry extends Commit {
   id: ObjectId;
 }
 
-export type ChangeKind = "added" | "modified" | "deleted" | "type_changed";
+/** `renamed` only appears when rename detection is applied (CLI `diff`/`show`); the server's own diffs use the first four. */
+export type ChangeKind = "added" | "modified" | "deleted" | "type_changed" | "renamed";
 
 export interface ChangeSide {
   id: ObjectId;
@@ -183,6 +184,10 @@ export interface Change {
   kind: ChangeKind;
   old?: ChangeSide | null;
   new?: ChangeSide | null;
+  /** Previous path, for `kind: "renamed"`. */
+  from?: string;
+  /** Similarity in percent, for `kind: "renamed"`. */
+  similarity?: number;
 }
 
 export interface CommitDetail {

@@ -29,7 +29,7 @@ TOML at the repository root, tracked like any file:
 ```toml
 [submodule."web"]
 path   = "web"
-url    = "https://github.com/agit-vcs/agit-web"
+url    = "https://github.com/shadow-kernel/agit-web"
 branch = "main"
 update = "checkout"   # checkout | rebase | merge | none
 shallow = false

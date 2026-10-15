@@ -126,6 +126,7 @@ impl RepoHandle {
 pub struct AppState {
     pub data_dir: PathBuf,
     pub token: Option<String>,
+    pub auth: crate::auth::AuthStore,
     repos: RwLock<HashMap<String, Arc<RepoHandle>>>,
 }
 
@@ -156,6 +157,7 @@ impl AppState {
         }
         tracing::info!(count = repos.len(), "repositories loaded");
         Ok(AppState {
+            auth: crate::auth::AuthStore::open(&data_dir),
             data_dir,
             token,
             repos: RwLock::new(repos),

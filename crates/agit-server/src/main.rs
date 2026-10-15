@@ -1,6 +1,7 @@
 //! `agit-server`: hosts repositories over HTTP. See docs/API.md.
 
 mod api;
+mod auth;
 mod error;
 mod keys;
 mod knowledge;

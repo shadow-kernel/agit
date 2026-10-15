@@ -77,7 +77,7 @@ Platform:
 Operations and distribution:
 
 - `Dockerfile` (multi-stage, non-root, `/data` volume, health check) and
-  `docker-compose.yml`; images published to `ghcr.io/agit-vcs/agit`.
+  `docker-compose.yml`; images published to `ghcr.io/shadow-kernel/agit`.
 - `scripts/install.sh`: checksum-verified installer for macOS and Linux.
 - `.github/workflows/release.yml`: tagged releases with binaries for Linux
   (x86_64, aarch64), macOS (x86_64, arm64) and Windows (x86_64), the web UI
@@ -86,4 +86,4 @@ Operations and distribution:
   systemd unit and reverse-proxy examples in `deploy/`,
   `docs/DEPLOYMENT.md` and `docs/SECURITY.md`.
 
-[Unreleased]: https://github.com/agit-vcs/agit/commits/main
+[Unreleased]: https://github.com/shadow-kernel/agit/commits/main

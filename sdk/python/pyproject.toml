@@ -29,8 +29,8 @@ dependencies = []
 dev = ["pytest>=7"]
 
 [project.urls]
-Homepage = "https://github.com/agit-vcs/agit"
-Documentation = "https://github.com/agit-vcs/agit/blob/main/docs/API.md"
+Homepage = "https://github.com/shadow-kernel/agit"
+Documentation = "https://github.com/shadow-kernel/agit/blob/main/docs/API.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agit"]

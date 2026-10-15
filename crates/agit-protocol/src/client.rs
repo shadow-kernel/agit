@@ -109,6 +109,7 @@ fn map_err(e: ureq::Error) -> Error {
                     ),
                     "already_exists" => Error::AlreadyExists(b.error.message.into()),
                     "policy_violation" => Error::PolicyViolation(b.error.message),
+                    "forbidden" => Error::Forbidden(b.error.message),
                     _ => Error::Invalid(format!(
                         "server error {status} [{}]: {}",
                         b.error.code, b.error.message
@@ -348,6 +349,23 @@ impl Client {
     pub fn delete_webhook(&self, repo: &str, id: &str) -> Result<serde_json::Value> {
         let resp = self
             .req("DELETE", &format!("/repos/{repo}/webhooks/{id}"))
+            .call()
+            .map_err(map_err)?;
+        resp.into_json()
+            .map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
+    }
+    pub fn whoami(&self) -> Result<WhoAmI> {
+        self.get_json("/auth/whoami")
+    }
+    pub fn create_token(&self, req: &TokenCreate) -> Result<TokenCreated> {
+        self.send_json("POST", "/auth/tokens", req)
+    }
+    pub fn tokens(&self) -> Result<Vec<TokenInfo>> {
+        self.get_json("/auth/tokens")
+    }
+    pub fn delete_token(&self, id: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .req("DELETE", &format!("/auth/tokens/{id}"))
             .call()
             .map_err(map_err)?;
         resp.into_json()

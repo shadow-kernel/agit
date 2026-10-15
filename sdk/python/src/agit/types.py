@@ -22,7 +22,7 @@ COMMENT_KINDS = ("question", "suggestion", "blocker", "note")
 CHECK_STATUSES = ("pending", "success", "failure")
 MERGE_STRATEGIES = ("merge", "ff")
 LEASE_MODES = ("exclusive", "shared")
-CHANGE_KINDS = ("added", "modified", "deleted", "type_changed")
+CHANGE_KINDS = ("added", "modified", "deleted", "type_changed", "renamed")
 
 
 class Model:
@@ -151,17 +151,27 @@ class RefUpdateResponse(Model):
 
 @dataclass
 class Change(Model):
-    """One changed path. ``old``/``new`` are ``{"id", "mode"}`` sides (dicts)."""
+    """One changed path. ``old``/``new`` are ``{"id", "mode"}`` sides (dicts).
+
+    ``kind: "renamed"`` (with ``from`` and ``similarity`` on ``.raw``) only appears when
+    rename detection is applied; see :attr:`renamed_from`.
+    """
 
     path: str = ""
     kind: str = ""
     old: dict[str, Any] | None = None
     new: dict[str, Any] | None = None
+    similarity: int | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def letter(self) -> str:
-        return {"added": "A", "modified": "M", "deleted": "D", "type_changed": "T"}.get(self.kind, "?")
+        return {"added": "A", "modified": "M", "deleted": "D", "type_changed": "T", "renamed": "R"}.get(self.kind, "?")
+
+    @property
+    def renamed_from(self) -> str | None:
+        """Previous path for ``kind == "renamed"`` (the wire field ``from`` is a Python keyword)."""
+        return self.raw.get("from")
 
 
 @dataclass

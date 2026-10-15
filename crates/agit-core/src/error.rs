@@ -86,6 +86,9 @@ pub enum Error {
     #[error("not found: {0}")]
     NotFound(String),
 
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
     #[error("{0}")]
     Invalid(String),
 
@@ -131,6 +134,7 @@ impl Error {
             LockTimeout(_) => "lock_timeout",
             PolicyViolation(_) => "policy_violation",
             NotFound(_) => "not_found",
+            Forbidden(_) => "forbidden",
             Invalid(_) => "invalid",
             IoAt { .. } | Io(_) => "io",
             Serde(_) => "serde",

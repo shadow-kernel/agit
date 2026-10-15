@@ -636,6 +636,69 @@ pub struct WebhookCreate {
     pub secret: Option<String>,
 }
 
+// ---- auth -------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum Access {
+    Read,
+    Write,
+    Admin,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Scope {
+    /// Repository name, or `*` for every repository.
+    pub repo: String,
+    pub access: Access,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenCreate {
+    pub name: String,
+    /// Bind the token to an agent identity; requests made with it always act
+    /// as this agent regardless of `X-Agit-Agent`.
+    #[serde(default)]
+    pub agent: Option<String>,
+    pub scopes: Vec<Scope>,
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenInfo {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    pub scopes: Vec<Scope>,
+    pub created_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_ms: Option<i64>,
+    #[serde(default)]
+    pub created_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_ms: Option<i64>,
+}
+
+/// Returned once at creation; the plaintext token is never stored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenCreated {
+    pub token: String,
+    #[serde(flatten)]
+    pub info: TokenInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WhoAmI {
+    /// `root`, `anonymous`, or the token id.
+    pub principal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    pub root: bool,
+    pub scopes: Vec<Scope>,
+}
+
 /// Repository policy, enforced server-side at ref updates and PR merges.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Policy {

@@ -41,6 +41,9 @@ pub struct Agent(pub String);
 impl<St: Send + Sync> FromRequestParts<St> for Agent {
     type Rejection = Infallible;
     async fn from_request_parts(parts: &mut Parts, _: &St) -> Result<Self, Infallible> {
+        if let Some(ResolvedAgent(Some(a))) = parts.extensions.get::<ResolvedAgent>() {
+            return Ok(Agent(a.clone()));
+        }
         Ok(Agent(
             parts
                 .headers
@@ -53,14 +56,25 @@ impl<St: Send + Sync> FromRequestParts<St> for Agent {
     }
 }
 
-fn actor_of(headers: &HeaderMap) -> Actor {
+/// The authenticated principal (root in open mode).
+pub struct Auth(pub crate::auth::Principal);
+
+impl<St: Send + Sync> FromRequestParts<St> for Auth {
+    type Rejection = Infallible;
+    async fn from_request_parts(parts: &mut Parts, _: &St) -> Result<Self, Infallible> {
+        Ok(Auth(
+            parts
+                .extensions
+                .get::<crate::auth::Principal>()
+                .cloned()
+                .unwrap_or_else(crate::auth::Principal::anonymous_root),
+        ))
+    }
+}
+
+fn actor_of(headers: &HeaderMap, agent: &str) -> Actor {
     Actor {
-        id: headers
-            .get("x-agit-agent")
-            .and_then(|v| v.to_str().ok())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("anonymous")
-            .to_string(),
+        id: agent.to_string(),
         model: headers
             .get("x-agit-model")
             .and_then(|v| v.to_str().ok())
@@ -73,23 +87,92 @@ fn flag(q: &HashMap<String, String>, key: &str) -> bool {
     q.get(key).is_some_and(|v| v == "1" || v == "true")
 }
 
-async fn auth(State(state): S, req: Request, next: Next) -> Response {
-    if let Some(token) = &state.token {
-        let ok = req
-            .headers()
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer "))
-            .is_some_and(|t| t == token);
-        if !ok {
-            return ApiErr::Forbidden("missing or invalid bearer token".into()).into_response();
+async fn auth(State(state): S, mut req: Request, next: Next) -> Response {
+    use crate::auth::{required_access, Principal};
+    let bearer = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string);
+    let principal = match (&state.token, bearer.as_deref()) {
+        (Some(root), Some(b)) if b == root => Principal::root(),
+        (_, Some(b)) => match state.auth.resolve(b) {
+            Ok(Some(p)) => {
+                state.auth.touch(&p.id);
+                p
+            }
+            _ => {
+                let p = Principal {
+                    id: "invalid".into(),
+                    root: false,
+                    agent: None,
+                    scopes: vec![],
+                };
+                state
+                    .auth
+                    .audit(&p, None, req.method().as_str(), req.uri().path(), 403);
+                return ApiErr::Forbidden("invalid or expired bearer token".into()).into_response();
+            }
+        },
+        (Some(_), None) => {
+            let p = Principal {
+                id: "anonymous".into(),
+                root: false,
+                agent: None,
+                scopes: vec![],
+            };
+            state
+                .auth
+                .audit(&p, None, req.method().as_str(), req.uri().path(), 403);
+            return ApiErr::Forbidden("missing bearer token".into()).into_response();
         }
+        (None, None) => Principal::anonymous_root(),
+    };
+    let method = req.method().as_str().to_string();
+    let path = req.uri().path().to_string();
+    let (repo, needed) = required_access(&method, &path);
+    if !principal.allows(repo.as_deref(), needed) {
+        state
+            .auth
+            .audit(&principal, principal.agent.as_deref(), &method, &path, 403);
+        return ApiErr::Forbidden(format!(
+            "token lacks {needed:?} access{}",
+            repo.map(|r| format!(" to {r}")).unwrap_or_default()
+        ))
+        .into_response();
     }
-    next.run(req).await
+    let header_agent = req
+        .headers()
+        .get("x-agit-agent")
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let agent = principal.agent.clone().or(header_agent);
+    req.extensions_mut().insert(principal.clone());
+    req.extensions_mut().insert(ResolvedAgent(agent.clone()));
+    let resp = next.run(req).await;
+    if method != "GET" || !resp.status().is_success() {
+        state.auth.audit(
+            &principal,
+            agent.as_deref(),
+            &method,
+            &path,
+            resp.status().as_u16(),
+        );
+    }
+    resp
 }
+
+/// Agent identity after authentication: the token's bound agent wins over the header.
+#[derive(Clone)]
+pub struct ResolvedAgent(pub Option<String>);
 
 pub fn router(state: Arc<AppState>, web_dir: Option<&std::path::Path>) -> Router {
     let api = Router::new()
+        .route("/auth/whoami", get(whoami))
+        .route("/auth/tokens", get(list_tokens).post(create_token))
+        .route("/auth/tokens/{id}", delete(delete_token))
         .route("/repos", get(list_repos).post(create_repo))
         .route("/repos/{repo}", get(get_repo).delete(delete_repo))
         .route("/repos/{repo}/refs", get(list_refs))
@@ -184,6 +267,49 @@ pub fn router(state: Arc<AppState>, web_dir: Option<&std::path::Path>) -> Router
 }
 
 // ---------------------------------------------------------------------------
+// auth
+// ---------------------------------------------------------------------------
+
+async fn whoami(Auth(p): Auth, Agent(agent): Agent) -> Json<WhoAmI> {
+    let mut w = p.whoami();
+    if w.agent.is_none() && agent != "anonymous" {
+        w.agent = Some(agent);
+    }
+    Json(w)
+}
+
+async fn list_tokens(State(st): S) -> ApiResult<Json<Vec<TokenInfo>>> {
+    Ok(Json(st.auth.list()?))
+}
+
+async fn create_token(
+    State(st): S,
+    Auth(p): Auth,
+    Json(req): Json<TokenCreate>,
+) -> ApiResult<(StatusCode, Json<TokenCreated>)> {
+    // A principal may only grant what it holds itself.
+    for s in &req.scopes {
+        let repo = if s.repo == "*" {
+            None
+        } else {
+            Some(s.repo.as_str())
+        };
+        if (s.repo == "*" && !p.root) || !p.allows(repo, Access::Admin) {
+            return Err(ApiErr::Forbidden(format!(
+                "cannot grant {:?} on {}",
+                s.access, s.repo
+            )));
+        }
+    }
+    Ok((StatusCode::CREATED, Json(st.auth.create(req, &p.id)?)))
+}
+
+async fn delete_token(State(st): S, Path(id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
+    st.auth.delete(&id)?;
+    Ok(Json(serde_json::json!({ "deleted": id })))
+}
+
+// ---------------------------------------------------------------------------
 // repos
 // ---------------------------------------------------------------------------
 
@@ -194,10 +320,12 @@ async fn health() -> Json<Health> {
     })
 }
 
-async fn list_repos(State(st): S) -> ApiResult<Json<Vec<RepoSummary>>> {
+async fn list_repos(State(st): S, Auth(p): Auth) -> ApiResult<Json<Vec<RepoSummary>>> {
     let mut out = Vec::new();
     for r in st.list() {
-        out.push(r.summary()?);
+        if p.allows(Some(&r.meta.name), Access::Read) {
+            out.push(r.summary()?);
+        }
     }
     Ok(Json(out))
 }
@@ -814,12 +942,13 @@ async fn create_pull(
     State(st): S,
     Path(repo): Path<String>,
     headers: HeaderMap,
+    Agent(agent): Agent,
     Json(req): Json<PullCreate>,
 ) -> ApiResult<(StatusCode, Json<PullRequest>)> {
     let r = st.get(&repo)?;
     Ok((
         StatusCode::CREATED,
-        Json(PullStore::new(&r).create(req, actor_of(&headers))?),
+        Json(PullStore::new(&r).create(req, actor_of(&headers, &agent))?),
     ))
 }
 
@@ -914,11 +1043,12 @@ async fn merge_pull(
     State(st): S,
     Path((repo, n)): Path<(String, u64)>,
     headers: HeaderMap,
+    Agent(agent): Agent,
     body: Option<Json<MergeRequest>>,
 ) -> ApiResult<Json<MergeResponse>> {
     let r = st.get(&repo)?;
     let req = body.map(|b| b.0).unwrap_or_default();
-    let actor = actor_of(&headers);
+    let actor = actor_of(&headers, &agent);
     let resp = tokio::task::spawn_blocking(move || PullStore::new(&r).merge(n, req, &actor))
         .await
         .map_err(|e| ApiErr::BadRequest(e.to_string()))??;

@@ -26,7 +26,7 @@
 
 set -euo pipefail
 
-REPO_URL="https://github.com/agit-vcs/agit"
+REPO_URL="https://github.com/shadow-kernel/agit"
 EXECUTE=0
 ALLOW_DIRTY=0
 TAG_IT=1

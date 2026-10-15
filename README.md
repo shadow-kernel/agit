@@ -79,7 +79,7 @@ agit addresses each of these directly rather than wrapping git.
 Requires a Rust toolchain (1.80 or newer).
 
 ```sh
-git clone https://github.com/agit-vcs/agit
+git clone https://github.com/shadow-kernel/agit
 cd agit
 cargo build --release
 export PATH="$PWD/target/release:$PATH"
@@ -420,7 +420,7 @@ Status per item is marked. The first server exists today (`crates/agit-server`, 
 
 **Git bridge (`crates/agit-git-bridge`).** ✅ `agit git import <path> [--into dir]` imports a complete git history (merges, tags, modes, symlinks, submodule pins) with the original SHA kept in commit metadata and git trailers lifted into `intent`/`task`/`agent`; re-imports are incremental. `agit git export <dir>` writes agit history back into a git repository through `git fast-import`, referencing already-known git commits by SHA so repeated exports are incremental. agit's own git history round-trips (see Dogfooding). 📋 continuous two-way sync and serving the git protocol.
 
-**Deployment.** Single binary, Docker image (`ghcr.io/agit-vcs/agit`), Compose, systemd unit and reverse-proxy examples with TLS: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md); security model and hardening checklist: [docs/SECURITY.md](docs/SECURITY.md).
+**Deployment.** Single binary, Docker image (`ghcr.io/shadow-kernel/agit`), Compose, systemd unit and reverse-proxy examples with TLS: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md); security model and hardening checklist: [docs/SECURITY.md](docs/SECURITY.md).
 
 ## Performance goals
 

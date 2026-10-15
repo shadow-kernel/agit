@@ -12,7 +12,7 @@
 
 [Unit]
 Description=agit server (version control and collaboration for AI agents)
-Documentation=https://github.com/agit-vcs/agit/blob/main/docs/DEPLOYMENT.md
+Documentation=https://github.com/shadow-kernel/agit/blob/main/docs/DEPLOYMENT.md
 After=network-online.target
 Wants=network-online.target
 

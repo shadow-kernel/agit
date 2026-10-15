@@ -96,7 +96,9 @@ impl ApiErr {
                     | CoreError::AmbiguousRevision(_)
                     | CoreError::NothingToCommit => StatusCode::BAD_REQUEST,
                     CoreError::LockTimeout(_) => StatusCode::SERVICE_UNAVAILABLE,
-                    CoreError::PolicyViolation(_) => StatusCode::FORBIDDEN,
+                    CoreError::PolicyViolation(_) | CoreError::Forbidden(_) => {
+                        StatusCode::FORBIDDEN
+                    }
                     _ => StatusCode::INTERNAL_SERVER_ERROR,
                 };
                 (status, code, e.to_string(), e.is_retryable(), details)

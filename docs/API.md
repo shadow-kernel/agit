@@ -7,8 +7,15 @@ with the same codes as the CLI (`ref_conflict`, `object_not_found`,
 plain JSON objects (no envelope) unless noted.
 
 Headers:
-- `Authorization: Bearer <token>` required when the server runs with a token.
-- `X-Agit-Agent: <agent id>` identifies the acting agent for events, leases and PRs.
+- `Authorization: Bearer <token>`: the root token (`AGIT_SERVER_TOKEN`) or a scoped token from `POST /auth/tokens`. Required whenever a root token is configured; without one the server runs in open mode (every request acts as an anonymous root) for local development.
+- `X-Agit-Agent: <agent id>` identifies the acting agent for events, leases and PRs. A token bound to an agent overrides this header, so bound identities cannot be spoofed.
+
+## Auth
+- `GET /auth/whoami` -> `{principal, agent?, root, scopes}`
+- `POST /auth/tokens` (admin) `{name, agent?, scopes:[{repo:"*"|name, access:"read"|"write"|"admin"}], ttl_secs?}` -> `{token, id, name, agent, scopes, created_ms, expires_ms, created_by}`; the plaintext token is returned once. A principal can only grant scopes it holds; `*` scopes require the root token.
+- `GET /auth/tokens` (admin) -> `[token info]` (hashes only)
+- `DELETE /auth/tokens/{id}` (admin)
+Access needed per request: `GET` read; other methods write; repository create/delete, `policy`, `keys`, `webhooks`, `knowledge/rules` and `/auth/*` admin. Denied requests and every mutation are appended to `<data-dir>/audit.jsonl`.
 
 ## Health
 - `GET /health` -> `{"status":"ok","version":"0.1.0"}`
