@@ -4,7 +4,7 @@ import { api, type StreamStatus } from "../api/client";
 import type { Event } from "../api/types";
 import { useRepo } from "../components/RepoShell";
 import { AgentBadge, Badge, EmptyState, ErrorState, EventKindBadge, Sha, SkeletonRows } from "../components/ui";
-import { fullDate, timeAgo } from "../lib/format";
+import { countdown, fullDate, timeAgo } from "../lib/format";
 import { useAsync, useNow } from "../lib/useAsync";
 
 const MAX_EVENTS = 200;
@@ -144,7 +144,7 @@ function EventRow({ e, repo, now }: { e: Event; repo: string; now: number }) {
     summary = <><Link to={`${base}/pulls/${num("number")}`}>#{num("number")}</Link> {str("title") ? <span className="truncate" style={{ maxWidth: 360 }}>{str("title")}</span> : null} {str("decision") ? <Badge>{str("decision")}</Badge> : null} {str("merged_commit") ? <Sha id={str("merged_commit")} repo={repo} /> : null}</>;
   } else if (e.kind.startsWith("lease.")) {
     const paths = Array.isArray(d.paths) ? (d.paths as string[]) : [];
-    summary = <>{paths.map((p) => <code key={p}>{p}</code>)} {str("mode") ? <span className="muted">{str("mode")}</span> : null} {num("expires_ms") ? <span className="muted">expires {timeAgo(num("expires_ms")!, now).replace(" ago", "")}</span> : null} <Link className="small" to={`${base}/leases`}>leases</Link></>;
+    summary = <>{paths.map((p) => <code key={p}>{p}</code>)} {str("mode") ? <span className="muted">{str("mode")}</span> : null} {num("expires_ms") ? <span className="muted">{num("expires_ms")! > now ? `expires in ${countdown(num("expires_ms")!, now)}` : "expired"}</span> : null} <Link className="small" to={`${base}/leases`}>leases</Link></>;
   } else if (e.kind === "ref.update") {
     summary = <><code>{str("name")}</code> <span className="muted">→</span> <Sha id={str("new")} repo={repo} /></>;
   } else if (e.kind === "note.create") {

@@ -758,10 +758,10 @@ const coder2Branch = buildHistory(
 );
 
 // feature/tax-rates: conflicting edit of the same file from an older base (PR #3)
-const featureBase = mainAt(20);
+const featureBase = mainAt(19);
 const featureBranch = buildHistory(
   "acme/shop",
-  [{ msg: "Add Swiss VAT and jurisdiction listing", intent: "Prepare the CH launch", task: "SHOP-61", agent: agents.coder1, at: at(1, 17), changes: { "src/billing/tax.ts": F.taxConflict } }],
+  [{ msg: "Add Swiss VAT and jurisdiction listing", intent: "Prepare the CH launch", task: "SHOP-61", agent: agents.coder1, at: at(1, 17), changes: { "src/billing/tax.ts": F.taxConflict, "src/billing/invoice.ts": F.invoice1.replace('import { taxFor } from "./tax";', 'import { taxFor, knownJurisdictions } from "./tax";\n\nexport const JURISDICTIONS = knownJurisdictions();') } }],
   featureBase.snapshot,
   featureBase.id,
 );
@@ -818,7 +818,7 @@ const shop: RepoState = {
   branches: new Map([
     ["main", shopMainCommits],
     ["ws/coder-2", linear(shopMainCommits, coder2Branch)],
-    ["feature/tax-rates", linear(shopMainCommits.slice(0, 21), featureBranch)],
+    ["feature/tax-rates", linear(shopMainCommits.slice(0, 20), featureBranch)],
     ["ws/coder-1", linear(shopMainCommits, coder1Branch)],
     ["ws/reviewer-1", linear(shopMainCommits.slice(0, 20), reviewerBranch)],
   ]),
@@ -949,7 +949,7 @@ shop.pulls.push(
     created_ms: at(1, 17, 10),
     updated_ms: at(1, 18),
     merged_commit: null,
-    reviews: [{ reviewer: "reviewer-1", decision: "comment", body: "Conflicts with #2 on `src/billing/tax.ts`; rebase once that lands.", time_ms: at(1, 18) }],
+    reviews: [{ reviewer: "reviewer-1", decision: "comment", body: "Conflicts with main on `src/billing/invoice.ts` (the audit change from #1) and will conflict with #2 on `src/billing/tax.ts`; rebase once that lands.", time_ms: at(1, 18) }],
     comments: [{ id: 1, author: "reviewer-1", path: "src/billing/tax.ts", line: 5, kind: "blocker", body: "8.1% is correct from 2024, but the rate table in #2 restructures this file. Rebase first.", resolved: false, time_ms: at(1, 17, 50) }],
     checks: [
       { name: "tests", status: "failure", url: "https://ci.example.com/runs/839", time_ms: at(1, 17, 20) },
@@ -1323,8 +1323,12 @@ export const mockApi: Api = {
     const st = repoOf(name);
     if (!body.title?.trim()) throw new ApiError(400, "invalid", "title is required", false);
     const target = body.target ?? `refs/heads/${st.default_branch}`;
-    const src = resolve(st, body.source).commit;
-    const tgt = resolve(st, target).commit;
+    const srcRes = resolve(st, body.source);
+    const src = srcRes.commit;
+    const tgtRes = resolve(st, target);
+    const tgt = tgtRes.commit;
+    const tgtIds = new Set(tgtRes.history.map((c) => c.id));
+    const mergeBase = [...srcRes.history].reverse().find((c) => tgtIds.has(c.id)) ?? tgt;
     const now = Date.now();
     const pr: T.Pull = {
       number: Math.max(0, ...st.pulls.map((p) => p.number)) + 1,
@@ -1336,7 +1340,7 @@ export const mockApi: Api = {
       target: target.startsWith("refs/") ? target : `refs/heads/${target}`,
       source_id: src.id,
       target_id: tgt.id,
-      base_id: tgt.id,
+      base_id: mergeBase.id,
       author: { id: actingAgent(), model: null },
       state: "open",
       created_ms: now,
@@ -1354,7 +1358,7 @@ export const mockApi: Api = {
     await latency();
     const st = repoOf(name);
     const pr = st.pulls.find((p) => p.number === n) ?? notFound(`pull request #${n}`);
-    const srcHist = resolve(st, pr.source).history;
+    const srcHist = resolve(st, pr.source_id).history;
     const baseIdx = srcHist.findIndex((c) => c.id === pr.base_id);
     const commits = srcHist.slice(baseIdx + 1).reverse().map(listItem);
     const d = diffBetween(st, pr.base_id, pr.source_id);

@@ -350,6 +350,12 @@ mod tests {
 pub fn render_patch(store: &ObjectStore, changes: &[Change], context: usize) -> Result<String> {
     let mut out = String::new();
     for c in changes {
+        if c.old.as_ref().is_some_and(|s| s.mode == EntryMode::Submodule) || c.new.as_ref().is_some_and(|s| s.mode == EntryMode::Submodule) {
+            out.push_str(&format!("--- a/{0}\n+++ b/{0}\n", c.path));
+            if let Some(o) = &c.old { out.push_str(&format!("-Subproject commit {}\n", o.id)); }
+            if let Some(n) = &c.new { out.push_str(&format!("+Subproject commit {}\n", n.id)); }
+            continue;
+        }
         let old = match &c.old {
             Some(s) => store.read_blob(&s.id).unwrap_or_default(),
             None => vec![],

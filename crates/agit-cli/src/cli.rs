@@ -300,6 +300,11 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: crate::remote::PrCmd,
     },
+    /// Linked repositories pinned to a commit (.agitmodules).
+    Submodule {
+        #[command(subcommand)]
+        cmd: SubmoduleCmd,
+    },
     /// Run as an MCP server over stdio (tools for AI agents).
     Mcp {
         /// Remote used by pr/know/context tools.
@@ -312,6 +317,27 @@ pub enum Cmd {
         remote: String,
         #[command(subcommand)]
         cmd: crate::remote::KnowCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SubmoduleCmd {
+    /// Clone a repository into <path>, register it and stage the pin.
+    Add {
+        url: String,
+        path: String,
+        #[arg(long)]
+        branch: Option<String>,
+    },
+    /// Clone missing submodules and check out the pinned commits.
+    Update { paths: Vec<String> },
+    /// Show pinned vs checked-out commit per submodule.
+    Status,
+    /// Unregister a submodule (and delete its directory with --delete).
+    Remove {
+        path: String,
+        #[arg(long)]
+        delete: bool,
     },
 }
 
@@ -713,6 +739,39 @@ pub fn run(cli: Cli) -> Result<()> {
         Cmd::Pr { remote, cmd } => crate::remote::run_pr(&open(&cli.dir)?, json, &remote, cmd)?,
         Cmd::Know { remote, cmd } => crate::remote::run_know(&open(&cli.dir)?, json, &remote, cmd)?,
         Cmd::Mcp { remote } => crate::mcp::serve(cwd(&cli.dir)?, remote)?,
+        Cmd::Submodule { cmd } => {
+            let repo = open(&cli.dir)?;
+            let cwd = cwd(&cli.dir)?;
+            match cmd {
+                SubmoduleCmd::Add { url, path, branch } => {
+                    let rel = repo.rel_path(&cwd, std::path::Path::new(&path))?;
+                    let m = agit_protocol::submodule::add(&repo, &url, &rel, branch.as_deref())?;
+                    emit(json, &m, || println!("added submodule {} from {}", m.path, m.url));
+                }
+                SubmoduleCmd::Update { paths } => {
+                    let rels = rels(&repo, &cwd, &paths.iter().map(PathBuf::from).collect::<Vec<_>>())?;
+                    let r = agit_protocol::submodule::update(&repo, if rels.is_empty() { None } else { Some(&rels) })?;
+                    emit(json, &r, || {
+                        for u in &r {
+                            println!("{:<12} {} {}", u.action, u.path, u.commit.map(|c| c.short()).unwrap_or_default());
+                        }
+                    });
+                }
+                SubmoduleCmd::Status => {
+                    let r = agit_protocol::submodule::status(&repo)?;
+                    emit(json, &r, || {
+                        for s in &r {
+                            println!("{:<9} {} pinned={} actual={}", s.state, s.path, s.pinned.map(|c| c.short()).unwrap_or_else(|| "-".into()), s.actual.map(|c| c.short()).unwrap_or_else(|| "-".into()));
+                        }
+                    });
+                }
+                SubmoduleCmd::Remove { path, delete } => {
+                    let rel = repo.rel_path(&cwd, std::path::Path::new(&path))?;
+                    agit_protocol::submodule::remove(&repo, &rel, delete)?;
+                    emit(json, &serde_json::json!({ "removed": rel }), || println!("removed submodule {rel}"));
+                }
+            }
+        }
         Cmd::Ws { cmd } => run_ws(&cli.dir, json, cmd)?,
         Cmd::Events { since, follow, kind } => {
             let repo = open(&cli.dir)?;

@@ -47,8 +47,18 @@ pub fn walk(repo: &Repository, roots: Option<&[String]>) -> Result<Vec<WorkFile>
         .git_exclude(false)
         .ignore(false)
         .follow_links(false)
-        .add_custom_ignore_filename(".agitignore")
-        .filter_entry(|e| e.file_name() != AGIT_DIR);
+        .add_custom_ignore_filename(".agitignore");
+    let root_for_filter = work_dir.clone();
+    builder.filter_entry(move |e| {
+        if e.file_name() == AGIT_DIR {
+            return false;
+        }
+        // Never descend into a nested repository (submodule or stray clone).
+        if e.file_type().is_some_and(|t| t.is_dir()) && e.path() != root_for_filter {
+            return !e.path().join(AGIT_DIR).exists();
+        }
+        true
+    });
     let out = Mutex::new(Vec::new());
     let errors = Mutex::new(Vec::new());
     builder.build_parallel().run(|| {
@@ -232,6 +242,24 @@ fn compare_index_to_disk(
                 mode: e.mode,
                 size: e.size,
             };
+            if e.mode == EntryMode::Submodule {
+                return match crate::submodule::nested_head(repo, &e.path) {
+                    Ok(Some(head)) if head == e.id => (None, None),
+                    Ok(Some(head)) => (
+                        Some(Change {
+                            path: e.path.clone(),
+                            kind: ChangeKind::Modified,
+                            old: Some(old),
+                            new: Some(Side { id: head, mode: EntryMode::Submodule, size: 0 }),
+                        }),
+                        None,
+                    ),
+                    _ => (
+                        Some(Change { path: e.path.clone(), kind: ChangeKind::Deleted, old: Some(old), new: None }),
+                        None,
+                    ),
+                };
+            }
             let stat = match on_disk.get(e.path.as_str()) {
                 Some(s) => **s,
                 None => {
@@ -364,7 +392,13 @@ pub fn add(repo: &Repository, rel_paths: &[String], include_ignored: bool) -> Re
         for p in rel_paths {
             let abs = repo.abs_path(p);
             match fs::symlink_metadata(&abs) {
-                Ok(md) if md.is_dir() => dirs.push(p.clone()),
+                Ok(md) if md.is_dir() => {
+                    // A nested repository is handled as a submodule entry below;
+                    // never walk into it (the walker does not filter roots).
+                    if !abs.join(AGIT_DIR).exists() {
+                        dirs.push(p.clone());
+                    }
+                }
                 Ok(md) => {
                     if include_ignored || !is_ignored(repo, p) || index.get(p).is_some() {
                         files.push(WorkFile {
@@ -392,12 +426,45 @@ pub fn add(repo: &Repository, rel_paths: &[String], include_ignored: bool) -> Re
         }
     }
 
+    // Registered submodules under the requested roots: stage their HEAD.
+    let modules = crate::submodule::read_modules(repo)?;
+    let mut submodule_entries: Vec<IndexEntry> = Vec::new();
+    for m in &modules {
+        let requested = rel_paths.is_empty()
+            || rel_paths.iter().any(|p| p == &m.path || m.path.starts_with(&format!("{p}/")) || p.is_empty());
+        if !requested {
+            continue;
+        }
+        if let Some(head) = crate::submodule::nested_head(repo, &m.path)? {
+            submodule_entries.push(IndexEntry {
+                path: m.path.clone(),
+                id: head,
+                mode: EntryMode::Submodule,
+                size: 0,
+                mtime_ns: 0,
+                ino: 0,
+                conflict: false,
+            });
+        }
+    }
+    for e in submodule_entries {
+        let existing = index.get(&e.path).cloned();
+        match existing {
+            None => result.added.push(e.path.clone()),
+            Some(x) if x.id != e.id || x.mode != e.mode => result.updated.push(e.path.clone()),
+            Some(_) => result.unchanged += 1,
+        }
+        index.insert(e);
+    }
+    let submodule_paths: BTreeSet<String> = modules.iter().map(|m| m.path.clone()).collect();
+
     // Files tracked under explicit dirs but missing on disk -> deletions.
     let present: BTreeSet<&str> = files.iter().map(|f| f.rel.as_str()).collect();
     for d in &explicit_dirs {
         let gone: Vec<String> = index
             .under(d)
             .filter(|e| !present.contains(e.path.as_str()))
+            .filter(|e| !submodule_paths.contains(&e.path))
             .filter(|e| !repo.abs_path(&e.path).exists())
             .map(|e| e.path.clone())
             .collect();
@@ -564,6 +631,9 @@ pub fn checkout_tree(
         for c in &changes {
             let abs = repo.abs_path(&c.path);
             let from_side = from_sides.get(&c.path);
+            if from_side.is_some_and(|s| s.mode == EntryMode::Submodule) || c.new.as_ref().is_some_and(|s| s.mode == EntryMode::Submodule) {
+                continue;
+            }
             match (fs::symlink_metadata(&abs), from_side) {
                 (Ok(md), Some(fs_side)) => {
                     let stat = FileStat::from_metadata(&md);
@@ -600,7 +670,9 @@ pub fn checkout_tree(
         let abs = repo.abs_path(&c.path);
         match c.kind {
             ChangeKind::Deleted => {
-                if abs.exists() || fs::symlink_metadata(&abs).is_ok() {
+                if c.old.as_ref().is_some_and(|s| s.mode == EntryMode::Submodule) {
+                    // Leave the nested repository in place; `submodule` manages it.
+                } else if abs.exists() || fs::symlink_metadata(&abs).is_ok() {
                     fs::remove_file(&abs).map_err(io_at(&abs))?;
                 }
             }
@@ -727,6 +799,11 @@ pub fn snapshot_worktree(repo: &Repository) -> Result<ObjectId> {
     for e in entries {
         let (p, m, id, s) = e?;
         builder.insert(&p, m, id, s);
+    }
+    for m in crate::submodule::read_modules(repo)? {
+        if let Some(head) = crate::submodule::nested_head(repo, &m.path)? {
+            builder.insert(&m.path, EntryMode::Submodule, head, 0);
+        }
     }
     builder.write(store)
 }

@@ -4,6 +4,7 @@
 
 pub mod client;
 pub mod stream;
+pub mod submodule;
 pub mod sync;
 pub mod types;
 pub mod walk;

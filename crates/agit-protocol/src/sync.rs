@@ -241,8 +241,47 @@ pub fn pull(repo: &Repository, remote_name: &str, opts: agit_core::ops::MergeOpt
     Ok((f, m))
 }
 
+/// Clone another local repository (a plain directory path) into `dir`:
+/// copies reachable objects and branch refs, checks out its HEAD branch.
+pub fn clone_local(src_dir: &Path, dir: &Path) -> Result<(Repository, FetchResult)> {
+    let src = Repository::discover(src_dir)?;
+    let repo = Repository::init(dir)?;
+    let mut cfg = repo.config()?;
+    cfg.remotes.insert("origin".into(), RemoteConfig { url: src.work_dir().display().to_string() });
+    repo.save_config(&cfg)?;
+    let heads = src.refs().list(HEADS_PREFIX)?;
+    let wants: Vec<ObjectId> = heads.iter().map(|(_, id)| *id).collect();
+    let ids = walk::objects_to_send(src.store(), &wants, &[])?;
+    let bytes = stream::export(src.store(), &ids)?;
+    let (stored, _) = stream::import(repo.store(), &bytes)?;
+    let mut refs = Vec::new();
+    for (name, id) in &heads {
+        let short = &name[HEADS_PREFIX.len()..];
+        let tracking = format!("{REMOTES_PREFIX}origin/{short}");
+        repo.refs().update(&tracking, Expect::Any, Some(*id))?;
+        refs.push(FetchedRef { name: tracking, old: None, new: *id });
+    }
+    let branch = src.current_branch()?.unwrap_or_else(|| "main".into());
+    repo.set_head(&agit_core::Head::Branch(branch.clone()))?;
+    if let Some(id) = src.refs().read(&format!("{HEADS_PREFIX}{branch}"))? {
+        repo.refs().update(&format!("{HEADS_PREFIX}{branch}"), Expect::Absent, Some(id))?;
+        let tree = repo.store().read_commit(&id)?.tree;
+        agit_core::worktree::checkout_tree(&repo, None, &tree, true)?;
+    }
+    Ok((repo, FetchResult { remote: "origin".into(), refs, objects_received: stored }))
+}
+
+/// Is `url` a local directory rather than a server URL?
+pub fn is_local_url(url: &str) -> bool {
+    !url.contains("://") || url.starts_with("file://")
+}
+
 /// Clone `url` into `dir`.
 pub fn clone(url: &str, dir: &Path) -> Result<(Repository, FetchResult)> {
+    if is_local_url(url) {
+        let p = url.strip_prefix("file://").unwrap_or(url);
+        return clone_local(Path::new(p), dir);
+    }
     let parsed = RepoUrl::parse(url)?;
     let client = Client::new(parsed.base.clone());
     let summary = client.repo(&parsed.repo)?;

@@ -77,7 +77,7 @@ export default function Knowledge() {
                     <Link className="title" to={`${base}/${encodeURIComponent(n.id)}`}>{n.title}</Link>
                     {n.superseded_by ? <Badge tone="attention" title={`superseded by ${n.superseded_by}`}>superseded</Badge> : null}
                   </div>
-                  {n.excerpt ? <div className="excerpt">{n.excerpt}</div> : null}
+                  {n.excerpt ? <div className="excerpt">{n.excerpt.replace(/[`*_#]/g, "")}</div> : null}
                   <div className="tags">
                     {n.tags.map((t) => <Tag key={t} tag={t} onClick={() => toggleTag(t)} active={tags.includes(t)} />)}
                     {n.paths.map((p) => <code key={p} className="small muted">{p}</code>)}

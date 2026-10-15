@@ -21,6 +21,7 @@ pub mod ops;
 pub mod refs;
 pub mod repo;
 pub mod store;
+pub mod submodule;
 pub mod worktree;
 
 pub use error::{Error, Result};

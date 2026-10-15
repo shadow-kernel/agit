@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agit-sdk"
+version = "0.1.0"
+description = "Python client for the agit server HTTP API and the agit --json CLI (version control for AI agents)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT OR Apache-2.0"
+authors = [{ name = "agit contributors" }]
+keywords = ["agit", "version-control", "agents", "sdk"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Version Control",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/agit-vcs/agit"
+Documentation = "https://github.com/agit-vcs/agit/blob/main/docs/API.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agit"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/agit", "tests", "README.md", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "integration: tests that need a running agit-server (set AGIT_SERVER_URL)",
+]

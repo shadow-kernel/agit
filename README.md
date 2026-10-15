@@ -264,9 +264,18 @@ Every state change appends one JSON line to `.agit/events.jsonl` with a monotoni
 
 Notes (title, markdown body, typed tags, links to paths/symbols/commits/PRs, validity range, author or agent, confidence) stored as versioned objects next to the code and indexed server-side. Tag rules map path patterns to tags so an agent knows what to read before touching a path and what to tag after. Designed in [RFC 0003](docs/rfcs/0003-knowledge-base.md).
 
-### Submodules 📋 (format ✅)
+### Submodules ✅
 
-The tree format already has a `submodule` entry mode (`0o160000`) that pins a commit id of a linked repository. `.agitmodules` (TOML) maps path to url, branch and update policy. The `agit submodule add | update | status | foreach` commands and cross-repo PRs are planned; see [RFC 0007](docs/rfcs/0007-submodules.md).
+A submodule is a tree entry with mode `submodule` whose id is the pinned commit of a linked repository; `.agitmodules` (TOML) maps the path to its URL and branch. The outer walker never descends into a nested repository, so a checked-out submodule neither pollutes `status` nor gets hashed into the parent.
+
+```sh
+agit submodule add http://host:7878/api/v1/repos/core vendor/core   # clone, register, stage the pin
+agit commit -m "Vendor core"
+agit submodule status           # ok | modified | missing | unpinned, pinned vs checked-out commit
+agit submodule update           # clone missing ones, check out the pinned commits
+```
+
+Local directory paths work as URLs too (`agit submodule add ../lib vendor/lib`), which is also how `agit clone` of a local repository works. Changing the nested checkout shows up as a modification of the submodule path; `agit add vendor/core` re-pins it. [RFC 0007](docs/rfcs/0007-submodules.md).
 
 ## For AI agents
 
