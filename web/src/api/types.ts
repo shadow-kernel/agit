@@ -103,7 +103,7 @@ export interface CommitListItem extends Commit {
   id: ObjectId;
 }
 
-export type ChangeKind = "added" | "modified" | "deleted" | "type_changed";
+export type ChangeKind = "added" | "modified" | "deleted" | "type_changed" | "renamed";
 
 export interface ChangeSide {
   id: ObjectId;
@@ -116,13 +116,69 @@ export interface Change {
   kind: ChangeKind;
   old?: ChangeSide | null;
   new?: ChangeSide | null;
+  /** Previous path; only with `kind: "renamed"` (rename detection). */
+  from?: string | null;
+  /** Similarity in percent for renames (100 = identical content). */
+  similarity?: number | null;
 }
+
+/**
+ * `CommitDetail.signature`: `agit_core::sign::SignatureStatus` flattened with
+ * `trusted` (key registered for the signer under `/keys`).
+ */
+export type SignatureInfo =
+  | { status: "unsigned"; trusted: boolean }
+  | { status: "valid"; key_id: string; signer: string; public_key: string; trusted: boolean }
+  | { status: "invalid"; reason: string; trusted: boolean };
 
 export interface CommitDetail {
   id: ObjectId;
   commit: Commit;
   changes: Change[];
   patch: string;
+  signature?: SignatureInfo | null;
+  /** Up to 10 notes: those linking the commit (drafts included) first, then accepted notes covering a changed path. */
+  notes: NoteSummary[];
+}
+
+/** `GET /repos/{repo}/blame/{rev}?path=` (`agit_core::history::Blame`). */
+export interface BlameLine {
+  /** 1-based line number in the blamed revision. */
+  line: number;
+  commit: ObjectId;
+  text: string;
+}
+
+export interface BlameCommit {
+  id: ObjectId;
+  author: string;
+  agent?: string | null;
+  time_ms: number;
+  summary: string;
+  intent?: string | null;
+}
+
+export interface Blame {
+  path: string;
+  rev: ObjectId;
+  lines: BlameLine[];
+  commits: Record<ObjectId, BlameCommit>;
+  /** The history walk hit `max_commits`; older lines are attributed to the oldest commit examined. */
+  truncated: boolean;
+}
+
+/** `GET/POST /repos/{repo}/keys`. */
+export interface KeyEntry {
+  agent: string;
+  key_id: string;
+  public_key: string;
+  added_ms: number;
+  added_by: string;
+}
+
+export interface KeyCreateRequest {
+  agent: string;
+  public_key: string;
 }
 
 export interface TreeDir {
@@ -331,6 +387,12 @@ export interface Note {
   updated_ms: number;
   /** Absent or null when the note is current. */
   superseded_by?: string | null;
+  /** Commit the note was written or last validated against. */
+  valid_at?: ObjectId | null;
+  /** Machine-generated (e.g. from a merged PR); hidden until accepted. Omitted when false. */
+  draft?: boolean;
+  /** Computed on read: a covered path changed between `valid_at` and HEAD. */
+  stale?: boolean;
 }
 
 /** Item of `GET /knowledge/notes`: a subset of `Note` plus `excerpt` (no body, commits, pulls or created_ms). */
@@ -344,6 +406,16 @@ export interface NoteSummary {
   updated_ms: number;
   excerpt: string;
   superseded_by?: string | null;
+  valid_at?: ObjectId | null;
+  draft: boolean;
+  stale: boolean;
+  /** BM25 relevance; only present for `q=` queries. */
+  score?: number | null;
+}
+
+/** Item of `GET /knowledge/stale`. */
+export interface StaleNote extends NoteSummary {
+  changed_paths: string[];
 }
 
 export interface NoteCreateRequest {
@@ -354,6 +426,20 @@ export interface NoteCreateRequest {
   commits?: ObjectId[];
   pulls?: number[];
   confidence?: number;
+  /** Defaults to HEAD of the default branch. */
+  valid_at?: ObjectId;
+  draft?: boolean;
+}
+
+export interface NoteListQuery {
+  tags?: string[];
+  path?: string;
+  q?: string;
+  commit?: string;
+  pull?: number;
+  drafts?: boolean;
+  include_superseded?: boolean;
+  limit?: number;
 }
 
 export type NotePatchRequest = Partial<NoteCreateRequest> & { superseded_by?: string | null };
@@ -368,13 +454,32 @@ export interface TagRule {
   tags: string[];
 }
 
+export interface ContextFile {
+  path: string;
+  text: string;
+  truncated: boolean;
+}
+
 export interface Context {
   path: string;
+  /** Fresh notes first, then stale ones; drafts excluded. */
   notes: NoteSummary[];
   suggested_tags: string[];
   recent_commits: CommitListItem[];
   leases: Lease[];
   open_pulls: Pull[];
+  /** Agents holding a lease on the path or who committed to it in the last 24h. */
+  agents_active: string[];
+  /** Only with `include=files`; trimmed to `budget * 4` characters. */
+  files?: ContextFile[];
+}
+
+export interface ContextQuery {
+  limit?: number;
+  /** `include=files`. */
+  files?: boolean;
+  /** Approximate token budget for `files` (default 6000). */
+  budget?: number;
 }
 
 // ---- Policy -----------------------------------------------------------------
@@ -439,4 +544,46 @@ export interface AgentActivity {
   last_seen_ms: number;
   open_pulls: number;
   leases: number;
+}
+
+// ---- Auth -------------------------------------------------------------------
+
+export type Access = "read" | "write" | "admin";
+
+export interface Scope {
+  /** Repository name, or `*` for every repository. */
+  repo: string;
+  access: Access;
+}
+
+export interface TokenCreateRequest {
+  name: string;
+  /** Bind the token to an agent identity (overrides `X-Agit-Agent`). */
+  agent?: string;
+  scopes: Scope[];
+  ttl_secs?: number;
+}
+
+export interface TokenInfo {
+  id: string;
+  name: string;
+  agent?: string | null;
+  scopes: Scope[];
+  created_ms: number;
+  expires_ms?: number | null;
+  created_by: string;
+  last_used_ms?: number | null;
+}
+
+/** `POST /auth/tokens`: the plaintext `token` is returned exactly once. */
+export interface TokenCreated extends TokenInfo {
+  token: string;
+}
+
+export interface WhoAmI {
+  /** `root`, `anonymous`, or the token id. */
+  principal: string;
+  agent?: string | null;
+  root: boolean;
+  scopes: Scope[];
 }

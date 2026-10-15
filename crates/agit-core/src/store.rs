@@ -73,7 +73,8 @@ struct Inner {
     pack_dir: PathBuf,
     packs: RwLock<HashMap<String, Arc<PackIndex>>>,
     writer: Mutex<Option<SegmentWriter>>,
-    last_scan: Mutex<Option<Instant>>,
+    /// (time of last scan, pack dir mtime seen then).
+    last_scan: Mutex<Option<(Instant, Option<std::time::SystemTime>)>>,
     use_packs: bool,
 }
 
@@ -130,13 +131,34 @@ impl ObjectStore {
     // -- pack discovery -----------------------------------------------------
 
     /// Load or refresh indexes of all published segments.
+    ///
+    /// A publish renames a new `.idx` into the pack directory, which bumps
+    /// the directory's mtime, so one `stat` tells whether anything changed.
+    /// On file systems with coarse mtimes the time-based rescan interval is
+    /// the fallback.
     fn scan_packs(&self, force: bool) -> Result<()> {
+        let dir_mtime = fs::metadata(&self.inner.pack_dir)
+            .ok()
+            .and_then(|m| m.modified().ok());
         {
             let mut last = self.inner.last_scan.lock().unwrap();
-            if !force && last.is_some_and(|t| t.elapsed() < RESCAN_INTERVAL) {
-                return Ok(());
+            if !force {
+                if let Some((at, seen)) = *last {
+                    let unchanged = dir_mtime.is_some() && seen == dir_mtime;
+                    if unchanged && at.elapsed() < RESCAN_INTERVAL {
+                        return Ok(());
+                    }
+                    if unchanged
+                        && dir_mtime
+                            .is_some_and(|m| m.elapsed().is_ok_and(|e| e > Duration::from_secs(2)))
+                    {
+                        // mtime is old and unchanged: nothing new was published.
+                        *last = Some((Instant::now(), dir_mtime));
+                        return Ok(());
+                    }
+                }
             }
-            *last = Some(Instant::now());
+            *last = Some((Instant::now(), dir_mtime));
         }
         let rd = match fs::read_dir(&self.inner.pack_dir) {
             Ok(rd) => rd,
