@@ -171,7 +171,7 @@ function EventRow({ e, repo, now }: { e: Event; repo: string; now: number }) {
   const num = (k: string) => (typeof d[k] === "number" ? (d[k] as number) : undefined);
   let summary: React.ReactNode;
   if ((e.kind === "commit" || e.kind === "checkpoint" || e.kind === "merge") && str("id")) {
-    summary = <><Sha id={str("id")} repo={repo} /> {str("branch") ? <span className="muted">on {str("branch")}</span> : null} {str("intent") ? <span className="intent truncate" style={{ maxWidth: 360 }}>{str("intent")}</span> : null}</>;
+    summary = <><Sha id={str("id")} repo={repo} /> {str("branch") ? <span className="muted">on {str("branch")}</span> : null} {str("summary") ? <Link className="link-plain truncate" style={{ maxWidth: 320 }} to={`${base}/commit/${str("id")}`}>{str("summary")}</Link> : null} {str("intent") ? <span className="intent truncate" style={{ maxWidth: 360 }}>{str("intent")}</span> : null} {str("task") ? <Badge mono>{str("task")}</Badge> : null}</>;
   } else if (e.kind.startsWith("pull.") && num("number") !== undefined) {
     summary = <><Link to={`${base}/pulls/${num("number")}`}>#{num("number")}</Link> {str("title") ? <span className="truncate" style={{ maxWidth: 360 }}>{str("title")}</span> : null} {str("decision") ? <Badge>{str("decision")}</Badge> : null} {e.kind === "pull.comment" ? <><Badge>{str("kind") ?? "comment"}</Badge>{str("path") ? <code>{str("path")}</code> : null}</> : null} {str("merged_commit") ? <Sha id={str("merged_commit")} repo={repo} /> : null}</>;
   } else if (e.kind.startsWith("lease.")) {

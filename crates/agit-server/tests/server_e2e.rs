@@ -1139,7 +1139,13 @@ async fn scoped_tokens_bind_identity_and_limit_access() {
             })
             .unwrap();
         let r = Client::new(&base).with_token(Some(ro.token.clone()));
-        assert_eq!(r.list_repos().unwrap().len(), 2);
+        match r.list_repos() {
+            Ok(list) => assert_eq!(list.len(), 2, "reader token sees both repos"),
+            Err(e) => panic!(
+                "reader token rejected: {e:?} (tokens on server: {:?})",
+                root.tokens()
+            ),
+        }
         assert!(matches!(
             r.claim_lease(
                 "t",

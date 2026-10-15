@@ -135,3 +135,51 @@ fn add_update_status_with_local_clone() {
     assert!(app.work_dir().join("vendor/lib/.agit").exists());
     assert!(submodule::status(&app).unwrap().is_empty());
 }
+
+#[test]
+fn switch_clone_and_local_fetch_with_submodule() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib = Repository::init(&tmp.path().join("lib")).unwrap();
+    write(lib.work_dir(), "lib.rs", "v1\n");
+    commit_all(&lib, "lib v1");
+    let app = Repository::init(&tmp.path().join("app")).unwrap();
+    write(app.work_dir(), "main.rs", "fn main() {}\n");
+    commit_all(&app, "app");
+    submodule::add(
+        &app,
+        &lib.work_dir().display().to_string(),
+        "vendor/lib",
+        None,
+    )
+    .unwrap();
+    commit_all(&app, "add lib");
+
+    // Switching branches with a submodule entry must not touch the nested repo.
+    ops::switch(&app, "feature", true, false).unwrap();
+    write(app.work_dir(), "x.txt", "x\n");
+    commit_all(&app, "feature");
+    ops::switch(&app, "main", false, false).unwrap();
+    assert!(app.work_dir().join("vendor/lib/.agit").is_dir());
+    assert!(worktree::status(&app, true).unwrap().is_clean());
+    ops::switch(&app, "feature", false, false).unwrap();
+    assert!(worktree::status(&app, true).unwrap().is_clean());
+
+    // A clone without the nested checkout is clean; after update it is still clean.
+    let (clone, _) =
+        agit_protocol::sync::clone_local(app.work_dir(), &tmp.path().join("app2")).unwrap();
+    let st = worktree::status(&clone, true).unwrap();
+    assert!(st.is_clean(), "{st:?}");
+    submodule::update(&clone, None).unwrap();
+    assert!(worktree::status(&clone, true).unwrap().is_clean());
+    // Pull from the local path parent works (fetch_local).
+    let r = agit_protocol::sync::fetch(&clone, "origin", None).unwrap();
+    assert_eq!(r.remote, "origin");
+
+    // Inside the nested repo, fetching from its local-path origin brings new commits.
+    write(lib.work_dir(), "lib.rs", "v2\n");
+    let lib_c2 = commit_all(&lib, "lib v2");
+    let nested = Repository::open(&clone.work_dir().join("vendor/lib")).unwrap();
+    let f = agit_protocol::sync::fetch(&nested, "origin", None).unwrap();
+    assert!(f.refs.iter().any(|r| r.new == lib_c2.id));
+    assert!(nested.store().contains(&lib_c2.id));
+}

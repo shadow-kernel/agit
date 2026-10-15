@@ -176,6 +176,7 @@ pub fn run_push(
     branch: Option<String>,
     force: bool,
     create: bool,
+    tags: bool,
 ) -> Result<()> {
     let branch = match branch {
         Some(b) => b,
@@ -184,20 +185,32 @@ pub fn run_push(
             .ok_or_else(|| anyhow::anyhow!("not on a branch; specify one to push"))?,
     };
     let r = sync::push(repo, remote, &branch, force, create)?;
-    emit(json, &r, || {
-        if r.up_to_date {
-            println!("Everything up to date");
-        } else {
-            println!(
-                "To {remote}: {} -> {} ({} object(s) sent)",
-                r.old
-                    .map(|o| o.short())
-                    .unwrap_or_else(|| "[new branch]".into()),
-                r.new.short(),
-                r.objects_sent
-            );
-        }
-    });
+    let pushed_tags = if tags {
+        sync::push_tags(repo, remote)?
+    } else {
+        vec![]
+    };
+    emit(
+        json,
+        &serde_json::json!({ "push": r, "tags": pushed_tags }),
+        || {
+            if !pushed_tags.is_empty() {
+                println!("pushed {} tag(s)", pushed_tags.len());
+            }
+            if r.up_to_date {
+                println!("Everything up to date");
+            } else {
+                println!(
+                    "To {remote}: {} -> {} ({} object(s) sent)",
+                    r.old
+                        .map(|o| o.short())
+                        .unwrap_or_else(|| "[new branch]".into()),
+                    r.new.short(),
+                    r.objects_sent
+                );
+            }
+        },
+    );
     Ok(())
 }
 
@@ -259,6 +272,9 @@ pub fn run_pull(
         },
     );
     if conflicted {
+        if json {
+            std::process::exit(3);
+        }
         if let MergeResult::Conflicts { conflicts, .. } = m {
             return Err(agit_core::Error::MergeConflicts(conflicts.len()).into());
         }

@@ -20,6 +20,7 @@ pub fn report_error(e: &anyhow::Error, json: bool) -> u8 {
                 match core {
                     Error::MergeConflicts(_)
                     | Error::LeaseConflict { .. }
+                    | Error::NonFastForward { .. }
                     | Error::DirtyWorktree(_) => 3,
                     _ => 1,
                 }

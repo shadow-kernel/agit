@@ -81,6 +81,12 @@ impl RepoHandle {
 
     /// Resolve a revision: full ref, branch, tag, or (abbreviated) id.
     pub fn resolve(&self, rev: &str) -> Result<ObjectId> {
+        let base_end = rev.find(['~', '^']).unwrap_or(rev.len());
+        if base_end < rev.len() {
+            let (base, ops) = rev.split_at(base_end);
+            let id = self.resolve(base)?;
+            return agit_core::repo::apply_navigation(&self.store, id, ops, rev);
+        }
         if rev == "HEAD" {
             return self
                 .head()?

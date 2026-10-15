@@ -1,7 +1,7 @@
 //! Push, fetch, pull and clone between a local repository and a server.
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use agit_core::merge::is_ancestor;
 use agit_core::refs::{Expect, HEADS_PREFIX, TAGS_PREFIX};
@@ -42,6 +42,17 @@ pub struct FetchResult {
     pub objects_received: usize,
 }
 
+/// Configured remote without parsing its URL (local paths allowed).
+fn remote_or_local(repo: &Repository, name: &str) -> Result<((), RemoteConfig)> {
+    let cfg = repo.config()?;
+    let rc = cfg
+        .remotes
+        .get(name)
+        .cloned()
+        .ok_or_else(|| Error::Invalid(format!("no such remote: {name}")))?;
+    Ok(((), rc))
+}
+
 /// Look up a configured remote.
 pub fn remote(repo: &Repository, name: &str) -> Result<(RepoUrl, RemoteConfig)> {
     let cfg = repo.config()?;
@@ -54,7 +65,9 @@ pub fn remote(repo: &Repository, name: &str) -> Result<(RepoUrl, RemoteConfig)> 
 }
 
 pub fn add_remote(repo: &Repository, name: &str, url: &str) -> Result<()> {
-    RepoUrl::parse(url)?;
+    if !is_local_url(url) {
+        RepoUrl::parse(url)?;
+    }
     if name.is_empty() || name.contains(['/', ' ']) {
         return Err(Error::Invalid(format!("invalid remote name {name:?}")));
     }
@@ -175,11 +188,7 @@ pub fn push(
         if !force {
             let ff = repo.store().contains(&old) && is_ancestor(repo.store(), &old, &local)?;
             if !ff {
-                return Err(Error::Invalid(format!(
-                    "non-fast-forward: remote {branch} is at {} which is not an ancestor of {}; run `agit pull` first or push with --force",
-                    old.short(),
-                    local.short()
-                )));
+                return Err(Error::NonFastForward { remote: old, local });
             }
         }
     }
@@ -222,6 +231,92 @@ pub fn push(
     })
 }
 
+/// Push every local tag the remote does not have (objects included).
+pub fn push_tags(repo: &Repository, remote_name: &str) -> Result<Vec<String>> {
+    let (client, remote_repo) = client_for(repo, remote_name)?;
+    let remote_tags: std::collections::HashMap<String, ObjectId> = client
+        .refs(&remote_repo, TAGS_PREFIX)?
+        .into_iter()
+        .map(|r| (r.name, r.id))
+        .collect();
+    let remote_heads: Vec<ObjectId> = client
+        .refs(&remote_repo, HEADS_PREFIX)?
+        .into_iter()
+        .map(|r| r.id)
+        .filter(|id| repo.store().contains(id))
+        .collect();
+    let mut pushed = Vec::new();
+    for (name, id) in repo.refs().list(TAGS_PREFIX)? {
+        if remote_tags.get(&name) == Some(&id) {
+            continue;
+        }
+        upload_missing(repo, &client, &remote_repo, id, &remote_heads)?;
+        client.update_refs(
+            &remote_repo,
+            &RefUpdateRequest {
+                updates: vec![RefUpdate {
+                    name: name.clone(),
+                    expect: ExpectSpec::Any(true),
+                    new: Some(id),
+                }],
+                message: Some("push --tags".into()),
+            },
+        )?;
+        pushed.push(name);
+    }
+    Ok(pushed)
+}
+
+/// Fetch from a local repository path (used by submodules added from a
+/// directory): copies missing objects and updates `refs/remotes/<remote>/*`.
+fn fetch_local(
+    repo: &Repository,
+    remote_name: &str,
+    src_dir: &Path,
+    branches: Option<&[String]>,
+) -> Result<FetchResult> {
+    let src = Repository::discover(src_dir)?;
+    let heads = src.refs().list(HEADS_PREFIX)?;
+    let mut targets: Vec<(String, ObjectId)> = Vec::new();
+    for (name, id) in &heads {
+        let short = &name[HEADS_PREFIX.len()..];
+        if branches.is_none_or(|b| b.iter().any(|x| x == short)) {
+            targets.push((format!("{REMOTES_PREFIX}{remote_name}/{short}"), *id));
+        }
+    }
+    for (name, id) in src.refs().list(TAGS_PREFIX)? {
+        targets.push((name, id));
+    }
+    let wants: Vec<ObjectId> = targets
+        .iter()
+        .map(|(_, id)| *id)
+        .filter(|id| !repo.store().contains(id))
+        .collect();
+    let mut received = 0;
+    if !wants.is_empty() {
+        let haves = local_tips(repo)?;
+        let ids = walk::objects_to_send(src.store(), &wants, &haves)?;
+        let bytes = stream::export(src.store(), &ids)?;
+        received = stream::import(repo.store(), &bytes)?.0;
+    }
+    let mut out = Vec::new();
+    for (name, id) in targets {
+        let old = repo.refs().read(&name)?;
+        if old != Some(id) {
+            if name.starts_with(TAGS_PREFIX) && old.is_some() {
+                continue;
+            }
+            repo.refs().update(&name, Expect::Any, Some(id))?;
+            out.push(FetchedRef { name, old, new: id });
+        }
+    }
+    Ok(FetchResult {
+        remote: remote_name.into(),
+        refs: out,
+        objects_received: received,
+    })
+}
+
 /// Fetch branches (all when `branches` is None) and tags into
 /// `refs/remotes/<remote>/*` and `refs/tags/*`.
 pub fn fetch(
@@ -229,6 +324,16 @@ pub fn fetch(
     remote_name: &str,
     branches: Option<&[String]>,
 ) -> Result<FetchResult> {
+    let (_, rc) = remote_or_local(repo, remote_name)?;
+    if is_local_url(&rc.url) {
+        let p = rc.url.strip_prefix("file://").unwrap_or(&rc.url);
+        let dir = if Path::new(p).is_relative() {
+            repo.work_dir().join(p)
+        } else {
+            PathBuf::from(p)
+        };
+        return fetch_local(repo, remote_name, &dir, branches);
+    }
     let (client, remote_repo) = client_for(repo, remote_name)?;
     let heads = client.refs(&remote_repo, HEADS_PREFIX)?;
     let tags = client.refs(&remote_repo, TAGS_PREFIX)?;

@@ -7,7 +7,7 @@ import { DiffView, type LineAnnotation } from "../components/DiffView";
 import { Markdown } from "../components/Markdown";
 import { useRepo } from "../components/RepoShell";
 import { toast } from "../components/Toasts";
-import { AgentBadge, Avatar, Badge, Banner, ChangeKindBadge, DiffStat, EmptyState, ErrorState, PullStateBadge, Sha, Skeleton, TaskChip, type Tone } from "../components/ui";
+import { AgentBadge, Avatar, Badge, Banner, ChangeKindBadge, ChangePath, DiffStat, EmptyState, ErrorState, PullStateBadge, Sha, Skeleton, TaskChip, type Tone } from "../components/ui";
 import { fullDate, pluralize, refShort, timeAgo } from "../lib/format";
 import { useAsync, useMutation } from "../lib/useAsync";
 
@@ -373,7 +373,7 @@ function FilesChanged({ d, setData }: { d: PullDetailT; setData: (u: PullDetailT
           {diff.data.changes.map((ch) => (
             <div key={ch.path} className="box-row">
               <ChangeKindBadge kind={ch.kind} />
-              <a href={`#diff-${encodeURIComponent(ch.path)}`} className="grow truncate">{ch.path}</a>
+              <a href={`#diff-${encodeURIComponent(ch.path)}`} className="grow truncate"><ChangePath change={ch} /></a>
               {d.conflicts.includes(ch.path) ? <Badge tone="danger">conflict</Badge> : null}
               {d.pr.comments.filter((c) => c.path === ch.path).length ? <span className="muted small">💬 {d.pr.comments.filter((c) => c.path === ch.path).length}</span> : null}
             </div>

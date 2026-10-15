@@ -56,6 +56,40 @@ impl<St: Send + Sync> FromRequestParts<St> for Agent {
     }
 }
 
+/// JSON body extractor whose rejection uses the error envelope.
+pub struct AJson<T>(pub T);
+
+impl<St: Send + Sync, T: serde::de::DeserializeOwned> axum::extract::FromRequest<St> for AJson<T> {
+    type Rejection = ApiErr;
+    async fn from_request(req: Request, state: &St) -> Result<Self, ApiErr> {
+        match axum::Json::<T>::from_request(req, state).await {
+            Ok(axum::Json(v)) => Ok(AJson(v)),
+            Err(rej) => Err(ApiErr::BadRequest(format!(
+                "invalid JSON body: {}",
+                rej.body_text()
+            ))),
+        }
+    }
+}
+
+/// `Option<AJson<T>>`: an empty body is `None`, anything else must parse.
+impl<St: Send + Sync, T: serde::de::DeserializeOwned> axum::extract::OptionalFromRequest<St>
+    for AJson<T>
+{
+    type Rejection = ApiErr;
+    async fn from_request(req: Request, _state: &St) -> Result<Option<Self>, ApiErr> {
+        let bytes = axum::body::to_bytes(req.into_body(), 64 * 1024 * 1024)
+            .await
+            .map_err(|e| ApiErr::BadRequest(format!("cannot read body: {e}")))?;
+        if bytes.iter().all(|b| b.is_ascii_whitespace()) {
+            return Ok(None);
+        }
+        serde_json::from_slice(&bytes)
+            .map(|v| Some(AJson(v)))
+            .map_err(|e| ApiErr::BadRequest(format!("invalid JSON body: {e}")))
+    }
+}
+
 /// The authenticated principal (root in open mode).
 pub struct Auth(pub crate::auth::Principal);
 
@@ -285,7 +319,7 @@ async fn list_tokens(State(st): S) -> ApiResult<Json<Vec<TokenInfo>>> {
 async fn create_token(
     State(st): S,
     Auth(p): Auth,
-    Json(req): Json<TokenCreate>,
+    AJson(req): AJson<TokenCreate>,
 ) -> ApiResult<(StatusCode, Json<TokenCreated>)> {
     // A principal may only grant what it holds itself.
     for s in &req.scopes {
@@ -332,7 +366,7 @@ async fn list_repos(State(st): S, Auth(p): Auth) -> ApiResult<Json<Vec<RepoSumma
 
 async fn create_repo(
     State(st): S,
-    Json(req): Json<CreateRepo>,
+    AJson(req): AJson<CreateRepo>,
 ) -> ApiResult<(StatusCode, Json<RepoSummary>)> {
     let r = st.create(&req.name, req.default_branch.as_deref())?;
     Ok((StatusCode::CREATED, Json(r.summary()?)))
@@ -374,7 +408,7 @@ async fn update_refs(
     State(st): S,
     Path(repo): Path<String>,
     Agent(agent): Agent,
-    Json(req): Json<RefUpdateRequest>,
+    AJson(req): AJson<RefUpdateRequest>,
 ) -> ApiResult<Json<RefUpdateResponse>> {
     let r = st.get(&repo)?;
     for u in &req.updates {
@@ -503,7 +537,7 @@ async fn list_tags(State(st): S, Path(repo): Path<String>) -> ApiResult<Json<Vec
 async fn missing_objects(
     State(st): S,
     Path(repo): Path<String>,
-    Json(req): Json<IdList>,
+    AJson(req): AJson<IdList>,
 ) -> ApiResult<Json<MissingResponse>> {
     let r = st.get(&repo)?;
     Ok(Json(MissingResponse {
@@ -572,7 +606,7 @@ async fn get_object_json(
 async fn fetch_objects(
     State(st): S,
     Path(repo): Path<String>,
-    Json(req): Json<FetchRequest>,
+    AJson(req): AJson<FetchRequest>,
 ) -> ApiResult<Response> {
     let r = st.get(&repo)?;
     let bytes = tokio::task::spawn_blocking(move || -> agit_core::Result<Vec<u8>> {
@@ -861,9 +895,18 @@ async fn create_lease(
     State(st): S,
     Path(repo): Path<String>,
     Agent(agent): Agent,
-    Json(req): Json<LeaseCreate>,
+    Auth(p): Auth,
+    AJson(req): AJson<LeaseCreate>,
 ) -> ApiResult<(StatusCode, Json<LeaseJson>)> {
     let r = st.get(&repo)?;
+    // A token bound to an agent always acts as that agent.
+    let req = match &p.agent {
+        Some(bound) => LeaseCreate {
+            holder: bound.clone(),
+            ..req
+        },
+        None => req,
+    };
     let lease = r.leases.claim(LeaseRequest {
         holder: req.holder.clone(),
         paths: req.paths,
@@ -879,9 +922,17 @@ async fn create_lease(
 async fn check_lease(
     State(st): S,
     Path(repo): Path<String>,
-    Json(req): Json<LeaseCheck>,
+    Auth(p): Auth,
+    AJson(req): AJson<LeaseCheck>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let r = st.get(&repo)?;
+    let req = match &p.agent {
+        Some(bound) => LeaseCheck {
+            holder: bound.clone(),
+            ..req
+        },
+        None => req,
+    };
     agit_core::ops::enforce_leases(&r.leases, &req.holder, &req.paths)?;
     Ok(Json(
         serde_json::json!({ "allowed": true, "holder": req.holder, "paths": req.paths }),
@@ -907,7 +958,7 @@ async fn renew_lease(
     State(st): S,
     Path((repo, id)): Path<(String, String)>,
     Agent(agent): Agent,
-    Json(req): Json<LeaseRenew>,
+    AJson(req): AJson<LeaseRenew>,
 ) -> ApiResult<Json<LeaseJson>> {
     let r = st.get(&repo)?;
     let l = r.leases.renew(&id, Duration::from_secs(req.ttl_secs))?;
@@ -943,7 +994,7 @@ async fn create_pull(
     Path(repo): Path<String>,
     headers: HeaderMap,
     Agent(agent): Agent,
-    Json(req): Json<PullCreate>,
+    AJson(req): AJson<PullCreate>,
 ) -> ApiResult<(StatusCode, Json<PullRequest>)> {
     let r = st.get(&repo)?;
     Ok((
@@ -991,7 +1042,7 @@ async fn update_pull(
     State(st): S,
     Path((repo, n)): Path<(String, u64)>,
     Agent(agent): Agent,
-    Json(req): Json<PullUpdate>,
+    AJson(req): AJson<PullUpdate>,
 ) -> ApiResult<Json<PullRequest>> {
     let r = st.get(&repo)?;
     Ok(Json(PullStore::new(&r).update(n, req, &agent)?))
@@ -1001,7 +1052,7 @@ async fn comment_pull(
     State(st): S,
     Path((repo, n)): Path<(String, u64)>,
     Agent(agent): Agent,
-    Json(req): Json<CommentCreate>,
+    AJson(req): AJson<CommentCreate>,
 ) -> ApiResult<(StatusCode, Json<Comment>)> {
     let r = st.get(&repo)?;
     Ok((
@@ -1023,7 +1074,7 @@ async fn review_pull(
     State(st): S,
     Path((repo, n)): Path<(String, u64)>,
     Agent(agent): Agent,
-    Json(req): Json<ReviewCreate>,
+    AJson(req): AJson<ReviewCreate>,
 ) -> ApiResult<Json<PullRequest>> {
     let r = st.get(&repo)?;
     Ok(Json(PullStore::new(&r).review(n, req, &agent)?))
@@ -1033,7 +1084,7 @@ async fn check_pull(
     State(st): S,
     Path((repo, n)): Path<(String, u64)>,
     Agent(agent): Agent,
-    Json(req): Json<CheckCreate>,
+    AJson(req): AJson<CheckCreate>,
 ) -> ApiResult<Json<PullRequest>> {
     let r = st.get(&repo)?;
     Ok(Json(PullStore::new(&r).check(n, req, &agent)?))
@@ -1044,7 +1095,7 @@ async fn merge_pull(
     Path((repo, n)): Path<(String, u64)>,
     headers: HeaderMap,
     Agent(agent): Agent,
-    body: Option<Json<MergeRequest>>,
+    body: Option<AJson<MergeRequest>>,
 ) -> ApiResult<Json<MergeResponse>> {
     let r = st.get(&repo)?;
     let req = body.map(|b| b.0).unwrap_or_default();
@@ -1105,7 +1156,7 @@ async fn create_note(
     State(st): S,
     Path(repo): Path<String>,
     Agent(agent): Agent,
-    Json(req): Json<NoteCreate>,
+    AJson(req): AJson<NoteCreate>,
 ) -> ApiResult<(StatusCode, Json<Note>)> {
     let r = st.get(&repo)?;
     Ok((
@@ -1123,7 +1174,7 @@ async fn patch_note(
     State(st): S,
     Path((repo, id)): Path<(String, String)>,
     Agent(agent): Agent,
-    Json(req): Json<NotePatch>,
+    AJson(req): AJson<NotePatch>,
 ) -> ApiResult<Json<Note>> {
     let r = st.get(&repo)?;
     Ok(Json(NoteStore::new(&r).patch(&id, req, &agent)?))
@@ -1143,7 +1194,7 @@ async fn validate_note(
     State(st): S,
     Path((repo, id)): Path<(String, String)>,
     Agent(agent): Agent,
-    body: Option<Json<ValidateRequest>>,
+    body: Option<AJson<ValidateRequest>>,
 ) -> ApiResult<Json<Note>> {
     let r = st.get(&repo)?;
     let rev = body.and_then(|b| b.0.rev).filter(|s| !s.is_empty());
@@ -1158,7 +1209,7 @@ async fn accept_note(
     State(st): S,
     Path((repo, id)): Path<(String, String)>,
     Agent(agent): Agent,
-    body: Option<Json<NotePatch>>,
+    body: Option<AJson<NotePatch>>,
 ) -> ApiResult<Json<Note>> {
     let r = st.get(&repo)?;
     Ok(Json(NoteStore::new(&r).accept(
@@ -1196,7 +1247,7 @@ async fn put_rules(
     State(st): S,
     Path(repo): Path<String>,
     Agent(agent): Agent,
-    Json(rules): Json<Vec<TagRule>>,
+    AJson(rules): AJson<Vec<TagRule>>,
 ) -> ApiResult<Json<Vec<TagRule>>> {
     let r = st.get(&repo)?;
     Ok(Json(NoteStore::new(&r).set_rules(rules, &agent)?))
@@ -1439,7 +1490,7 @@ async fn put_policy(
     State(st): S,
     Path(repo): Path<String>,
     Agent(agent): Agent,
-    Json(p): Json<Policy>,
+    AJson(p): AJson<Policy>,
 ) -> ApiResult<Json<Policy>> {
     let r = st.get(&repo)?;
     Ok(Json(crate::policy::PolicyStore::new(&r).set(p, &agent)?))
@@ -1458,7 +1509,7 @@ async fn add_key(
     State(st): S,
     Path(repo): Path<String>,
     Agent(agent): Agent,
-    Json(req): Json<KeyCreate>,
+    AJson(req): AJson<KeyCreate>,
 ) -> ApiResult<(StatusCode, Json<KeyEntry>)> {
     let r = st.get(&repo)?;
     Ok((
@@ -1490,7 +1541,7 @@ async fn create_webhook(
     State(st): S,
     Path(repo): Path<String>,
     Agent(agent): Agent,
-    Json(req): Json<WebhookCreate>,
+    AJson(req): AJson<WebhookCreate>,
 ) -> ApiResult<(StatusCode, Json<Webhook>)> {
     let r = st.get(&repo)?;
     Ok((

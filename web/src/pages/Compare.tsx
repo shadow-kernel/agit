@@ -4,7 +4,7 @@ import { api } from "../api/client";
 import { CommitList } from "../components/CommitList";
 import { DiffView } from "../components/DiffView";
 import { useRepo } from "../components/RepoShell";
-import { Banner, ChangeKindBadge, DiffStat, EmptyState, ErrorState, Skeleton, SkeletonRows } from "../components/ui";
+import { Banner, ChangeKindBadge, ChangePath, DiffStat, EmptyState, ErrorState, Skeleton, SkeletonRows } from "../components/ui";
 import { pluralize, shortId, summaryLine } from "../lib/format";
 import { useAsync } from "../lib/useAsync";
 
@@ -138,7 +138,7 @@ function CompareResult({ base, head, isBranch }: { base: string; head: string; i
             return (
               <div key={ch.path} className="box-row">
                 <ChangeKindBadge kind={ch.kind} />
-                <a href={`#diff-${encodeURIComponent(ch.path)}`} className="grow truncate">{ch.path}</a>
+                <a href={`#diff-${encodeURIComponent(ch.path)}`} className="grow truncate"><ChangePath change={ch} /></a>
                 {s ? <DiffStat add={s.added} del={s.removed} /> : null}
                 {ch.kind !== "deleted" ? <Link className="btn sm ghost" to={`${basePath}/blob/${encodeURIComponent(head)}/${ch.path}`}>view</Link> : null}
               </div>

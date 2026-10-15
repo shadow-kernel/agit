@@ -21,7 +21,7 @@ use crate::output::{emit, fmt_time, parse_duration};
 )]
 pub struct Cli {
     /// Machine-readable JSON output (stable envelope: {ok, result|error}).
-    #[arg(long, global = true, env = "AGIT_JSON")]
+    #[arg(long, global = true, env = "AGIT_JSON", value_parser = clap::builder::FalseyValueParser::new())]
     pub json: bool,
     /// Run as if started in this directory.
     #[arg(short = 'C', global = true, value_name = "DIR")]
@@ -355,6 +355,9 @@ pub enum Cmd {
         /// Create the remote repository if it does not exist.
         #[arg(long)]
         create: bool,
+        /// Also push every local tag.
+        #[arg(long)]
+        tags: bool,
     },
     /// Download branches and tags from a remote into refs/remotes/<remote>/.
     Fetch {
@@ -1275,6 +1278,10 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
             });
             if conflicted {
+                if json {
+                    // The result document already describes the conflicts.
+                    std::process::exit(3);
+                }
                 if let MergeResult::Conflicts { conflicts, .. } = r {
                     return Err(agit_core::Error::MergeConflicts(conflicts.len()).into());
                 }
@@ -1321,7 +1328,8 @@ pub fn run(cli: Cli) -> Result<()> {
             branch,
             force,
             create,
-        } => crate::remote::run_push(&open(&cli.dir)?, json, &remote, branch, force, create)?,
+            tags,
+        } => crate::remote::run_push(&open(&cli.dir)?, json, &remote, branch, force, create, tags)?,
         Cmd::Fetch { remote, branches } => {
             crate::remote::run_fetch(&open(&cli.dir)?, json, &remote, &branches)?
         }
@@ -1370,6 +1378,9 @@ pub fn run(cli: Cli) -> Result<()> {
                 },
             );
             if !ok {
+                if json {
+                    std::process::exit(1);
+                }
                 bail!("commit {} has no valid signature", id.short());
             }
         }
@@ -2208,6 +2219,9 @@ fn print_apply(json: bool, r: &agit_core::history::ApplyResult, verb: &str) -> R
         }
     });
     if let ApplyResult::Conflicts { conflicts, .. } = r {
+        if json {
+            std::process::exit(3);
+        }
         return Err(agit_core::Error::MergeConflicts(conflicts.len()).into());
     }
     Ok(())

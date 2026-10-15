@@ -424,56 +424,33 @@ impl Repository {
         if rev.is_empty() {
             return Err(Error::UnknownRevision(rev.to_string()));
         }
+        // `name@{n}`: n-th previous position from the reflog (0 = current).
+        if let Some((base, rest)) = rev.split_once("@{") {
+            let n: usize = rest
+                .strip_suffix('}')
+                .and_then(|x| x.parse().ok())
+                .ok_or_else(|| Error::UnknownRevision(rev.to_string()))?;
+            let mut entries = if base == "HEAD" || base.is_empty() {
+                self.head_reflog()?
+            } else {
+                let full = if base.starts_with("refs/") {
+                    base.to_string()
+                } else {
+                    format!("{HEADS_PREFIX}{base}")
+                };
+                self.refs.reflog(&full)?
+            };
+            entries.reverse();
+            return entries
+                .get(n)
+                .and_then(|e| e.new)
+                .ok_or_else(|| Error::UnknownRevision(rev.to_string()));
+        }
         // Split off trailing navigation operators.
         let base_end = rev.find(['~', '^']).unwrap_or(rev.len());
         let (base, ops) = rev.split_at(base_end);
-        let mut id = self.resolve_base(base)?;
-        let mut chars = ops.chars().peekable();
-        while let Some(op) = chars.next() {
-            let mut num = String::new();
-            while let Some(c) = chars.peek() {
-                if c.is_ascii_digit() {
-                    num.push(*c);
-                    chars.next();
-                } else {
-                    break;
-                }
-            }
-            match op {
-                '~' => {
-                    let n: usize = if num.is_empty() {
-                        1
-                    } else {
-                        num.parse().unwrap_or(1)
-                    };
-                    for _ in 0..n {
-                        id = self.first_parent(&id, rev)?;
-                    }
-                }
-                '^' => {
-                    let n: usize = if num.is_empty() {
-                        1
-                    } else {
-                        num.parse().unwrap_or(1)
-                    };
-                    let c = self.store.read_commit(&id)?;
-                    id = *c
-                        .parents
-                        .get(n - 1)
-                        .ok_or_else(|| Error::UnknownRevision(rev.to_string()))?;
-                }
-                _ => unreachable!(),
-            }
-        }
-        Ok(id)
-    }
-
-    fn first_parent(&self, id: &ObjectId, rev: &str) -> Result<ObjectId> {
-        let c = self.store.read_commit(id)?;
-        c.parents
-            .first()
-            .copied()
-            .ok_or_else(|| Error::UnknownRevision(rev.to_string()))
+        let id = self.resolve_base(base)?;
+        apply_navigation(&self.store, id, ops, rev)
     }
 
     fn resolve_base(&self, base: &str) -> Result<ObjectId> {
@@ -681,6 +658,53 @@ impl Repository {
             self.work_dir.join(rel)
         }
     }
+}
+
+/// Apply `~N` / `^N` navigation operators to a commit id.
+pub fn apply_navigation(
+    store: &ObjectStore,
+    start: ObjectId,
+    ops: &str,
+    rev: &str,
+) -> Result<ObjectId> {
+    let mut id = start;
+    let mut chars = ops.chars().peekable();
+    while let Some(op) = chars.next() {
+        let mut num = String::new();
+        while let Some(c) = chars.peek() {
+            if c.is_ascii_digit() {
+                num.push(*c);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        let n: usize = if num.is_empty() {
+            1
+        } else {
+            num.parse().unwrap_or(1)
+        };
+        match op {
+            '~' => {
+                for _ in 0..n {
+                    let c = store.read_commit(&id)?;
+                    id = *c
+                        .parents
+                        .first()
+                        .ok_or_else(|| Error::UnknownRevision(rev.to_string()))?;
+                }
+            }
+            '^' => {
+                let c = store.read_commit(&id)?;
+                id = *c
+                    .parents
+                    .get(n - 1)
+                    .ok_or_else(|| Error::UnknownRevision(rev.to_string()))?;
+            }
+            _ => return Err(Error::UnknownRevision(rev.to_string())),
+        }
+    }
+    Ok(id)
 }
 
 pub fn absolutize(p: &Path) -> Result<PathBuf> {

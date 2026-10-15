@@ -76,7 +76,7 @@ agit addresses each of these directly rather than wrapping git.
 
 ## Quick start
 
-Requires a Rust toolchain (1.80 or newer).
+Requires a Rust toolchain (1.89 or newer).
 
 ```sh
 git clone https://github.com/shadow-kernel/agit
@@ -375,7 +375,7 @@ Agents pay per token. Planned views trim output to what a model needs: `agit dif
 
 ### MCP server ✅ and SDKs 📋
 
-`agit mcp` runs a Model Context Protocol server over stdio with 32 tools: status, log, show, diff, read_file, ls, add, commit (with intent/task/agent), checkpoint, restore, branches, switch, merge, leases (claim/release/list/check), events, workspaces, push, pull, pull requests (create/list/view/review/comment/merge), context, and knowledge (search/get/add). Tool results carry the same JSON as the CLI; failures come back as `isError` with the same error codes.
+`agit mcp` runs a Model Context Protocol server over stdio with 33 tools: status, log, show, diff, read_file, ls, add, commit (with intent/task/agent), checkpoint, restore, branches, switch, merge, leases (claim/release/list/check), events, workspaces, push, pull, pull requests (create/list/view/review/comment/merge), context, and knowledge (search/get/add). Tool results carry the same JSON as the CLI; failures come back as `isError` with the same error codes.
 
 Register it in an MCP client, started inside a repository:
 

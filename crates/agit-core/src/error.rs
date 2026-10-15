@@ -89,6 +89,9 @@ pub enum Error {
     #[error("forbidden: {0}")]
     Forbidden(String),
 
+    #[error("non-fast-forward: remote {remote} is not an ancestor of local {local}; pull first or push with --force")]
+    NonFastForward { remote: ObjectId, local: ObjectId },
+
     #[error("{0}")]
     Invalid(String),
 
@@ -135,6 +138,7 @@ impl Error {
             PolicyViolation(_) => "policy_violation",
             NotFound(_) => "not_found",
             Forbidden(_) => "forbidden",
+            NonFastForward { .. } => "non_fast_forward",
             Invalid(_) => "invalid",
             IoAt { .. } | Io(_) => "io",
             Serde(_) => "serde",
@@ -156,6 +160,9 @@ impl Error {
                 lease_id,
             } => Some(serde_json::json!({ "path": path, "holder": holder, "lease_id": lease_id })),
             MergeConflicts(n) => Some(serde_json::json!({ "count": n })),
+            NonFastForward { remote, local } => {
+                Some(serde_json::json!({ "remote": remote, "local": local }))
+            }
             DirtyWorktree(paths) => Some(serde_json::json!({ "paths": paths })),
             ObjectNotFound(id) => Some(serde_json::json!({ "id": id })),
             _ => None,

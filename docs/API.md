@@ -120,6 +120,7 @@ Deliver events to HTTP endpoints. Payload `{"repo":"<name>","event":<event>}`, h
 - `POST /repos/{repo}/webhooks/{id}/test` -> queues a `ping` event
 
 ## Knowledge notes
+Clients may keep a local mirror in `.agit/knowledge` (`agit know --local`, offline fallback); local-only notes carry `n_local_` ids until `agit know sync` uploads them and caches the server's notes.
 Note object:
 ```json
 {"id":"n_...","title":"...","body":"markdown","tags":["area:auth","kind:gotcha"],

@@ -110,14 +110,11 @@ pub struct WebhookStore<'a> {
 
 /// Process-wide cache of webhook lists keyed by file path, invalidated by
 /// the file's mtime, so emitting an event does not re-read the file.
-static CACHE: OnceLock<
-    Mutex<
-        std::collections::HashMap<
-            std::path::PathBuf,
-            (Option<std::time::SystemTime>, Vec<StoredWebhook>),
-        >,
-    >,
-> = OnceLock::new();
+type HookCache = std::collections::HashMap<
+    std::path::PathBuf,
+    (Option<std::time::SystemTime>, Vec<StoredWebhook>),
+>;
+static CACHE: OnceLock<Mutex<HookCache>> = OnceLock::new();
 
 impl<'a> WebhookStore<'a> {
     pub fn new(repo: &'a RepoHandle) -> Self {

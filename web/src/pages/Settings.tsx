@@ -2,11 +2,12 @@ import { useEffect, useMemo, useState, type FormEvent, type KeyboardEvent } from
 import { NavLink, Route, Routes, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { loadSettings } from "../api/settings";
-import { DEFAULT_POLICY, type Policy, type TagRule, type Webhook } from "../api/types";
+import { DEFAULT_POLICY, type KeyEntry, type Policy, type TagRule, type Webhook } from "../api/types";
 import { useRepo } from "../components/RepoShell";
 import { toast } from "../components/Toasts";
-import { Badge, EmptyState, ErrorState, Skeleton, SkeletonRows } from "../components/ui";
+import { Avatar, Badge, Banner, CopyButton, EmptyState, ErrorState, Skeleton, SkeletonRows } from "../components/ui";
 import { fullDate, pluralize, timeAgo } from "../lib/format";
+import { can, useAuth } from "../lib/useAuth";
 import { useAsync, useMutation } from "../lib/useAsync";
 
 export default function Settings() {
@@ -22,14 +23,17 @@ export default function Settings() {
       <nav className="settings-nav" aria-label="Settings sections">
         <div className="group">Repository</div>
         {item(base, "Policy", true)}
+        {item(`${base}/keys`, "Keys")}
         {item(`${base}/webhooks`, "Webhooks")}
         {item(`${base}/rules`, "Knowledge rules")}
         <div className="group">Danger</div>
         {item(`${base}/danger`, "Danger zone")}
       </nav>
       <div className="stack">
+        <ReadOnlyNotice />
         <Routes>
           <Route index element={<PolicySettings />} />
+          <Route path="keys" element={<KeySettings />} />
           <Route path="webhooks" element={<WebhookSettings />} />
           <Route path="rules" element={<RulesSettings />} />
           <Route path="danger" element={<DangerZone />} />
@@ -105,6 +109,24 @@ function actingAgent() {
   return loadSettings().agent || "web-ui";
 }
 
+/** `true` when the signed-in principal may change this repository's settings (admin). Unknown identity = allowed. */
+function useRepoAdmin() {
+  const { name } = useRepo();
+  const auth = useAuth();
+  return can(auth, name, "admin");
+}
+
+function ReadOnlyNotice() {
+  const admin = useRepoAdmin();
+  const auth = useAuth();
+  if (admin) return null;
+  return (
+    <Banner tone="attention" icon="⚿" title="Read-only: settings need admin access">
+      You are <strong>{auth.who?.agent ?? auth.who?.principal}</strong>{auth.who?.scopes.length ? <> ({auth.who.scopes.map((s) => `${s.repo}: ${s.access}`).join(", ")})</> : null}. Policy, keys, webhooks, rules and deletion are shown but cannot be changed with this token.
+    </Banner>
+  );
+}
+
 // ---- Policy --------------------------------------------------------------------
 
 function PolicySettings() {
@@ -134,6 +156,7 @@ function PolicySettings() {
 
   const agentIds = (agents.data ?? []).map((a) => a.id);
   const branchNames = (branches.data ?? []).map((b) => b.name);
+  const admin = useRepoAdmin();
 
   if (policy.error) return <ErrorState error={policy.error} retry={policy.reload} />;
   if (!draft) return <div className="box"><Skeleton lines={8} /></div>;
@@ -141,6 +164,7 @@ function PolicySettings() {
 
   return (
     <form onSubmit={submit} className="stack">
+      <fieldset disabled={!admin} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }} className="stack">
       <SectionHead title="Policy">
         Rules enforced server-side at <code>refs/update</code> (direct pushes) and <code>pulls/{"{n}"}/merge</code>. Violations are rejected with <code>403 policy_violation</code>.
       </SectionHead>
@@ -173,7 +197,8 @@ function PolicySettings() {
         <div className="box-body stack tight">
           <Toggle checked={draft.require_intent} onChange={(v) => set("require_intent", v)} label="Require intent" help="Every new commit introduced to a protected branch must carry an intent." />
           <Toggle checked={draft.require_agent} onChange={(v) => set("require_agent", v)} label="Require agent identity" help="Every new commit must carry an agent id (commits by humans without --agent are rejected)." />
-          <Toggle checked={draft.require_signed} onChange={(v) => set("require_signed", v)} label="Require signed commits" help="Every new commit must carry a valid Ed25519 signature whose key is registered for the signer (POST /repos/{repo}/keys)." />
+          <Toggle checked={draft.require_signed} onChange={(v) => set("require_signed", v)} label="Require signed commits" help="Every commit reaching a protected branch must carry a valid Ed25519 signature whose key is registered for its signer under Keys (agit key generate, agit commit --sign, agit key register)." />
+          {draft.require_signed ? <p className="small muted" style={{ margin: "0 0 0 26px" }}>Manage trusted keys in <NavLink to={`/r/${encodeURIComponent(name)}/settings/keys`}>Settings → Keys</NavLink>. Commits whose key is not registered show as "valid, untrusted key" and are rejected on protected branches.</p> : null}
           <label className="field" style={{ maxWidth: 320 }}>
             Max files per commit
             <input className="input" type="number" min={0} value={draft.max_files_per_commit} onChange={(e) => set("max_files_per_commit", Number(e.target.value))} />
@@ -198,13 +223,16 @@ function PolicySettings() {
         </div>
       </div>
 
-      <div className="row between wrap">
-        <span className="small muted">Saved as <code>{actingAgent()}</code> (change the acting agent in the header settings).</span>
-        <div className="row">
-          <button type="button" className="btn" disabled={!dirty || save.busy} onClick={() => policy.data && setDraft({ ...DEFAULT_POLICY, ...policy.data })}>Reset</button>
-          <button type="submit" className="btn primary" disabled={!dirty || save.busy}>{save.busy ? "Saving…" : "Save policy"}</button>
+      </fieldset>
+      {admin ? (
+        <div className="row between wrap">
+          <span className="small muted">Saved as <code>{actingAgent()}</code> (change the acting agent in the header settings).</span>
+          <div className="row">
+            <button type="button" className="btn" disabled={!dirty || save.busy} onClick={() => policy.data && setDraft({ ...DEFAULT_POLICY, ...policy.data })}>Reset</button>
+            <button type="submit" className="btn primary" disabled={!dirty || save.busy}>{save.busy ? "Saving…" : "Save policy"}</button>
+          </div>
         </div>
-      </div>
+      ) : null}
     </form>
   );
 }
@@ -222,6 +250,7 @@ function WebhookSettings() {
   const del = useMutation((id: string) => api.deleteWebhook(name, id));
   const test = useMutation((id: string) => api.testWebhook(name, id));
   const [busyId, setBusyId] = useState<string | null>(null);
+  const admin = useRepoAdmin();
 
   const toggleKind = (k: string) => setForm((f) => ({ ...f, kinds: f.kinds.includes(k) ? f.kinds.filter((x) => x !== k) : [...f.kinds, k] }));
   const validUrl = (() => {
@@ -289,16 +318,18 @@ function WebhookSettings() {
                   {w.kinds.length ? w.kinds.map((k) => <Badge key={k} mono>{k}</Badge>) : <span>all events</span>}
                 </div>
               </div>
-              <div className="row">
-                <button className="btn sm" onClick={() => doTest(w)} disabled={busyId === w.id} title="POST /webhooks/{id}/test queues a ping event">Test</button>
-                <button className="btn sm danger" onClick={() => doDelete(w)} disabled={busyId === w.id}>Delete</button>
-              </div>
+              {admin ? (
+                <div className="row">
+                  <button className="btn sm" onClick={() => doTest(w)} disabled={busyId === w.id} title="POST /webhooks/{id}/test queues a ping event">Test</button>
+                  <button className="btn sm danger" onClick={() => doDelete(w)} disabled={busyId === w.id}>Delete</button>
+                </div>
+              ) : null}
             </div>
           ))
         )}
       </div>
 
-      <form className="box" onSubmit={submit}>
+      {admin ? <form className="box" onSubmit={submit}>
         <div className="box-head"><h3>Add webhook</h3></div>
         <div className="box-body stack">
           <label className="field">
@@ -337,7 +368,100 @@ function WebhookSettings() {
             <button type="submit" className="btn primary" disabled={!validUrl || create.busy}>{create.busy ? "Adding…" : "Add webhook"}</button>
           </div>
         </div>
-      </form>
+      </form> : null}
+    </div>
+  );
+}
+
+// ---- Signing keys ----------------------------------------------------------------
+
+function KeySettings() {
+  const { name } = useRepo();
+  const keys = useAsync(() => api.keys(name), [name]);
+  const agents = useAsync(() => api.agents(name), [name], { silent: true });
+  const admin = useRepoAdmin();
+  const [form, setForm] = useState({ agent: "", public_key: "" });
+  const add = useMutation((body: { agent: string; public_key: string }) => api.addKey(name, body));
+  const del = useMutation((id: string) => api.deleteKey(name, id));
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const keyLooksOk = /^[A-Za-z0-9+/=_-]{32,}$/.test(form.public_key.trim()) || /^[0-9a-f]{64}$/i.test(form.public_key.trim());
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    const k = await add.run({ agent: form.agent.trim(), public_key: form.public_key.trim() });
+    if (k) {
+      keys.setData((prev) => [...(prev ?? []).filter((x) => x.key_id !== k.key_id), k]);
+      setForm({ agent: "", public_key: "" });
+      toast(`Key ${k.key_id.slice(0, 12)}… registered for ${k.agent}`, "success");
+    }
+  };
+  const doDelete = async (k: KeyEntry) => {
+    if (!confirm(`Remove key ${k.key_id} of ${k.agent}? Commits signed with it become "valid, untrusted".`)) return;
+    setBusyId(k.key_id);
+    const r = await del.run(k.key_id);
+    setBusyId(null);
+    if (r !== undefined) {
+      keys.setData((prev) => (prev ?? []).filter((x) => x.key_id !== k.key_id));
+      toast("Key removed", "info");
+    }
+  };
+  const byAgent = new Map<string, KeyEntry[]>();
+  for (const k of keys.data ?? []) byAgent.set(k.agent, [...(byAgent.get(k.agent) ?? []), k]);
+
+  return (
+    <div className="stack">
+      <SectionHead title="Signing keys">
+        Ed25519 public keys trusted per agent (<code>GET/POST /repos/{"{repo}"}/keys</code>). The key travels inside each signed commit; this registry decides whether it is trusted for the signer. Agents register with <code>agit key generate</code> + <code>agit key register</code>.
+      </SectionHead>
+      <div className="box">
+        <div className="box-head"><h3>{keys.data ? pluralize(keys.data.length, "key") : "Keys"}</h3>{byAgent.size ? <span className="muted">for {pluralize(byAgent.size, "agent")}</span> : null}</div>
+        {keys.error ? <div className="box-body"><ErrorState error={keys.error} retry={keys.reload} /></div> : null}
+        {keys.loading && !keys.data ? (
+          <SkeletonRows rows={2} />
+        ) : keys.data?.length === 0 ? (
+          <EmptyState icon="⚿" title="No keys registered">Signed commits will show as "valid, untrusted key" until their key is registered here.</EmptyState>
+        ) : (
+          keys.data?.map((k) => (
+            <div key={k.key_id} className="box-row key-row">
+              <Avatar id={k.agent} />
+              <div className="grow" style={{ minWidth: 0 }}>
+                <div className="row wrap" style={{ gap: 8 }}>
+                  <strong>{k.agent}</strong>
+                  <code className="small muted" title={k.key_id}>{k.key_id}</code>
+                </div>
+                <div className="row wrap small muted" style={{ gap: 6, marginTop: 4 }}>
+                  <code className="pubkey truncate" title={k.public_key}>{k.public_key}</code>
+                  <CopyButton text={k.public_key} label="Copy" />
+                  <span title={fullDate(k.added_ms)}>added {timeAgo(k.added_ms)}</span>
+                  {k.added_by ? <span>by {k.added_by}</span> : null}
+                </div>
+              </div>
+              {admin ? <button className="btn sm danger" onClick={() => doDelete(k)} disabled={busyId === k.key_id}>Remove</button> : null}
+            </div>
+          ))
+        )}
+      </div>
+      {admin ? (
+        <form className="box" onSubmit={submit}>
+          <div className="box-head"><h3>Register key</h3></div>
+          <div className="box-body stack">
+            <label className="field" style={{ maxWidth: 360 }}>
+              Agent
+              <input className="input" list="key-agents" value={form.agent} onChange={(e) => setForm({ ...form, agent: e.target.value })} placeholder="coder-1" required spellCheck={false} />
+              <datalist id="key-agents">{(agents.data ?? []).map((a) => <option key={a.id} value={a.id} />)}</datalist>
+              <span className="hint">The signer recorded in the commit. A key already registered for another agent is rejected (409).</span>
+            </label>
+            <label className="field">
+              Public key
+              <input className="input mono" value={form.public_key} onChange={(e) => setForm({ ...form, public_key: e.target.value })} placeholder="output of agit key show" required spellCheck={false} autoComplete="off" />
+              <span className="hint">The encoded Ed25519 public key as printed by <code>agit key show</code>.</span>
+            </label>
+            <div className="row" style={{ justifyContent: "flex-end" }}>
+              <button type="submit" className="btn primary" disabled={add.busy || !form.agent.trim() || !keyLooksOk}>{add.busy ? "Registering…" : "Register key"}</button>
+            </div>
+          </div>
+        </form>
+      ) : null}
     </div>
   );
 }
@@ -363,6 +487,7 @@ function RulesSettings() {
     return out;
   });
   const dirty = !!rules.data && JSON.stringify(parsed) !== JSON.stringify(rules.data);
+  const admin = useRepoAdmin();
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -420,10 +545,10 @@ function RulesSettings() {
           {problems.slice(0, 5).map((p) => <li key={p}>{p}</li>)}
         </ul>
       ) : null}
-      <div className="row" style={{ justifyContent: "flex-end" }}>
+      {admin ? <div className="row" style={{ justifyContent: "flex-end" }}>
         <button type="button" className="btn" disabled={!dirty || save.busy} onClick={() => rules.data && setRows(rules.data.map((r) => ({ pattern: r.pattern, tags: r.tags.join(", ") })))}>Reset</button>
         <button type="submit" className="btn primary" disabled={!dirty || !!problems.length || save.busy}>{save.busy ? "Saving…" : "Save rules"}</button>
-      </div>
+      </div> : null}
     </form>
   );
 }
@@ -437,6 +562,7 @@ function DangerZone() {
   const [typed, setTyped] = useState("");
   const del = useMutation(() => api.deleteRepo(name));
   const matches = typed === name;
+  const admin = useRepoAdmin();
 
   const doDelete = async (e: FormEvent) => {
     e.preventDefault();
@@ -459,7 +585,8 @@ function DangerZone() {
               Removes <code>{name}</code>{repo ? <> ({pluralize(repo.branches, "branch", "branches")}, {repo.objects.toLocaleString()} objects)</> : null} from the server via <code>DELETE /repos/{name}</code>.
             </div>
           </div>
-          {!confirming ? <button className="btn danger" onClick={() => setConfirming(true)}>Delete repository</button> : null}
+          {!confirming && admin ? <button className="btn danger" onClick={() => setConfirming(true)}>Delete repository</button> : null}
+          {!admin ? <Badge tone="attention">admin only</Badge> : null}
         </div>
         {confirming ? (
           <form className="box-body stack" style={{ borderTop: "1px solid var(--danger)" }} onSubmit={doDelete}>

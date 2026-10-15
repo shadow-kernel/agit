@@ -5,7 +5,7 @@ import type { CommitListItem, NoteSummary } from "../api/types";
 import { BranchSelector } from "../components/BranchSelector";
 import { CommitList } from "../components/CommitList";
 import { useRepo } from "../components/RepoShell";
-import { AgentBadge, Badge, EmptyState, ErrorState, SkeletonRows, Tag } from "../components/ui";
+import { AgentBadge, EmptyState, ErrorState, NoteBadges, Score, SkeletonRows, Tag } from "../components/ui";
 import { fullDate, pluralize, timeAgo } from "../lib/format";
 import { buildMatcher, searchCode, type SearchHit, type SearchProgress } from "../lib/search";
 import { useAsync } from "../lib/useAsync";
@@ -119,7 +119,7 @@ export default function Search() {
       ) : notes.loading && !notes.data ? (
         <div className="box"><SkeletonRows rows={4} /></div>
       ) : notes.data?.length === 0 ? (
-        <div className="box"><EmptyState icon="✎" title="No matching notes">Knowledge search covers title, body and tags.</EmptyState></div>
+        <div className="box"><EmptyState icon="✎" title="No matching notes">Knowledge search is BM25 over title, body, tags and paths; results are ranked best first.</EmptyState></div>
       ) : (
         <div className="box">{notes.data?.map((n) => <NoteHit key={n.id} n={n} base={base} />)}</div>
       )}
@@ -209,7 +209,8 @@ function NoteHit({ n, base }: { n: NoteSummary; base: string }) {
       <div className="grow" style={{ minWidth: 0 }}>
         <div className="row wrap" style={{ gap: 8 }}>
           <Link className="title" to={`${base}/knowledge/${encodeURIComponent(n.id)}`}>{n.title}</Link>
-          {n.superseded_by ? <Badge tone="attention">superseded</Badge> : null}
+          <NoteBadges n={n} />
+          <Score v={n.score} />
         </div>
         {n.excerpt ? <div className="excerpt">{n.excerpt.replace(/[`*_#]/g, "")}</div> : null}
         <div className="tags">{n.tags.map((t) => <Tag key={t} tag={t} repo={base.replace(/^\/r\//, "")} />)}{n.paths.map((p) => <code key={p} className="small muted">{p}</code>)}</div>

@@ -41,7 +41,9 @@ export function describeEvent(e: Event, base: string): { text: string; to: strin
   const num = (k: string) => (typeof d[k] === "number" ? (d[k] as number) : undefined);
   if ((e.kind === "commit" || e.kind === "checkpoint" || e.kind === "merge") && str("id")) {
     const branch = str("branch");
-    return { text: `${shortId(str("id"), 8)}${branch ? ` on ${branch}` : ""}${str("intent") ? ` · ${str("intent")}` : str("message") ? ` · ${str("message")!.split("\n")[0]}` : ""}`, to: `${base}/commit/${str("id")}` };
+    const summary = str("summary") ?? (str("message") ? str("message")!.split("\n")[0] : undefined);
+    const who = str("author");
+    return { text: `${shortId(str("id"), 8)}${branch ? ` on ${branch}` : ""}${summary ? ` · ${summary}` : ""}${str("intent") ? ` → ${str("intent")}` : ""}${!e.actor && who ? ` (${who})` : ""}`, to: `${base}/commit/${str("id")}` };
   }
   if (e.kind.startsWith("pull.")) {
     const n = num("number");

@@ -1,5 +1,7 @@
 # agit architecture
 
+> **Status note (2026-10-15).** This document was written before most of the platform existed. Where it marks components as planned, the current state is: pack segments (`objects/pack/seg-*.agp` with `AGX1` indexes, publish-on-flush), index format `AGI2` with a tree cache, a `refs.journal` with group commit and reflogs under `logs/`, Ed25519 signatures, the server with scoped tokens, policies, webhooks and the knowledge layer, the web UI, the MCP server and both SDKs are built. The byte layouts below are still accurate for `AGO1` loose objects, `AGT1` trees and commit JSON; the segment and journal formats are described in `docs/handbook/14-architecture-internals.md`.
+
 This document describes how agit works today (Phase 0, `crates/agit-core` and `crates/agit-cli`) and how the later phases are designed. Everything marked ✅ is implemented and the byte layouts are taken from the code. Everything marked 📋 is a design and may change through the RFC process before it ships.
 
 Legend: ✅ built, 🚧 in progress, 📋 planned.

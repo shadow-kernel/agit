@@ -1,7 +1,7 @@
 import { Fragment, useMemo, useState, type ReactNode } from "react";
 import { parseUnifiedDiff, type FileDiff } from "../lib/diff";
 import type { Change } from "../api/types";
-import { ChangeKindBadge, DiffStat, EmptyState } from "./ui";
+import { ChangeKindBadge, ChangePath, DiffStat, EmptyState } from "./ui";
 
 export interface LineAnnotation {
   path: string;
@@ -11,7 +11,15 @@ export interface LineAnnotation {
 
 export function DiffView({ patch, changes, annotations = [], onLineClick }: { patch: string; changes?: Change[]; annotations?: LineAnnotation[]; onLineClick?: (path: string, line: number) => void }) {
   const files = useMemo(() => parseUnifiedDiff(patch), [patch]);
-  const kinds = useMemo(() => new Map((changes ?? []).map((c) => [c.path, c.kind])), [changes]);
+  // Renamed files are keyed by their new path in `changes`; the patch may name either side.
+  const byPath = useMemo(() => {
+    const m = new Map<string, Change>();
+    for (const c of changes ?? []) {
+      m.set(c.path, c);
+      if (c.kind === "renamed" && c.from) m.set(c.from, c);
+    }
+    return m;
+  }, [changes]);
   if (!files.length) {
     // Patch may be empty for binary-only changes: still list the files.
     if (changes?.length) {
@@ -20,8 +28,8 @@ export function DiffView({ patch, changes, annotations = [], onLineClick }: { pa
           {changes.map((c) => (
             <div key={c.path} className="box-row static">
               <ChangeKindBadge kind={c.kind} />
-              <span className="mono">{c.path}</span>
-              <span className="muted small">no textual diff</span>
+              <span className="mono"><ChangePath change={c} /></span>
+              <span className="muted small">{c.kind === "renamed" && c.similarity === 100 ? "identical content" : "no textual diff"}</span>
             </div>
           ))}
         </div>
@@ -32,28 +40,29 @@ export function DiffView({ patch, changes, annotations = [], onLineClick }: { pa
   return (
     <div>
       {files.map((f) => (
-        <FileDiffView key={f.path} file={f} kind={kinds.get(f.path)} annotations={annotations.filter((a) => a.path === f.path)} onLineClick={onLineClick} />
+        <FileDiffView key={f.path} file={f} change={byPath.get(f.path) ?? (f.oldPath ? byPath.get(f.oldPath) : undefined)} annotations={annotations.filter((a) => a.path === f.path)} onLineClick={onLineClick} />
       ))}
     </div>
   );
 }
 
-function FileDiffView({ file, kind, annotations, onLineClick }: { file: FileDiff; kind?: Change["kind"]; annotations: LineAnnotation[]; onLineClick?: (path: string, line: number) => void }) {
+function FileDiffView({ file, change, annotations, onLineClick }: { file: FileDiff; change?: Change; annotations: LineAnnotation[]; onLineClick?: (path: string, line: number) => void }) {
   const [open, setOpen] = useState(true);
-  const effKind = kind ?? (file.oldPath === null ? "added" : file.newPath === null ? "deleted" : "modified");
+  const patchRenamed = !!file.oldPath && !!file.newPath && file.oldPath !== file.newPath;
+  const effKind: Change["kind"] = change?.kind ?? (file.oldPath === null ? "added" : file.newPath === null ? "deleted" : patchRenamed ? "renamed" : "modified");
+  const shown = { path: change?.kind === "renamed" ? change.path : file.path, kind: effKind, from: change?.kind === "renamed" ? change.from : patchRenamed ? file.oldPath : undefined, similarity: change?.kind === "renamed" ? change.similarity : undefined };
   const byLine = useMemo(() => {
     const m = new Map<number, ReactNode[]>();
     for (const a of annotations) m.set(a.line, [...(m.get(a.line) ?? []), a.render]);
     return m;
   }, [annotations]);
-  const renamed = file.oldPath && file.newPath && file.oldPath !== file.newPath;
   return (
-    <div className="box diff-file" id={`diff-${encodeURIComponent(file.path)}`}>
+    <div className="box diff-file" id={`diff-${encodeURIComponent(shown.path)}`}>
       <div className="box-head">
         <button className="toggle" onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-label="Toggle file">{open ? "▾" : "▸"}</button>
         <ChangeKindBadge kind={effKind} />
-        <span className="path">{renamed ? `${file.oldPath} → ${file.newPath}` : file.path}</span>
-        {file.binary ? <span className="muted">binary</span> : <DiffStat add={file.additions} del={file.deletions} />}
+        <span className="path"><ChangePath change={shown} /></span>
+        {file.binary ? <span className="muted">binary</span> : file.hunks.length === 0 && effKind === "renamed" ? <span className="muted">renamed without changes</span> : <DiffStat add={file.additions} del={file.deletions} />}
       </div>
       {open && !file.binary ? (
         <table className="diff-table">

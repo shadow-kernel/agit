@@ -1,6 +1,6 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import type { AgentInfo, ChangeKind, PullState } from "../api/types";
+import type { AgentInfo, Change, ChangeKind, NoteSummary, PullState, SignatureInfo } from "../api/types";
 import type { ApiError } from "../api/client";
 import { shortId } from "../lib/format";
 
@@ -80,9 +80,68 @@ export function Tag({ tag, repo, active, onClick }: { tag: string; repo?: string
 }
 
 export function ChangeKindBadge({ kind }: { kind: ChangeKind }) {
-  const letter = { added: "A", modified: "M", deleted: "D", type_changed: "T" }[kind] ?? "?";
-  const label = { added: "Added", modified: "Modified", deleted: "Deleted", type_changed: "Type changed" }[kind] ?? kind;
+  const letter = { added: "A", modified: "M", deleted: "D", type_changed: "T", renamed: "R" }[kind] ?? "?";
+  const label = { added: "Added", modified: "Modified", deleted: "Deleted", type_changed: "Type changed", renamed: "Renamed" }[kind] ?? kind;
   return <span className={`change-kind ${kind}`} title={label}>{letter}</span>;
+}
+
+/** File name for a change: `from → path` plus the similarity for renames. */
+export function ChangePath({ change, className = "" }: { change: Pick<Change, "path" | "kind" | "from" | "similarity">; className?: string }) {
+  if (change.kind === "renamed" && change.from) {
+    return (
+      <span className={`change-path ${className}`.trim()} title={`${change.from} → ${change.path}`}>
+        <span className="from">{change.from}</span>
+        <span className="arrow" aria-hidden> → </span>
+        <span>{change.path}</span>
+        {typeof change.similarity === "number" ? <Badge outline mono className="sim" title={`${change.similarity}% similar to the old file`}>{change.similarity}%</Badge> : null}
+      </span>
+    );
+  }
+  return <span className={`change-path ${className}`.trim()}>{change.path}</span>;
+}
+
+/** Commit signature state from `CommitDetail.signature`. */
+export function SignatureBadge({ sig, lg }: { sig: SignatureInfo | null | undefined; lg?: boolean }) {
+  if (!sig || sig.status === "unsigned") return <Badge outline lg={lg} title="This commit carries no Ed25519 signature">Unsigned</Badge>;
+  if (sig.status === "invalid") return <Badge tone="danger" lg={lg} title={`Invalid signature: ${sig.reason}`}>Invalid signature</Badge>;
+  if (sig.trusted) return <Badge tone="success" lg={lg} title={`Signed by ${sig.signer} with key ${sig.key_id} (registered for the signer)`}>Verified</Badge>;
+  return <Badge tone="attention" lg={lg} title={`Valid signature by ${sig.signer}, but key ${sig.key_id} is not registered for that agent`}>Valid, untrusted key</Badge>;
+}
+
+/** `draft` / `stale` / `superseded` markers of a note. */
+export function NoteBadges({ n }: { n: Pick<NoteSummary, "draft" | "stale" | "superseded_by"> }) {
+  return (
+    <>
+      {n.draft ? <Badge tone="done" title="Machine-generated draft: hidden from listings and context until accepted">draft</Badge> : null}
+      {n.stale ? <Badge tone="attention" title="A path this note covers changed since it was last validated">stale</Badge> : null}
+      {n.superseded_by ? <Badge tone="attention" outline title={`superseded by ${n.superseded_by}`}>superseded</Badge> : null}
+    </>
+  );
+}
+
+/** BM25 relevance from `GET /knowledge/notes?q=`. */
+export function Score({ v }: { v: number | null | undefined }) {
+  if (typeof v !== "number") return null;
+  return <span className="score" title={`BM25 relevance ${v}`}>score {v.toFixed(2)}</span>;
+}
+
+export function CopyButton({ text, label = "Copy", sm = true }: { text: string; label?: string; sm?: boolean }) {
+  const [done, setDone] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    setDone(true);
+    setTimeout(() => setDone(false), 1500);
+  };
+  return <button type="button" className={`btn ${sm ? "sm" : ""}`} onClick={copy} aria-live="polite">{done ? "Copied" : label}</button>;
 }
 
 export function PullStateBadge({ state }: { state: PullState }) {

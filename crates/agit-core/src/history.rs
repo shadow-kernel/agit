@@ -480,7 +480,7 @@ pub fn stash_apply(repo: &Repository, index: usize, drop: bool) -> Result<ApplyR
         theirs: format!("stash@{{{index}}}"),
     };
     let outcome = merge_trees(repo.store(), base_tree.as_ref(), &current, &c.tree, &labels)?;
-    worktree::checkout_tree(repo, Some(&current), &outcome.tree, true)?;
+    let applied = worktree::checkout_tree(repo, Some(&current), &outcome.tree, true)?.len();
     // Keep the index at HEAD so the restored changes show as unstaged.
     if let Some(head_tree) = repo.head_tree()? {
         let mut idx = crate::index::Index::from_tree(repo.store(), &head_tree)?;
@@ -513,7 +513,7 @@ pub fn stash_apply(repo: &Repository, index: usize, drop: bool) -> Result<ApplyR
     )?;
     Ok(ApplyResult::Committed {
         commit: id,
-        files_changed: 0,
+        files_changed: applied,
     })
 }
 

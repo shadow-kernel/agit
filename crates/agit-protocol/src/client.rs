@@ -43,6 +43,10 @@ impl RepoUrl {
     }
 }
 
+fn strip_prefix(msg: &str, prefix: &str) -> String {
+    msg.strip_prefix(prefix).unwrap_or(msg).to_string()
+}
+
 fn map_err(e: ureq::Error) -> Error {
     match e {
         ureq::Error::Status(status, resp) => {
@@ -108,8 +112,12 @@ fn map_err(e: ureq::Error) -> Error {
                             .unwrap_or(1) as usize,
                     ),
                     "already_exists" => Error::AlreadyExists(b.error.message.into()),
-                    "policy_violation" => Error::PolicyViolation(b.error.message),
-                    "forbidden" => Error::Forbidden(b.error.message),
+                    "policy_violation" => {
+                        Error::PolicyViolation(strip_prefix(&b.error.message, "policy violation: "))
+                    }
+                    "forbidden" => Error::Forbidden(strip_prefix(&b.error.message, "forbidden: ")),
+                    "not_found" => Error::NotFound(strip_prefix(&b.error.message, "not found: ")),
+                    "non_fast_forward" => Error::Invalid(b.error.message),
                     _ => Error::Invalid(format!(
                         "server error {status} [{}]: {}",
                         b.error.code, b.error.message

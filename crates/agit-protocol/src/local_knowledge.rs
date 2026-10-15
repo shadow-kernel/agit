@@ -36,6 +36,7 @@ fn validate_tag(t: &str) -> Result<()> {
         && t.chars().all(|c| {
             c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, ':' | '-' | '_' | '.' | '/')
         })
+        && t.contains(':')
         && !t.starts_with(':')
         && !t.ends_with(':');
     if ok {

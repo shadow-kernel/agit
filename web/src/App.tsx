@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { initApi } from "./api/client";
+import { refreshAuth } from "./lib/useAuth";
 import { Layout } from "./components/Layout";
 import { RepoShell } from "./components/RepoShell";
 import { Skeleton } from "./components/ui";
@@ -23,6 +24,7 @@ const Blame = lazy(() => import("./pages/Blame"));
 const Search = lazy(() => import("./pages/Search"));
 const Compare = lazy(() => import("./pages/Compare"));
 const NotFound = lazy(() => import("./pages/NotFound"));
+const AdminTokens = lazy(() => import("./pages/AdminTokens"));
 
 const fallback = <div className="box" aria-busy><Skeleton lines={6} /></div>;
 const pageFallback = <main className="container">{fallback}</main>;
@@ -30,7 +32,7 @@ const pageFallback = <main className="container">{fallback}</main>;
 export default function App() {
   const [ready, setReady] = useState(false);
   useEffect(() => {
-    initApi().finally(() => setReady(true));
+    initApi().then(() => refreshAuth()).finally(() => setReady(true));
   }, []);
   if (!ready) {
     return (
@@ -45,6 +47,7 @@ export default function App() {
       <Routes>
         <Route element={<Layout />}>
           <Route index element={<Suspense fallback={pageFallback}><RepoList /></Suspense>} />
+          <Route path="/admin/tokens" element={<Suspense fallback={pageFallback}><AdminTokens /></Suspense>} />
           <Route path="/r/:repo" element={<RepoShell />}>
             <Route index element={<Suspense fallback={fallback}><RepoHome /></Suspense>} />
             <Route path="tree/:rev/*" element={<Suspense fallback={fallback}><Tree /></Suspense>} />

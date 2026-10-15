@@ -16,7 +16,7 @@ What exists today lives in `agit-server` (`crates/agit-server/src/knowledge.rs`)
 - Context packs: `GET /context?path=&include=files&budget=` returns notes (fresh first), recent commits, leases, open PRs, active agents and budgeted file contents; `agit know context` is the CLI form.
 - Commit detail (`GET /commits/{rev}`) lists notes linking the commit or covering its changed paths.
 
-Not implemented: note objects in the object store, the knowledge tree and `refs/knowledge/*`, versioned note history, cross-branch knowledge, `symbol` links, and the `agit know link`/`--since`/`--until` CLI forms. The design below is unchanged and remains the target.
+Not implemented: note objects in the object store, the knowledge tree and `refs/knowledge/*`, versioned note history, cross-branch knowledge, `symbol` links, and the `agit know get`/`--since`/`--until` CLI forms. The design below is unchanged and remains the target.
 
 ## Summary
 
@@ -81,10 +81,10 @@ A knowledge commit is an ordinary commit object whose tree points at note object
 ### Query API
 
 ```sh
-agit know query --path src/billing/invoice.rs
-agit know query --tag area:billing --tag kind:gotcha
-agit know query --since <commit> --until <commit>
-agit know query --text "rotation"
+agit know search --path src/billing/invoice.rs
+agit know search --tag area:billing --tag kind:gotcha
+agit know search --since <commit> --until <commit>
+agit know search --text "rotation"
 ```
 
 Results are ranked by tag overlap, confidence, recency and validity, and return `id, title, tags, confidence, valid_from, summary` (first line of the body). `--full` or `agit know show <id>` returns bodies. `--limit` defaults to 10. All output is JSON with a `version` field.
@@ -94,7 +94,7 @@ Results are ranked by tag overlap, confidence, recency and validity, and return 
 - `agit know add --title … --tag … --link path:src/x.rs [--body-file f.md]`: writes a note, commits it on the current knowledge branch.
 - `agit know link <note> <type>:<value>`: appends a link by writing a new note version.
 - `agit know tags [--path p]`: lists tags, or the tags that rules assign to a path.
-- `agit know query …` as above.
+- `agit know search …` as above.
 
 ### Context packs
 

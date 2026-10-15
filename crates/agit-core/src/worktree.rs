@@ -264,17 +264,9 @@ fn compare_index_to_disk(
                         }),
                         None,
                     ),
-                    _ => (
-                        Some(Change {
-                            path: e.path.clone(),
-                            kind: ChangeKind::Deleted,
-                            old: Some(old),
-                            new: None,
-                            from: None,
-                            similarity: None,
-                        }),
-                        None,
-                    ),
+                    // Not checked out (fresh clone) or unreadable: nothing to
+                    // report, `agit submodule status` shows it as missing.
+                    _ => (None, None),
                 };
             }
             let stat = match on_disk.get(e.path.as_str()) {
@@ -753,6 +745,9 @@ fn refresh_stats(repo: &Repository, index: &mut Index) {
         .collect();
     for (p, s) in stats {
         if let (Some(s), Some(e)) = (s, index.get(&p).cloned()) {
+            if e.mode == EntryMode::Submodule {
+                continue;
+            }
             index.insert(IndexEntry {
                 mtime_ns: s.mtime_ns,
                 ino: s.ino,
@@ -767,8 +762,15 @@ fn write_entry(store: &ObjectStore, abs: &Path, side: &Side) -> Result<()> {
     if let Some(parent) = abs.parent() {
         fs::create_dir_all(parent).map_err(io_at(parent))?;
     }
-    if fs::symlink_metadata(abs).is_ok() {
-        fs::remove_file(abs).map_err(io_at(abs))?;
+    if let Ok(md) = fs::symlink_metadata(abs) {
+        if md.is_dir() {
+            if side.mode == EntryMode::Submodule {
+                return Ok(());
+            }
+            fs::remove_dir_all(abs).map_err(io_at(abs))?;
+        } else {
+            fs::remove_file(abs).map_err(io_at(abs))?;
+        }
     }
     match side.mode {
         EntryMode::Symlink => {

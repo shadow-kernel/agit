@@ -27,6 +27,11 @@ export type Query = Record<string, string | number | boolean | undefined | null>
 /** Everything the UI can call. Mirrors docs/API.md one to one. */
 export interface Api {
   health(): Promise<T.Health>;
+  // Auth
+  whoami(): Promise<T.WhoAmI>;
+  tokens(): Promise<T.TokenInfo[]>;
+  createToken(body: T.TokenCreateRequest): Promise<T.TokenCreated>;
+  deleteToken(id: string): Promise<unknown>;
   // Repositories
   repos(): Promise<T.RepoSummary[]>;
   createRepo(body: { name: string; default_branch?: string }): Promise<T.RepoSummary>;
@@ -42,6 +47,7 @@ export interface Api {
   commit(repo: string, rev: string): Promise<T.CommitDetail>;
   tree(repo: string, rev: string, path?: string, signal?: AbortSignal): Promise<T.TreeResponse>;
   diff(repo: string, from: string, to: string): Promise<T.Diff>;
+  blame(repo: string, rev: string, path: string, maxCommits?: number, signal?: AbortSignal): Promise<T.Blame>;
   branches(repo: string): Promise<T.Branch[]>;
   tags(repo: string): Promise<T.Tag[]>;
   // Events
@@ -67,18 +73,27 @@ export interface Api {
   closePull(repo: string, n: number): Promise<T.Pull>;
   updatePull(repo: string, n: number, body: T.PullUpdateRequest): Promise<T.Pull>;
   // Knowledge
-  notes(repo: string, q?: { tags?: string[]; path?: string; q?: string; limit?: number }): Promise<T.NoteSummary[]>;
+  notes(repo: string, q?: T.NoteListQuery): Promise<T.NoteSummary[]>;
   note(repo: string, id: string): Promise<T.Note>;
   createNote(repo: string, body: T.NoteCreateRequest): Promise<T.Note>;
   patchNote(repo: string, id: string, body: T.NotePatchRequest): Promise<T.Note>;
   deleteNote(repo: string, id: string): Promise<unknown>;
+  /** `POST .../validate`: sets `valid_at` to `rev` (default HEAD). */
+  validateNote(repo: string, id: string, rev?: string): Promise<T.Note>;
+  /** `POST .../accept`: clears `draft`, applying `patch` first when given. */
+  acceptNote(repo: string, id: string, patch?: T.NotePatchRequest): Promise<T.Note>;
+  staleNotes(repo: string, q?: { rev?: string; drafts?: boolean }): Promise<T.StaleNote[]>;
   tagCounts(repo: string): Promise<T.TagCount[]>;
   rules(repo: string): Promise<T.TagRule[]>;
   putRules(repo: string, rules: T.TagRule[]): Promise<T.TagRule[]>;
-  context(repo: string, path: string, limit?: number): Promise<T.Context>;
+  context(repo: string, path: string, q?: T.ContextQuery): Promise<T.Context>;
   // Policy
   policy(repo: string): Promise<T.Policy>;
   putPolicy(repo: string, policy: T.Policy): Promise<T.Policy>;
+  // Signing keys
+  keys(repo: string): Promise<T.KeyEntry[]>;
+  addKey(repo: string, body: T.KeyCreateRequest): Promise<T.KeyEntry>;
+  deleteKey(repo: string, keyId: string): Promise<unknown>;
   // Webhooks
   webhooks(repo: string): Promise<T.Webhook[]>;
   createWebhook(repo: string, body: T.WebhookCreateRequest): Promise<T.Webhook>;
@@ -102,7 +117,23 @@ export function onApiError(l: ErrorListener) {
 }
 export function reportError(err: unknown) {
   const e = err instanceof ApiError ? err : new ApiError(0, "network", err instanceof Error ? err.message : String(err), true);
+  if (isAuthError(e)) return; // already surfaced by the global sign-in prompt
   errorListeners.forEach((l) => l(e));
+}
+
+// ---- Auth denial listeners (global "sign in" prompt) ------------------------
+
+export const isAuthError = (e: ApiError) => e.status === 401 || e.status === 403;
+const authListeners = new Set<ErrorListener>();
+/** Called for every 401/403 the HTTP layer (or the mock) produces (`forbidden`, `policy_violation`, ...). */
+export function onAuthDenied(l: ErrorListener) {
+  authListeners.add(l);
+  return () => {
+    authListeners.delete(l);
+  };
+}
+export function notifyAuthDenied(err: ApiError) {
+  authListeners.forEach((l) => l(err));
 }
 
 // ---- HTTP core ---------------------------------------------------------------
@@ -151,7 +182,9 @@ async function request<R>(method: string, path: string, opts: { query?: Query; b
   if (!res.ok || (json && typeof json === "object" && (json as T.ApiErrorBody).ok === false)) {
     const env = json as T.ApiErrorBody | null;
     const err = env?.error;
-    throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? res.statusText ?? "Request failed", err?.retryable ?? false, err?.details);
+    const apiErr = new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? res.statusText ?? "Request failed", err?.retryable ?? false, err?.details);
+    if (isAuthError(apiErr)) notifyAuthDenied(apiErr);
+    throw apiErr;
   }
   return json as R;
 }
@@ -161,6 +194,10 @@ const r = (repo: string) => `/repos/${enc(repo)}`;
 
 export const liveApi: Api = {
   health: () => request("GET", "/health"),
+  whoami: () => request("GET", "/auth/whoami"),
+  tokens: () => request("GET", "/auth/tokens"),
+  createToken: (body) => request("POST", "/auth/tokens", { body }),
+  deleteToken: (id) => request("DELETE", `/auth/tokens/${enc(id)}`),
   repos: () => request("GET", "/repos"),
   createRepo: (body) => request("POST", "/repos", { body }),
   repo: (repo) => request("GET", r(repo)),
@@ -172,6 +209,7 @@ export const liveApi: Api = {
   commit: (repo, rev) => request("GET", `${r(repo)}/commits/${enc(rev)}`),
   tree: (repo, rev, path, signal) => request("GET", `${r(repo)}/tree/${enc(rev)}`, { query: { path }, signal }),
   diff: (repo, from, to) => request("GET", `${r(repo)}/diff`, { query: { from, to } }),
+  blame: (repo, rev, path, maxCommits, signal) => request("GET", `${r(repo)}/blame/${enc(rev)}`, { query: { path, max_commits: maxCommits }, signal }),
   branches: (repo) => request("GET", `${r(repo)}/branches`),
   tags: (repo) => request("GET", `${r(repo)}/tags`),
   events: (repo, since, limit) => request("GET", `${r(repo)}/events`, { query: { since, limit } }),
@@ -192,17 +230,23 @@ export const liveApi: Api = {
   mergePull: (repo, n, body) => request("POST", `${r(repo)}/pulls/${n}/merge`, { body }),
   closePull: (repo, n) => request("POST", `${r(repo)}/pulls/${n}/close`),
   updatePull: (repo, n, body) => request("POST", `${r(repo)}/pulls/${n}/update`, { body }),
-  notes: (repo, q = {}) => request("GET", `${r(repo)}/knowledge/notes`, { query: { tags: q.tags?.length ? q.tags.join(",") : undefined, path: q.path, q: q.q, limit: q.limit } }),
+  notes: (repo, q = {}) => request("GET", `${r(repo)}/knowledge/notes`, { query: { tags: q.tags?.length ? q.tags.join(",") : undefined, path: q.path, q: q.q, commit: q.commit, pull: q.pull, drafts: q.drafts ? 1 : undefined, include_superseded: q.include_superseded ? 1 : undefined, limit: q.limit } }),
   note: (repo, id) => request("GET", `${r(repo)}/knowledge/notes/${enc(id)}`),
   createNote: (repo, body) => request("POST", `${r(repo)}/knowledge/notes`, { body }),
   patchNote: (repo, id, body) => request("PATCH", `${r(repo)}/knowledge/notes/${enc(id)}`, { body }),
   deleteNote: (repo, id) => request("DELETE", `${r(repo)}/knowledge/notes/${enc(id)}`),
+  validateNote: (repo, id, rev) => request("POST", `${r(repo)}/knowledge/notes/${enc(id)}/validate`, { body: rev ? { rev } : {} }),
+  acceptNote: (repo, id, patch) => request("POST", `${r(repo)}/knowledge/notes/${enc(id)}/accept`, { body: patch ?? {} }),
+  staleNotes: (repo, q = {}) => request("GET", `${r(repo)}/knowledge/stale`, { query: { rev: q.rev, drafts: q.drafts ? 1 : undefined } }),
   tagCounts: (repo) => request("GET", `${r(repo)}/knowledge/tags`),
   rules: (repo) => request("GET", `${r(repo)}/knowledge/rules`),
   putRules: (repo, rules) => request("PUT", `${r(repo)}/knowledge/rules`, { body: rules }),
-  context: (repo, path, limit) => request("GET", `${r(repo)}/context`, { query: { path, limit } }),
+  context: (repo, path, q = {}) => request("GET", `${r(repo)}/context`, { query: { path, limit: q.limit, include: q.files ? "files" : undefined, budget: q.files ? q.budget : undefined } }),
   policy: (repo) => request("GET", `${r(repo)}/policy`),
   putPolicy: (repo, policy) => request("PUT", `${r(repo)}/policy`, { body: policy }),
+  keys: (repo) => request("GET", `${r(repo)}/keys`),
+  addKey: (repo, body) => request("POST", `${r(repo)}/keys`, { body }),
+  deleteKey: (repo, keyId) => request("DELETE", `${r(repo)}/keys/${enc(keyId)}`),
   webhooks: (repo) => request("GET", `${r(repo)}/webhooks`),
   createWebhook: (repo, body) => request("POST", `${r(repo)}/webhooks`, { body }),
   deleteWebhook: (repo, id) => request("DELETE", `${r(repo)}/webhooks/${enc(id)}`),

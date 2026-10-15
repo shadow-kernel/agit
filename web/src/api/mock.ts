@@ -2,10 +2,11 @@
 // Enabled with VITE_AGIT_MOCK=1 or automatically when GET /health fails.
 
 import type { Api, StreamStatus } from "./client";
-import { ApiError } from "./client";
+import { ApiError, notifyAuthDenied } from "./client";
 import { loadSettings } from "./settings";
 import type * as T from "./types";
 import { DEFAULT_POLICY as T_DEFAULT_POLICY } from "./types";
+import { computeBlame } from "../lib/blame";
 
 // ---- helpers -----------------------------------------------------------------
 
@@ -89,6 +90,52 @@ function globToRegex(glob: string): RegExp {
 function patternCovers(pattern: string, path: string): boolean {
   if (/[*?[]/.test(pattern)) return globToRegex(pattern).test(path);
   return path === pattern || path.startsWith(pattern.replace(/\/$/, "") + "/");
+}
+
+/** Line-set Jaccard similarity in percent (what `agit_core::diff::detect_renames` uses for text files). */
+function similarity(a: string, b: string): number {
+  if (a === b) return 100;
+  const sa = new Set(a.split("\n")), sb = new Set(b.split("\n"));
+  let inter = 0;
+  for (const l of sa) if (sb.has(l)) inter++;
+  const union = sa.size + sb.size - inter;
+  return union === 0 ? 100 : Math.round((inter / union) * 100);
+}
+
+/** Pair deletions with additions that look like the same file moved (>= 50% similar), like the CLI does. */
+function detectRenames(changes: T.Change[], textOf: (path: string, side: "old" | "new") => string | null): T.Change[] {
+  const deleted = changes.filter((c) => c.kind === "deleted");
+  const added = changes.filter((c) => c.kind === "added");
+  if (!deleted.length || !added.length) return changes;
+  const rest = changes.filter((c) => c.kind !== "deleted" && c.kind !== "added");
+  const usedAdd = new Set<string>();
+  const out: T.Change[] = [...rest];
+  for (const d of deleted) {
+    let best: { c: T.Change; sim: number } | null = null;
+    for (const a of added) {
+      if (usedAdd.has(a.path)) continue;
+      const sim = similarity(textOf(d.path, "old") ?? "", textOf(a.path, "new") ?? "");
+      if (sim >= 50 && (!best || sim > best.sim)) best = { c: a, sim };
+    }
+    if (best) {
+      usedAdd.add(best.c.path);
+      out.push({ path: best.c.path, kind: "renamed", old: d.old, new: best.c.new, from: d.path, similarity: best.sim });
+    } else out.push(d);
+  }
+  for (const a of added) if (!usedAdd.has(a.path)) out.push(a);
+  return out.sort((a, b) => a.path.localeCompare(b.path));
+}
+
+function patchFor(changes: T.Change[], textOf: (path: string, side: "old" | "new") => string | null): string {
+  let patch = "";
+  for (const c of changes) {
+    if (c.kind === "renamed" && c.from) {
+      const o = textOf(c.from, "old"), n = textOf(c.path, "new");
+      if (o === n) continue; // pure rename: no hunks
+      patch += unifiedDiff(c.path, o, n).replace(`diff --git a/${c.path} b/${c.path}\n--- a/${c.path}`, `diff --git a/${c.from} b/${c.path}\n--- a/${c.from}`);
+    } else patch += unifiedDiff(c.path, c.kind === "added" ? null : textOf(c.path, "old"), c.kind === "deleted" ? null : textOf(c.path, "new"));
+  }
+  return patch;
 }
 
 // ---- file contents -----------------------------------------------------------
@@ -576,6 +623,18 @@ request -> fastify -> zod schema -> domain fn (auth | billing) -> store
 - Errors are typed (\`AuthError\`), never strings, so the HTTP layer maps codes to status.
 - Audit events go to an in-memory sink in dev; production wires \`drain()\` to the log shipper.
 `,
+  arch2: `# ADR 0001: Architecture
+
+Status: accepted
+
+\`\`\`
+request -> fastify -> zod schema -> domain fn (auth | billing) -> store
+\`\`\`
+
+- Domain functions are pure where possible and take their store as a parameter.
+- Errors are typed (\`AuthError\`), never strings, so the HTTP layer maps codes to status.
+- Audit events go to an in-memory sink in dev; production wires \`drain()\` to the log shipper.
+`,
   gitignore: `node_modules
 dist
 .env
@@ -651,6 +710,8 @@ interface Step {
   changes: Record<string, string | null>;
   checkpoint?: boolean;
   meta?: Record<string, unknown>;
+  /** Fixture for `CommitDetail.signature`. */
+  sig?: "trusted" | "untrusted" | "invalid";
 }
 
 interface BuiltCommit {
@@ -659,6 +720,29 @@ interface BuiltCommit {
   changes: T.Change[];
   patch: string;
   snapshot: Map<string, string>;
+  signature: T.SignatureInfo;
+}
+
+/** Registered signing keys (per repository) and the key ids the fixtures sign with. */
+const KEYS: Record<string, { key_id: string; public_key: string }> = {
+  "planner-1": { key_id: "k_" + hashId("key:planner-1").slice(0, 16), public_key: hashId("pub:planner-1") },
+  "reviewer-1": { key_id: "k_" + hashId("key:reviewer-1").slice(0, 16), public_key: hashId("pub:reviewer-1") },
+  "coder-1": { key_id: "k_" + hashId("key:coder-1").slice(0, 16), public_key: hashId("pub:coder-1") },
+  "coder-2": { key_id: "k_" + hashId("key:coder-2").slice(0, 16), public_key: hashId("pub:coder-2") },
+};
+
+function signatureFor(st: Step, signer: string): T.SignatureInfo {
+  const k = KEYS[signer] ?? { key_id: "k_" + hashId(`key:${signer}`).slice(0, 16), public_key: hashId(`pub:${signer}`) };
+  switch (st.sig) {
+    case "trusted":
+      return { status: "valid", key_id: k.key_id, signer, public_key: k.public_key, trusted: true };
+    case "untrusted":
+      return { status: "valid", key_id: k.key_id, signer, public_key: k.public_key, trusted: false };
+    case "invalid":
+      return { status: "invalid", reason: "signature does not verify against the embedded public key (commit payload changed after signing)", trusted: false };
+    default:
+      return { status: "unsigned", trusted: false };
+  }
 }
 
 const agents = {
@@ -678,8 +762,7 @@ function buildHistory(repo: string, steps: Step[], start: Map<string, string> = 
   let parent = parentId;
   steps.forEach((st, i) => {
     const next = new Map(snap);
-    const changes: T.Change[] = [];
-    let patch = "";
+    let changes: T.Change[] = [];
     for (const [path, content] of Object.entries(st.changes)) {
       const before = snap.get(path) ?? null;
       if (content === null) next.delete(path);
@@ -687,9 +770,11 @@ function buildHistory(repo: string, steps: Step[], start: Map<string, string> = 
       const side = (c: string | null, p: string): T.ChangeSide | undefined => (c === null ? undefined : { id: hashId(`blob:${p}:${c}`), mode: "file", size: c.length });
       const kind: T.ChangeKind = before === null ? "added" : content === null ? "deleted" : "modified";
       changes.push({ path, kind, old: side(before, path), new: side(content, path) });
-      patch += unifiedDiff(path, before, content);
     }
+    const textOf = (path: string, side: "old" | "new") => (side === "old" ? snap.get(path) : next.get(path)) ?? null;
+    changes = detectRenames(changes, textOf);
     changes.sort((a, b) => a.path.localeCompare(b.path));
+    const patch = patchFor(changes, textOf);
     const agent = st.agent;
     const commit: T.Commit = {
       tree: hashId(`tree:${repo}:${i}:${[...next.keys()].join(",")}`),
@@ -703,8 +788,9 @@ function buildHistory(repo: string, steps: Step[], start: Map<string, string> = 
       checkpoint: st.checkpoint ?? false,
       meta: st.meta ?? {},
     };
-    const id = hashId(`commit:${repo}:${parent}:${st.msg}:${st.at}`);
-    out.push({ id, commit, changes, patch, snapshot: next });
+    // Hash the step index rather than the (NOW-relative) time so ids are stable across page loads.
+    const id = hashId(`commit:${repo}:${parent}:${st.msg}:${i}`);
+    out.push({ id, commit, changes, patch, snapshot: next, signature: signatureFor(st, agent?.id ?? commit.author.name.toLowerCase()) });
     snap = next;
     parent = id;
   });
@@ -734,11 +820,12 @@ const shopMain: Step[] = [
   { msg: "Document architecture", intent: "Give agents a map before they touch routes", task: "SHOP-5", agent: agents.planner, at: at(4, 10), changes: { "docs/ARCHITECTURE.md": F.arch } },
   { msg: "Expand README", intent: "Explain the layout for new agents", task: "SHOP-5", agent: agents.planner, at: at(4, 10, 25), changes: { "README.md": F.readme1 } },
   { msg: "Add audit sink", intent: "Record security-relevant events for later shipping", task: "SHOP-40", agent: agents.coder2, at: at(3, 9), changes: { "src/audit.ts": F.audit } },
-  { msg: "Audit login outcomes", intent: "Make lockouts observable", task: "SHOP-40", agent: agents.coder1, at: at(3, 11), changes: { "src/auth/login.ts": F.login2 } },
-  { msg: "Merge pull request #1 from ws/coder-2\n\nAudit invoices and refuse empty ones", intent: "Land billing hardening", task: "SHOP-41", agent: agents.reviewer, at: at(2, 16), changes: { "src/billing/invoice.ts": F.invoice2, "tests/billing.test.ts": F.billingTest }, meta: { "agit.merge": { strategy: "merge", pull: 1 } } },
+  { msg: "Audit login outcomes", intent: "Make lockouts observable", task: "SHOP-40", agent: agents.coder1, at: at(3, 11), changes: { "src/auth/login.ts": F.login2 }, sig: "untrusted" },
+  { msg: "Merge pull request #1 from ws/coder-2\n\nAudit invoices and refuse empty ones", intent: "Land billing hardening", task: "SHOP-41", agent: agents.reviewer, at: at(2, 16), changes: { "src/billing/invoice.ts": F.invoice2, "tests/billing.test.ts": F.billingTest }, meta: { "agit.merge": { strategy: "merge", pull: 1 } }, sig: "trusted" },
   { msg: "Map AuthError to 401/423 and add POST /invoices", intent: "Expose billing over HTTP with proper auth status codes", task: "SHOP-42", agent: agents.coder1, at: at(1, 9, 30), changes: { "src/api/server.ts": F.server2 } },
   { msg: "Add logo asset", intent: "Branding for the storefront", task: "SHOP-50", at: at(1, 13), author: daniel, changes: { "assets/logo.png": "\u0089PNG\r\n\u001a\n\u0000\u0000\u0000\rIHDR\u0000\u0000" } },
-  { msg: "Pin fastify to 5.3", intent: "Avoid the 5.4 schema regression", task: "SHOP-51", agent: agents.coder2, at: at(0, 8, 10), changes: { "package.json": F.pkg.replace('"^5.3.0"', '"5.3.0"') } },
+  { msg: "Pin fastify to 5.3", intent: "Avoid the 5.4 schema regression", task: "SHOP-51", agent: agents.coder2, at: at(0, 8, 10), changes: { "package.json": F.pkg.replace('"^5.3.0"', '"5.3.0"') }, sig: "invalid" },
+  { msg: "Move the architecture doc into docs/adr\n\nRenamed with a status header so future decisions can sit next to it.", intent: "Start an ADR log", task: "SHOP-5", agent: agents.planner, at: at(0, 8, 40), changes: { "docs/ARCHITECTURE.md": null, "docs/adr/0001-architecture.md": F.arch2 }, sig: "trusted" },
 ];
 
 const shopMainCommits = buildHistory("acme/shop", shopMain);
@@ -762,7 +849,7 @@ const coder2Branch = buildHistory(
 const featureBase = mainAt(19);
 const featureBranch = buildHistory(
   "acme/shop",
-  [{ msg: "Add Swiss VAT and jurisdiction listing", intent: "Prepare the CH launch", task: "SHOP-61", agent: agents.coder1, at: at(1, 17), changes: { "src/billing/tax.ts": F.taxConflict, "src/billing/invoice.ts": F.invoice1.replace('import { taxFor } from "./tax";', 'import { taxFor, knownJurisdictions } from "./tax";\n\nexport const JURISDICTIONS = knownJurisdictions();') } }],
+  [{ msg: "Add Swiss VAT and jurisdiction listing", intent: "Prepare the CH launch", task: "SHOP-61", agent: agents.coder1, at: at(1, 17), sig: "untrusted", changes: { "src/billing/tax.ts": F.taxConflict, "src/billing/invoice.ts": F.invoice1.replace('import { taxFor } from "./tax";', 'import { taxFor, knownJurisdictions } from "./tax";\n\nexport const JURISDICTIONS = knownJurisdictions();') } }],
   featureBase.snapshot,
   featureBase.id,
 );
@@ -808,6 +895,7 @@ interface RepoState {
   policy: T.Policy;
   webhooks: T.Webhook[];
   events: T.Event[];
+  keys: T.KeyEntry[];
 }
 
 function linear(...parts: BuiltCommit[][]) {
@@ -856,6 +944,10 @@ const shop: RepoState = {
     { id: "wh_8d04e7aa", url: "https://hooks.slack.example/T000/B000/agit", kinds: [], active: true, has_secret: false, created_ms: at(2, 9) },
   ],
   events: [],
+  keys: [
+    { agent: "planner-1", key_id: KEYS["planner-1"].key_id, public_key: KEYS["planner-1"].public_key, added_ms: at(6, 9), added_by: "root" },
+    { agent: "reviewer-1", key_id: KEYS["reviewer-1"].key_id, public_key: KEYS["reviewer-1"].public_key, added_ms: at(6, 9, 5), added_by: "root" },
+  ],
 };
 
 const docs: RepoState = {
@@ -871,6 +963,7 @@ const docs: RepoState = {
   policy: { ...T_DEFAULT_POLICY },
   webhooks: [],
   events: [],
+  keys: [],
 };
 
 const repos = new Map<string, RepoState>([
@@ -1010,19 +1103,24 @@ const note = (n: Partial<T.Note> & Pick<T.Note, "id" | "title" | "body" | "tags"
   created_ms: at(4, 10),
   updated_ms: at(4, 10),
   superseded_by: null,
+  valid_at: null,
+  draft: false,
+  stale: false,
   ...n,
 });
 shop.notes.push(
-  note({ id: "n_auth_rotate", title: "Session tokens are rotated on password change", body: "Any code path that changes a password **must** call `SessionStore.rotate(userId)` afterwards. Forgetting this leaves old sessions valid.\n\nThe hook was added in SHOP-31. The in-memory store implements it; the Postgres store must do the same in one transaction with the password update.\n\n```ts\nawait store.setPassword(user.id, hash);\nawait store.rotate(user.id);\n```", tags: ["area:auth", "kind:gotcha", "lang:ts"], paths: ["src/auth/**"], commits: [mainAt(15).id], author: "coder-1", confidence: 0.95, created_ms: at(4, 9, 30), updated_ms: at(4, 9, 30) }),
-  note({ id: "n_auth_lockout", title: "Decision: lock accounts after 5 failed logins for 15 minutes", body: "We chose a fixed lockout over exponential backoff because the edge rate limiter (SHOP-70) handles the volumetric case. Lockout state lives on the user record (`failedAttempts`), reset on success.\n\nAlternatives considered: CAPTCHA (rejected: no human users at this stage), IP bans (rejected: agents share egress).", tags: ["area:auth", "kind:decision"], paths: ["src/auth/login.ts"], commits: [mainAt(10).id], pulls: [], author: "planner-1", confidence: 0.9, created_ms: at(6, 11), updated_ms: at(6, 11) }),
-  note({ id: "n_auth_errors", title: "How to add a new AuthError code", body: "1. Add the literal to `AuthCode` in `src/auth/errors.ts`.\n2. Map it to a status in `setErrorHandler` in `src/api/server.ts` (default is 401).\n3. Add a test in `tests/auth.test.ts` asserting `code`.\n\nDo not throw bare `Error` from anything under `src/auth`.", tags: ["area:auth", "area:api", "kind:howto"], paths: ["src/auth/errors.ts", "src/api/server.ts"], author: "coder-1", confidence: 0.85, created_ms: at(1, 10), updated_ms: at(1, 10) }),
-  note({ id: "n_billing_cents", title: "All money is integer cents", body: "Never use floating point for amounts. `unitCents`, `subtotalCents`, `taxCents`, `totalCents` are integers; tax is `Math.round(subtotal * rate)` once per invoice, not per line, which is what the accountant signed off on.", tags: ["area:billing", "kind:rule", "service:billing"], paths: ["src/billing/**"], author: "coder-2", confidence: 1, created_ms: at(5, 9, 40), updated_ms: at(5, 9, 40) }),
-  note({ id: "n_billing_tax_unknown", title: "Unknown jurisdictions must throw, not return 0", body: "Before PR #2 `taxFor` returned `0` for any unknown country. That silently under-charges. The new contract: throw. Callers validate country codes at the API boundary.\n\nSupersedes the earlier 'default to 0' decision.", tags: ["area:billing", "kind:decision", "service:billing"], paths: ["src/billing/tax.ts"], pulls: [2], author: "reviewer-1", confidence: 0.9, created_ms: at(0, 10, 45), updated_ms: at(0, 10, 45) }),
-  note({ id: "n_billing_tax_default0", title: "Decision: unknown countries default to 0% tax", body: "Early decision, superseded: unknown countries were charged no tax to keep the demo working.", tags: ["area:billing", "kind:decision"], paths: ["src/billing/tax.ts"], author: "coder-2", confidence: 0.3, created_ms: at(7, 11, 45), updated_ms: at(0, 10, 45), superseded_by: "n_billing_tax_unknown" }),
+  note({ id: "n_auth_rotate", title: "Session tokens are rotated on password change", body: "Any code path that changes a password **must** call `SessionStore.rotate(userId)` afterwards. Forgetting this leaves old sessions valid.\n\nThe hook was added in SHOP-31. The in-memory store implements it; the Postgres store must do the same in one transaction with the password update.\n\n```ts\nawait store.setPassword(user.id, hash);\nawait store.rotate(user.id);\n```", tags: ["area:auth", "kind:gotcha", "lang:ts"], paths: ["src/auth/**"], commits: [mainAt(15).id], author: "coder-1", confidence: 0.95, created_ms: at(4, 9, 30), updated_ms: at(4, 9, 30), valid_at: mainAt(19).id }),
+  note({ id: "n_auth_lockout", title: "Decision: lock accounts after 5 failed logins for 15 minutes", body: "We chose a fixed lockout over exponential backoff because the edge rate limiter (SHOP-70) handles the volumetric case. Lockout state lives on the user record (`failedAttempts`), reset on success.\n\nAlternatives considered: CAPTCHA (rejected: no human users at this stage), IP bans (rejected: agents share egress).", tags: ["area:auth", "kind:decision"], paths: ["src/auth/login.ts"], commits: [mainAt(10).id], pulls: [], author: "planner-1", confidence: 0.9, created_ms: at(6, 11), updated_ms: at(6, 11), valid_at: mainAt(10).id }),
+  note({ id: "n_auth_errors", title: "How to add a new AuthError code", body: "1. Add the literal to `AuthCode` in `src/auth/errors.ts`.\n2. Map it to a status in `setErrorHandler` in `src/api/server.ts` (default is 401).\n3. Add a test in `tests/auth.test.ts` asserting `code`.\n\nDo not throw bare `Error` from anything under `src/auth`.", tags: ["area:auth", "area:api", "kind:howto"], paths: ["src/auth/errors.ts", "src/api/server.ts"], author: "coder-1", confidence: 0.85, created_ms: at(1, 10), updated_ms: at(1, 10), valid_at: mainAt(21).id }),
+  note({ id: "n_billing_cents", title: "All money is integer cents", body: "Never use floating point for amounts. `unitCents`, `subtotalCents`, `taxCents`, `totalCents` are integers; tax is `Math.round(subtotal * rate)` once per invoice, not per line, which is what the accountant signed off on.", tags: ["area:billing", "kind:rule", "service:billing"], paths: ["src/billing/**"], author: "coder-2", confidence: 1, created_ms: at(5, 9, 40), updated_ms: at(5, 9, 40), valid_at: mainAt(12).id }),
+  note({ id: "n_billing_tax_unknown", title: "Unknown jurisdictions must throw, not return 0", body: "Before PR #2 `taxFor` returned `0` for any unknown country. That silently under-charges. The new contract: throw. Callers validate country codes at the API boundary.\n\nSupersedes the earlier 'default to 0' decision.", tags: ["area:billing", "kind:decision", "service:billing"], paths: ["src/billing/tax.ts"], pulls: [2], author: "reviewer-1", confidence: 0.9, created_ms: at(0, 10, 45), updated_ms: at(0, 10, 45), valid_at: shopHead.id }),
+  note({ id: "n_billing_tax_default0", title: "Decision: unknown countries default to 0% tax", body: "Early decision, superseded: unknown countries were charged no tax to keep the demo working.", tags: ["area:billing", "kind:decision"], paths: ["src/billing/tax.ts"], author: "coder-2", confidence: 0.3, created_ms: at(7, 11, 45), updated_ms: at(0, 10, 45), superseded_by: "n_billing_tax_unknown", valid_at: mainAt(8).id }),
   note({ id: "n_api_zod", title: "Validate every request body with zod at the route", body: "Routes parse their body with a zod schema before calling a domain function. Domain functions assume validated input and do not re-check shapes. Zod errors are returned as 400 by the default error handler.", tags: ["area:api", "kind:rule", "lang:ts"], paths: ["src/api/**"], author: "planner-1", confidence: 0.85 }),
-  note({ id: "n_ci_fastify", title: "Gotcha: fastify 5.4 breaks schema compilation", body: "fastify 5.4.0 changed how `setErrorHandler` interacts with schema validation errors; our tests fail with `FST_ERR_VALIDATION`. Pinned to 5.3.0 in SHOP-51 until upstream fixes it (issue #5811).", tags: ["area:api", "kind:gotcha", "service:ci"], paths: ["package.json", "src/api/server.ts"], commits: [mainAt(23).id], author: "coder-2", confidence: 0.8, created_ms: at(0, 8, 15), updated_ms: at(0, 8, 15) }),
+  note({ id: "n_ci_fastify", title: "Gotcha: fastify 5.4 breaks schema compilation", body: "fastify 5.4.0 changed how `setErrorHandler` interacts with schema validation errors; our tests fail with `FST_ERR_VALIDATION`. Pinned to 5.3.0 in SHOP-51 until upstream fixes it (issue #5811).", tags: ["area:api", "kind:gotcha", "service:ci"], paths: ["package.json", "src/api/server.ts"], commits: [mainAt(23).id], author: "coder-2", confidence: 0.8, created_ms: at(0, 8, 15), updated_ms: at(0, 8, 15), valid_at: mainAt(23).id }),
+  // Draft produced by the merge of PR #1 (see "Drafts from merges" in docs/API.md).
+  note({ id: "n_draft_pr1", title: "Audit invoices and refuse empty ones", body: "Intent: Land billing hardening\nTask: SHOP-41\n\nAdds `audit()` calls to invoice creation and voiding, and rejects invoices with no line items.\n\nChanged files:\n- src/billing/invoice.ts (M)\n- tests/billing.test.ts (M)\n\nReviews:\n- reviewer-1: approve", tags: ["area:billing", "kind:change", "lang:ts", "service:billing"], paths: ["src/billing/**", "tests/**"], commits: [mainAt(20).id], pulls: [1], author: "reviewer-1", confidence: 0.4, created_ms: at(2, 16), updated_ms: at(2, 16), valid_at: mainAt(20).id, draft: true }),
 );
-docs.notes.push(note({ id: "n_docs_palette", title: "Palette source of truth is the main README", body: "Accent colour must match the badge colour used in the root README. Currently `#1f6feb`.", tags: ["area:content", "kind:rule"], paths: ["styles.css"], author: "coder-2", confidence: 0.7 }));
+docs.notes.push(note({ id: "n_docs_palette", title: "Palette source of truth is the main README", body: "Accent colour must match the badge colour used in the root README. Currently `#1f6feb`.", tags: ["area:content", "kind:rule"], paths: ["styles.css"], author: "coder-2", confidence: 0.7, valid_at: docsMain[0].id }));
 
 // events: derive from history + leases + pulls, then sort by time
 function seedEvents(st: RepoState) {
@@ -1034,7 +1132,7 @@ function seedEvents(st: RepoState) {
       if (seen.has(c.id)) continue;
       seen.add(c.id);
       const actor = c.commit.agent?.id ?? c.commit.author.name.toLowerCase();
-      evs.push({ time_ms: c.commit.time_ms, kind: c.commit.checkpoint ? "checkpoint" : c.commit.parents.length > 1 || c.commit.message.startsWith("Merge") ? "merge" : "commit", workspace: branch.startsWith("ws/") ? branch.slice(3) : "main", actor, data: { id: c.id, branch, intent: c.commit.intent, task: c.commit.task } });
+      evs.push({ time_ms: c.commit.time_ms, kind: c.commit.checkpoint ? "checkpoint" : c.commit.parents.length > 1 || c.commit.message.startsWith("Merge") ? "merge" : "commit", workspace: branch.startsWith("ws/") ? branch.slice(3) : "main", actor, data: { id: c.id, branch, parents: c.commit.parents, summary: c.commit.message.split("\n")[0], intent: c.commit.intent, task: c.commit.task, author: c.commit.author.name } });
       evs.push({ time_ms: c.commit.time_ms + 5, kind: "ref.update", actor, data: { ref: `refs/heads/${branch}`, old: c.commit.parents[0] ?? null, new: c.id, message: null } });
     }
   }
@@ -1045,7 +1143,7 @@ function seedEvents(st: RepoState) {
     if (p.state === "merged") evs.push({ time_ms: p.updated_ms, kind: "pull.merge", actor: "reviewer-1", data: { number: p.number, merged_commit: p.merged_commit, strategy: "merge" } });
     if (p.state === "closed") evs.push({ time_ms: p.updated_ms, kind: "pull.close", actor: "planner-1", data: { number: p.number } });
   }
-  for (const n of st.notes) evs.push({ time_ms: n.created_ms, kind: "note.create", actor: n.author, data: { id: n.id, title: n.title, tags: n.tags } });
+  for (const n of st.notes) evs.push(n.draft ? { time_ms: n.created_ms, kind: "note.draft", actor: n.author, data: { id: n.id, title: n.title, pull: n.pulls[0], commit: n.commits[0], tags: n.tags, paths: n.paths } } : { time_ms: n.created_ms, kind: "note.create", actor: n.author, data: { id: n.id, title: n.title, tags: n.tags } });
   evs.sort((a, b) => a.time_ms - b.time_ms);
   st.events = evs.map((e, i) => ({ seq: i + 1, ...e }));
 }
@@ -1078,7 +1176,7 @@ function ensureSimulation() {
         l.expires_ms = Date.now() + 30 * 60_000;
         pushEvent(st, { kind: "lease.renew", workspace: l.workspace, actor: a.id, data: { id: l.id, expires_ms: l.expires_ms } });
       } else pushEvent(st, { kind: "head.switch", workspace: a.id, actor: a.id, data: { from: "main", to: `ws/${a.id}` } });
-    } else if (roll === 2) pushEvent(st, { kind: "commit", workspace: a.id, actor: a.id, data: { id: hashId(`sim:${n}`), branch: `ws/${a.id}`, intent: intents[n % intents.length], task: `SHOP-${60 + (n % 12)}` } });
+    } else if (roll === 2) pushEvent(st, { kind: "commit", workspace: a.id, actor: a.id, data: { id: hashId(`sim:${n}`), branch: `ws/${a.id}`, parents: [hashId(`sim:${n - 1}`)], summary: intents[n % intents.length], intent: intents[n % intents.length], task: `SHOP-${60 + (n % 12)}`, author: a.id } });
     else if (roll === 3) pushEvent(st, { kind: "ref.update", actor: a.id, data: { ref: `refs/heads/ws/${a.id}`, old: hashId(`sim:${n - 1}`), new: hashId(`sim:${n}`), message: null } });
     else pushEvent(st, { kind: "lease.check", actor: a.id, data: { paths: ["src/api/server.ts"], allowed: a.id === "coder-1" } });
   }, 4500);
@@ -1131,35 +1229,131 @@ function diffBetween(st: RepoState, from: string, to: string): T.Diff {
   const a = resolve(st, from).commit.snapshot;
   const b = resolve(st, to).commit.snapshot;
   const paths = [...new Set([...a.keys(), ...b.keys()])].sort();
-  const changes: T.Change[] = [];
-  let patch = "";
-  const stats: T.FileStat[] = [];
+  let changes: T.Change[] = [];
   for (const p of paths) {
     const o = a.get(p) ?? null, n = b.get(p) ?? null;
     if (o === n) continue;
     const kind: T.ChangeKind = o === null ? "added" : n === null ? "deleted" : "modified";
     const side = (c: string | null): T.ChangeSide | undefined => (c === null ? undefined : { id: hashId(`blob:${p}:${c}`), mode: "file", size: c.length });
     changes.push({ path: p, kind, old: side(o), new: side(n) });
-    const d = unifiedDiff(p, o, n);
+  }
+  const textOf = (p: string, side: "old" | "new") => (side === "old" ? a.get(p) : b.get(p)) ?? null;
+  changes = detectRenames(changes, textOf);
+  const stats: T.FileStat[] = [];
+  let patch = "";
+  for (const c of changes) {
+    const d = patchFor([c], textOf);
     patch += d;
     let added = 0, removed = 0;
     for (const line of d.split("\n")) {
       if (line.startsWith("+") && !line.startsWith("+++")) added++;
       else if (line.startsWith("-") && !line.startsWith("---")) removed++;
     }
-    stats.push({ path: p, added, removed });
+    stats.push({ path: c.path, added, removed });
   }
   return { changes, patch, stats };
 }
 
-function summary(n: T.Note): T.NoteSummary {
-  const { body, ...rest } = n;
+/** Paths covered by the note that differ between `valid_at` and the default branch head (stale = non-empty). */
+const staleCache = new Map<string, T.Change[]>();
+function changedPaths(st: RepoState, n: T.Note): string[] {
+  if (!n.valid_at || !n.paths.length) return [];
+  const head = headOf(st, st.default_branch);
+  if (!head || head.id === n.valid_at) return [];
+  const key = `${st.name}\0${n.valid_at}\0${head.id}`;
+  let changes = staleCache.get(key);
+  if (!changes) {
+    try {
+      changes = diffBetween(st, n.valid_at, head.id).changes;
+    } catch {
+      changes = [];
+    }
+    staleCache.set(key, changes);
+  }
+  const out = new Set<string>();
+  for (const c of changes) {
+    for (const p of n.paths) {
+      if (patternCovers(p, c.path)) out.add(c.path);
+      if (c.from && patternCovers(p, c.from)) out.add(c.from);
+    }
+  }
+  return [...out].sort();
+}
+const withStale = (st: RepoState, n: T.Note): T.Note => ({ ...structuredClone(n), stale: changedPaths(st, n).length > 0 });
+
+function summary(st: RepoState, n: T.Note, score?: number): T.NoteSummary {
+  const { body, created_ms: _c, commits: _k, pulls: _p, ...rest } = n;
   const firstLine = body.split("\n").find((l) => l.trim() && !l.startsWith("#") && !l.startsWith("```")) ?? "";
-  return { ...rest, excerpt: firstLine.slice(0, 160) };
+  const out: T.NoteSummary = { ...rest, draft: !!n.draft, stale: changedPaths(st, n).length > 0, excerpt: firstLine.slice(0, 200) };
+  if (score !== undefined) out.score = score;
+  return out;
+}
+
+/** BM25-ish: weighted term hits (title 3, tags 2, body and paths 1) with prefix matches at half weight. */
+function scoreNote(n: T.Note, q: string): number {
+  const terms = q.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  if (!terms.length) return 0;
+  const fields: [string, number][] = [[n.title, 3], [n.tags.join(" "), 2], [n.body, 1], [n.paths.join(" "), 1]];
+  let score = 0;
+  for (const t of terms) {
+    for (const [text, w] of fields) {
+      const words = text.toLowerCase().split(/[^\p{L}\p{N}]+/u);
+      const exact = words.filter((x) => x === t).length;
+      const prefix = t.length >= 3 ? words.filter((x) => x !== t && x.startsWith(t)).length : 0;
+      score += w * (exact + prefix * 0.5);
+    }
+  }
+  return Math.round(score * 100) / 100;
+}
+
+function draftFromMerge(st: RepoState, pr: T.Pull, merged: string, changes: T.Change[], actor: string): T.Note {
+  const now = Date.now();
+  const dirs = [...new Set(changes.map((c) => (c.path.includes("/") ? c.path.slice(0, c.path.lastIndexOf("/")) + "/**" : c.path)))];
+  const tags = new Set(["kind:change"]);
+  for (const c of changes) for (const r of st.rules) if (patternCovers(r.pattern, c.path)) r.tags.forEach((t) => tags.add(t));
+  const latest = new Map<string, string>();
+  for (const r of pr.reviews) latest.set(r.reviewer, r.decision);
+  const letter: Record<T.ChangeKind, string> = { added: "A", modified: "M", deleted: "D", type_changed: "T", renamed: "R" };
+  const body = [pr.intent ? `Intent: ${pr.intent}` : null, pr.task ? `Task: ${pr.task}` : null, "", pr.body, "", "Changed files:", ...changes.map((c) => `- ${c.path} (${letter[c.kind]})`), "", "Reviews:", ...[...latest].map(([r, d]) => `- ${r}: ${d}`)].filter((l) => l !== null).join("\n");
+  return { id: "n_" + hashId(`draft:${pr.number}:${merged}`).slice(0, 10), title: pr.title, body, tags: [...tags].sort(), paths: dirs, commits: [merged], pulls: [pr.number], author: actor, confidence: 0.4, created_ms: now, updated_ms: now, superseded_by: null, valid_at: merged, draft: true, stale: false };
 }
 
 function actingAgent() {
   return loadSettings().agent || "web-ui";
+}
+
+// ---- auth fixtures -------------------------------------------------------------
+
+/** Well-known mock tokens: `root-secret` (root), `ci-secret` (write on acme/shop as ci-bot), `reader-secret` (read everywhere). */
+const tokenStore: { info: T.TokenInfo; secret: string }[] = [
+  { secret: "ci-secret", info: { id: "tok_" + hashId("tok:ci").slice(0, 12), name: "ci-deploy", agent: "ci-bot", scopes: [{ repo: "acme/shop", access: "write" }], created_ms: at(5, 15, 20), expires_ms: NOW + 25 * DAY, created_by: "root", last_used_ms: NOW - 40 * 60_000 } },
+  { secret: "reader-secret", info: { id: "tok_" + hashId("tok:reader").slice(0, 12), name: "dashboard-reader", scopes: [{ repo: "*", access: "read" }], created_ms: at(3, 9), expires_ms: null, created_by: "root", last_used_ms: null } },
+  { secret: hashId("tok:expired").slice(0, 40), info: { id: "tok_" + hashId("tok:old").slice(0, 12), name: "old-laptop", agent: "coder-1", scopes: [{ repo: "acme/shop", access: "admin" }, { repo: "agit/docs-site", access: "read" }], created_ms: at(8, 12), expires_ms: NOW - 2 * DAY, created_by: "root", last_used_ms: at(3, 12) } },
+];
+
+function principal(): T.WhoAmI {
+  const token = loadSettings().token;
+  if (!token) return { principal: "anonymous", root: true, scopes: [{ repo: "*", access: "admin" }] }; // open mode
+  if (token === "root-secret") return { principal: "root", root: true, scopes: [{ repo: "*", access: "admin" }] };
+  const t = tokenStore.find((x) => x.secret === token);
+  if (!t) throw new ApiError(403, "forbidden", "unknown or revoked token", false);
+  if (t.info.expires_ms && t.info.expires_ms < Date.now()) throw new ApiError(403, "forbidden", `token ${t.info.name} expired`, false);
+  t.info.last_used_ms = Date.now();
+  return { principal: t.info.id, agent: t.info.agent ?? undefined, root: false, scopes: t.info.scopes };
+}
+const RANK: Record<T.Access, number> = { read: 0, write: 1, admin: 2 };
+function holds(who: T.WhoAmI, repo: string, access: T.Access) {
+  return who.root || who.scopes.some((s) => (s.repo === "*" || s.repo === repo) && RANK[s.access] >= RANK[access]);
+}
+/** Mock enforcement of the access rules in docs/API.md (admin for policy/keys/webhooks/rules/tokens, write for other mutations). */
+function require(repo: string, access: T.Access) {
+  const who = principal();
+  if (!holds(who, repo, access)) {
+    const err = new ApiError(403, "forbidden", `${access} access to ${repo === "*" ? "the server" : repo} required (you are ${who.agent ?? who.principal})`, false);
+    notifyAuthDenied(err); // the HTTP layer does this for live responses
+    throw err;
+  }
+  return who;
 }
 
 // ---- Api implementation ---------------------------------------------------------
@@ -1170,14 +1364,45 @@ export const mockApi: Api = {
     return { status: "ok", version: "0.1.0-mock" };
   },
 
+  async whoami() {
+    await sleep(60);
+    return principal();
+  },
+  async tokens() {
+    await latency();
+    require("*", "admin");
+    return tokenStore.map((t) => structuredClone(t.info));
+  },
+  async createToken(body) {
+    await latency();
+    const who = require("*", "admin");
+    if (!body.name?.trim()) throw new ApiError(400, "invalid", "name is required", false);
+    if (!body.scopes?.length) throw new ApiError(400, "invalid", "at least one scope is required", false);
+    for (const s of body.scopes) if (!holds(who, s.repo, s.access) || (s.repo === "*" && !who.root)) throw new ApiError(403, "forbidden", `cannot grant ${s.access} on ${s.repo}: you do not hold it`, false);
+    const now = Date.now();
+    const secret = "agit_" + hashId(`secret:${now}:${body.name}`).slice(0, 40);
+    const info: T.TokenInfo = { id: "tok_" + hashId(`tok:${now}:${body.name}`).slice(0, 12), name: body.name.trim(), agent: body.agent?.trim() || undefined, scopes: body.scopes, created_ms: now, expires_ms: body.ttl_secs ? now + body.ttl_secs * 1000 : null, created_by: who.agent ?? who.principal, last_used_ms: null };
+    tokenStore.push({ secret, info });
+    return { token: secret, ...structuredClone(info) };
+  },
+  async deleteToken(id) {
+    await latency();
+    require("*", "admin");
+    const idx = tokenStore.findIndex((t) => t.info.id === id);
+    if (idx < 0) notFound(`token ${id}`);
+    tokenStore.splice(idx, 1);
+    return { deleted: id };
+  },
+
   async repos() {
     await latency();
     return [...repos.values()].map((st) => ({ name: st.name, default_branch: st.default_branch, head: headOf(st, st.default_branch)?.id ?? null, created_ms: st.created_ms }));
   },
   async createRepo(body) {
     await latency();
+    require("*", "admin");
     if (repos.has(body.name)) throw new ApiError(409, "already_exists", `repository ${body.name} already exists`, false);
-    const st: RepoState = { name: body.name, default_branch: body.default_branch ?? "main", created_ms: Date.now(), branches: new Map(), tags: [], leases: [], pulls: [], notes: [], rules: [], policy: { ...T_DEFAULT_POLICY }, webhooks: [], events: [] };
+    const st: RepoState = { name: body.name, default_branch: body.default_branch ?? "main", created_ms: Date.now(), branches: new Map(), tags: [], leases: [], pulls: [], notes: [], rules: [], policy: { ...T_DEFAULT_POLICY }, webhooks: [], events: [], keys: [] };
     repos.set(st.name, st);
     pushEvent(st, { kind: "repo.create", actor: actingAgent(), data: { name: st.name } });
     return { name: st.name, default_branch: st.default_branch, head: null, created_ms: st.created_ms };
@@ -1190,6 +1415,7 @@ export const mockApi: Api = {
   async deleteRepo(name) {
     await latency();
     repoOf(name);
+    require(name, "admin");
     repos.delete(name);
     return { deleted: true };
   },
@@ -1229,7 +1455,23 @@ export const mockApi: Api = {
     await latency();
     const st = repoOf(name);
     const { commit } = resolve(st, rev);
-    return { id: commit.id, commit: commit.commit, changes: commit.changes, patch: commit.patch };
+    const linking = st.notes.filter((n) => n.commits.includes(commit.id));
+    const covering = st.notes.filter((n) => !n.draft && !linking.includes(n) && commit.changes.some((c) => n.paths.some((p) => patternCovers(p, c.path))));
+    const notes = [...linking, ...covering].slice(0, 10).map((n) => summary(st, n));
+    return { id: commit.id, commit: commit.commit, changes: commit.changes, patch: commit.patch, signature: commit.signature, notes };
+  },
+  async blame(name, rev, path, maxCommits = 500) {
+    await latency();
+    const st = repoOf(name);
+    const head = resolve(st, rev).commit;
+    // Same algorithm as the server: walk the file's history and attribute lines newest first.
+    const r = await computeBlame(mockApi, name, head.id, path);
+    if (r.binary) throw new ApiError(400, "invalid", `${path} is binary`, false);
+    const commits: Record<string, T.BlameCommit> = {};
+    for (const c of r.commits) commits[c.id] = { id: c.id, author: c.author.name, agent: c.agent?.id ?? undefined, time_ms: c.time_ms, summary: c.message.split("\n")[0], intent: c.intent ?? undefined };
+    const used = new Set(r.lines.map((l) => (l.commit >= 0 ? r.commits[l.commit].id : null)).filter(Boolean) as string[]);
+    for (const id of Object.keys(commits)) if (!used.has(id)) delete commits[id];
+    return { path, rev: head.id, lines: r.lines.map((l) => ({ line: l.no, commit: l.commit >= 0 ? r.commits[l.commit].id : r.commits[r.commits.length - 1].id, text: l.text })), commits, truncated: r.truncated || r.commits.length >= maxCommits };
   },
   async tree(name, rev, path = "") {
     await latency();
@@ -1468,7 +1710,7 @@ export const mockApi: Api = {
       const extra = srcHist.slice(baseIdx + 1).filter((c) => !c.commit.checkpoint);
       if (body.strategy === "ff" && tgt[tgt.length - 1].id !== pr.base_id) throw new ApiError(409, "merge_conflicts", "target moved; fast-forward not possible", false);
       if (body.strategy === "merge") {
-        const mergeCommit: BuiltCommit = { id: hashId(`merge:${n}:${Date.now()}`), commit: { tree: srcHead.commit.tree, parents: [tgt[tgt.length - 1].id, srcHead.id], author: { name: actingAgent(), email: `${actingAgent()}@agents.local` }, time_ms: Date.now(), message: body.message ?? `Merge pull request #${n} from ${pr.source.replace("refs/heads/", "")}\n\n${pr.title}`, intent: pr.intent, task: pr.task, agent: { id: actingAgent(), model: null }, checkpoint: false, meta: { "agit.merge": { strategy: "merge", pull: n } } }, changes: detail.changes, patch: "", snapshot: srcHead.snapshot };
+        const mergeCommit: BuiltCommit = { id: hashId(`merge:${n}:${Date.now()}`), commit: { tree: srcHead.commit.tree, parents: [tgt[tgt.length - 1].id, srcHead.id], author: { name: actingAgent(), email: `${actingAgent()}@agents.local` }, time_ms: Date.now(), message: body.message ?? `Merge pull request #${n} from ${pr.source.replace("refs/heads/", "")}\n\n${pr.title}`, intent: pr.intent, task: pr.task, agent: { id: actingAgent(), model: null }, checkpoint: false, meta: { "agit.merge": { strategy: "merge", pull: n } } }, changes: detail.changes, patch: "", snapshot: srcHead.snapshot, signature: { status: "unsigned", trusted: false } };
         st.branches.set(targetBranch, [...tgt, ...extra, mergeCommit]);
         mergedId = mergeCommit.id;
       } else {
@@ -1481,8 +1723,12 @@ export const mockApi: Api = {
     pr.state = "merged";
     pr.merged_commit = mergedId;
     pr.updated_ms = Date.now();
-    pushEvent(st, { kind: "pull.merge", actor: actingAgent(), data: { number: n, merged_commit: mergedId, strategy: body.strategy } });
-    pushEvent(st, { kind: "ref.update", actor: actingAgent(), data: { ref: pr.target, old: pr.target_id, new: mergedId, message: null } });
+    staleCache.clear();
+    pushEvent(st, { kind: "ref.update", actor: actingAgent(), data: { ref: pr.target, old: pr.target_id, new: mergedId, op: "merge", pull: n } });
+    pushEvent(st, { kind: "pull.merge", actor: actingAgent(), data: { number: n, commit: mergedId, strategy: body.strategy } });
+    const draft = draftFromMerge(st, pr, mergedId, detail.changes, actingAgent());
+    st.notes.unshift(draft);
+    pushEvent(st, { kind: "note.draft", actor: actingAgent(), data: { id: draft.id, title: draft.title, pull: n, commit: mergedId, tags: draft.tags, paths: draft.paths } });
     return { pr: structuredClone(pr), merged_commit: mergedId };
   },
   async closePull(name, n) {
@@ -1507,19 +1753,57 @@ export const mockApi: Api = {
   async notes(name, q = {}) {
     await latency();
     const st = repoOf(name);
-    let list = st.notes;
+    let list = st.notes.filter((n) => q.drafts || !n.draft);
     if (q.tags?.length) list = list.filter((n) => q.tags!.every((t) => n.tags.includes(t)));
     if (q.path) list = list.filter((n) => n.paths.some((p) => patternCovers(p, q.path!)));
-    if (q.q) {
-      const needle = q.q.toLowerCase();
-      list = list.filter((n) => n.title.toLowerCase().includes(needle) || n.body.toLowerCase().includes(needle) || n.tags.some((t) => t.includes(needle)));
+    if (q.commit) {
+      const id = resolve(st, q.commit).commit.id;
+      list = list.filter((n) => n.commits.includes(id));
     }
-    return [...list].sort((a, b) => Number(!!a.superseded_by) - Number(!!b.superseded_by) || b.updated_ms - a.updated_ms).slice(0, q.limit ?? 50).map(summary);
+    if (q.pull !== undefined) list = list.filter((n) => n.pulls.includes(q.pull!));
+    if (q.q) {
+      const scored = list.map((n) => ({ n, s: scoreNote(n, q.q!) })).filter((x) => x.s > 0).sort((a, b) => b.s - a.s);
+      return scored.slice(0, q.limit ?? 100).map((x) => summary(st, x.n, x.s));
+    }
+    return [...list].sort((a, b) => Number(!!a.superseded_by) - Number(!!b.superseded_by) || b.updated_ms - a.updated_ms).slice(0, q.limit ?? 100).map((n) => summary(st, n));
   },
   async note(name, id) {
     await latency();
-    const n = repoOf(name).notes.find((x) => x.id === id) ?? notFound(`note ${id}`);
-    return structuredClone(n);
+    const st = repoOf(name);
+    const n = st.notes.find((x) => x.id === id) ?? notFound(`note ${id}`);
+    return withStale(st, n);
+  },
+  async validateNote(name, id, rev) {
+    await latency();
+    const st = repoOf(name);
+    require(name, "write");
+    const n = st.notes.find((x) => x.id === id) ?? notFound(`note ${id}`);
+    n.valid_at = resolve(st, rev ?? st.default_branch).commit.id;
+    n.updated_ms = Date.now();
+    pushEvent(st, { kind: "note.validate", actor: actingAgent(), data: { id: n.id, title: n.title, valid_at: n.valid_at } });
+    return withStale(st, n);
+  },
+  async acceptNote(name, id, patch) {
+    await latency();
+    const st = repoOf(name);
+    require(name, "write");
+    const n = st.notes.find((x) => x.id === id) ?? notFound(`note ${id}`);
+    if (patch) Object.assign(n, Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)));
+    n.draft = false;
+    n.updated_ms = Date.now();
+    pushEvent(st, { kind: "note.accept", actor: actingAgent(), data: { id: n.id, title: n.title, tags: n.tags } });
+    return withStale(st, n);
+  },
+  async staleNotes(name, q = {}) {
+    await latency();
+    const st = repoOf(name);
+    const out: T.StaleNote[] = [];
+    for (const n of st.notes) {
+      if (n.superseded_by || (n.draft && !q.drafts)) continue;
+      const changed = changedPaths(st, n);
+      if (changed.length) out.push({ ...summary(st, n), stale: true, changed_paths: changed });
+    }
+    return out.sort((a, b) => b.updated_ms - a.updated_ms);
   },
   async createNote(name, body) {
     await latency();
@@ -1527,11 +1811,17 @@ export const mockApi: Api = {
     if (!body.title?.trim()) throw new ApiError(400, "invalid", "title is required", false);
     const bad = body.tags.find((t) => !t.includes(":"));
     if (bad) throw new ApiError(400, "invalid", `tag "${bad}" has no namespace (expected namespace:value)`, false);
+    require(name, "write");
     const now = Date.now();
-    const n: T.Note = { id: "n_" + hashId(`note:${now}:${body.title}`).slice(0, 10), title: body.title, body: body.body, tags: [...new Set(body.tags)].sort(), paths: body.paths ?? [], commits: body.commits ?? [], pulls: body.pulls ?? [], author: actingAgent(), confidence: body.confidence ?? 0.8, created_ms: now, updated_ms: now, superseded_by: null };
+    let valid_at: string | null = headOf(st, st.default_branch)?.id ?? null;
+    if (body.valid_at) {
+      if (!allCommits(st).has(body.valid_at)) throw new ApiError(412, "object_not_found", `valid_at ${body.valid_at} is not an object the server has`, false);
+      valid_at = body.valid_at;
+    }
+    const n: T.Note = { id: "n_" + hashId(`note:${now}:${body.title}`).slice(0, 10), title: body.title, body: body.body, tags: [...new Set(body.tags)].sort(), paths: body.paths ?? [], commits: body.commits ?? [], pulls: body.pulls ?? [], author: actingAgent(), confidence: body.confidence ?? 0.8, created_ms: now, updated_ms: now, superseded_by: null, valid_at, draft: !!body.draft, stale: false };
     st.notes.unshift(n);
-    pushEvent(st, { kind: "note.create", actor: n.author, data: { id: n.id, title: n.title, tags: n.tags } });
-    return structuredClone(n);
+    pushEvent(st, n.draft ? { kind: "note.draft", actor: n.author, data: { id: n.id, title: n.title, tags: n.tags, paths: n.paths } } : { kind: "note.create", actor: n.author, data: { id: n.id, title: n.title, tags: n.tags } });
+    return withStale(st, n);
   },
   async patchNote(name, id, body) {
     await latency();
@@ -1539,20 +1829,22 @@ export const mockApi: Api = {
     const n = st.notes.find((x) => x.id === id) ?? notFound(`note ${id}`);
     Object.assign(n, Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined)));
     n.updated_ms = Date.now();
-    return structuredClone(n);
+    pushEvent(st, { kind: "note.update", actor: actingAgent(), data: { id: n.id, title: n.title } });
+    return withStale(st, n);
   },
   async deleteNote(name, id) {
     await latency();
     const st = repoOf(name);
     const idx = st.notes.findIndex((x) => x.id === id);
     if (idx < 0) notFound(`note ${id}`);
-    st.notes.splice(idx, 1);
-    return { deleted: true };
+    const [n] = st.notes.splice(idx, 1);
+    pushEvent(st, { kind: "note.delete", actor: actingAgent(), data: { id: n.id, title: n.title, draft: n.draft } });
+    return { deleted: id };
   },
   async tagCounts(name) {
     await latency();
     const counts = new Map<string, number>();
-    for (const n of repoOf(name).notes) for (const t of n.tags) counts.set(t, (counts.get(t) ?? 0) + 1);
+    for (const n of repoOf(name).notes) if (!n.draft) for (const t of n.tags) counts.set(t, (counts.get(t) ?? 0) + 1);
     return [...counts.entries()].map(([tag, count]) => ({ tag, count })).sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
   },
   async rules(name) {
@@ -1561,24 +1853,56 @@ export const mockApi: Api = {
   },
   async putRules(name, rules) {
     await latency();
-    repoOf(name).rules = structuredClone(rules);
+    const st = repoOf(name);
+    require(name, "admin");
+    st.rules = structuredClone(rules);
+    pushEvent(st, { kind: "knowledge.rules", actor: actingAgent(), data: { count: rules.length } });
     return structuredClone(rules);
   },
-  async context(name, path, limit = 10) {
+  async context(name, path, q = {}) {
     await latency();
     const st = repoOf(name);
+    const limit = q.limit ?? 10;
     const now = Date.now();
-    const notes = st.notes.filter((n) => n.paths.some((p) => patternCovers(p, path))).slice(0, limit).map(summary);
+    const notes = st.notes.filter((n) => !n.draft && n.paths.some((p) => patternCovers(p, path))).map((n) => summary(st, n)).sort((a, b) => Number(a.stale) - Number(b.stale)).slice(0, limit);
     const hist = [...resolve(st, st.default_branch).history].reverse();
-    const recent_commits = hist.filter((c) => c.changes.some((ch) => patternCovers(path, ch.path) || patternCovers(ch.path, path))).slice(0, limit).map(listItem);
+    const touches = (c: BuiltCommit) => c.changes.some((ch) => patternCovers(path, ch.path) || patternCovers(ch.path, path));
+    const recent_commits = hist.filter(touches).slice(0, limit).map(listItem);
     const leases = st.leases.filter((l) => (l.expires_ms ?? Infinity) > now && l.paths.some((p) => patternCovers(p, path) || patternCovers(path, p)));
+    const agents_active = [...new Set([...leases.map((l) => l.holder), ...hist.filter((c) => touches(c) && now - c.commit.time_ms < DAY).map((c) => c.commit.agent?.id ?? c.commit.author.name)])].sort();
+    let files: T.ContextFile[] | undefined;
+    if (q.files) {
+      const snap = headOf(st, st.default_branch)?.snapshot ?? new Map<string, string>();
+      const isFile = snap.has(path);
+      const dir = isFile ? (path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "") : path.replace(/\/$/, "");
+      const lastTouched = new Map<string, number>();
+      for (const c of hist) for (const ch of c.changes) if (!lastTouched.has(ch.path)) lastTouched.set(ch.path, c.commit.time_ms);
+      const siblings = [...snap.keys()].filter((p) => p !== path && (p.includes("/") ? p.slice(0, p.lastIndexOf("/")) : "") === dir).sort((a, b) => (lastTouched.get(b) ?? 0) - (lastTouched.get(a) ?? 0)).slice(0, 5);
+      const candidates = (isFile ? [path, ...siblings] : siblings).filter((p) => !/[\u0000-\u0008]/.test(snap.get(p) ?? "") && !p.endsWith(".png"));
+      files = candidates.map((p) => ({ path: p, text: snap.get(p) ?? "", truncated: false }));
+      let budget = (q.budget ?? 6000) * 4 - 1500; // leave room for the rest of the response
+      for (const f of files) budget -= f.text.length;
+      for (let i = files.length - 1; i >= 0 && budget < 0; i--) {
+        const f = files[i];
+        if (f.text.length + budget > 200) {
+          f.text = f.text.slice(0, f.text.length + budget);
+          f.truncated = true;
+          budget = 0;
+        } else {
+          budget += f.text.length;
+          files.splice(i, 1);
+        }
+      }
+    }
     const open_pulls: T.Pull[] = [];
     for (const pr of st.pulls.filter((p) => p.state === "open")) {
       const d = diffBetween(st, pr.base_id, pr.source_id);
       if (d.changes.some((c) => patternCovers(path, c.path) || patternCovers(c.path, path))) open_pulls.push(structuredClone(pr));
     }
     const suggested_tags = [...new Set(st.rules.filter((r) => patternCovers(r.pattern, path)).flatMap((r) => r.tags))].sort();
-    return { path, notes, suggested_tags, recent_commits, leases, open_pulls };
+    const out: T.Context = { path, notes, suggested_tags, recent_commits, leases, open_pulls, agents_active };
+    if (files) out.files = files;
+    return out;
   },
 
   async policy(name) {
@@ -1588,10 +1912,43 @@ export const mockApi: Api = {
   async putPolicy(name, policy) {
     await latency();
     const st = repoOf(name);
+    require(name, "admin");
     if (policy.require_approvals < 0 || policy.max_files_per_commit < 0) throw new ApiError(400, "invalid", "counts must be >= 0", false);
     st.policy = { ...T_DEFAULT_POLICY, ...structuredClone(policy) };
     pushEvent(st, { kind: "policy.update", actor: actingAgent(), data: { protected_branches: st.policy.protected_branches } });
     return structuredClone(st.policy);
+  },
+
+  async keys(name) {
+    await latency();
+    return structuredClone(repoOf(name).keys);
+  },
+  async addKey(name, body) {
+    await latency();
+    const st = repoOf(name);
+    const who = require(name, "admin");
+    if (!body.agent?.trim() || !body.public_key?.trim()) throw new ApiError(400, "invalid", "agent and public_key are required", false);
+    const known = Object.entries(KEYS).find(([, k]) => k.public_key === body.public_key.trim());
+    const key_id = known ? known[1].key_id : "k_" + hashId(`key:${body.public_key}`).slice(0, 16);
+    const existing = st.keys.find((k) => k.key_id === key_id);
+    if (existing && existing.agent !== body.agent.trim()) throw new ApiError(409, "already_exists", `key ${key_id} is registered for ${existing.agent}`, false);
+    if (existing) return structuredClone(existing);
+    const k: T.KeyEntry = { agent: body.agent.trim(), key_id, public_key: body.public_key.trim(), added_ms: Date.now(), added_by: who.agent ?? who.principal };
+    st.keys.push(k);
+    for (const list of st.branches.values()) for (const c of list) if (c.signature.status === "valid" && c.signature.key_id === k.key_id && c.signature.signer === k.agent) c.signature.trusted = true;
+    pushEvent(st, { kind: "key.add", actor: actingAgent(), data: { agent: k.agent, key_id: k.key_id } });
+    return structuredClone(k);
+  },
+  async deleteKey(name, keyId) {
+    await latency();
+    const st = repoOf(name);
+    require(name, "admin");
+    const idx = st.keys.findIndex((k) => k.key_id === keyId);
+    if (idx < 0) notFound(`key ${keyId}`);
+    const [k] = st.keys.splice(idx, 1);
+    for (const list of st.branches.values()) for (const c of list) if (c.signature.status === "valid" && c.signature.key_id === k.key_id) c.signature.trusted = false;
+    pushEvent(st, { kind: "key.delete", actor: actingAgent(), data: { agent: k.agent, key_id: k.key_id } });
+    return { deleted: keyId };
   },
 
   async webhooks(name) {
@@ -1601,6 +1958,7 @@ export const mockApi: Api = {
   async createWebhook(name, body) {
     await latency();
     const st = repoOf(name);
+    require(name, "admin");
     let url: URL;
     try {
       url = new URL(body.url);
@@ -1616,6 +1974,7 @@ export const mockApi: Api = {
   async deleteWebhook(name, id) {
     await latency();
     const st = repoOf(name);
+    require(name, "admin");
     const idx = st.webhooks.findIndex((w) => w.id === id);
     if (idx < 0) notFound(`webhook ${id}`);
     const [wh] = st.webhooks.splice(idx, 1);

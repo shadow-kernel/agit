@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, reportError } from "../api/client";
+import { onSettingsChange } from "../api/settings";
+
+// Every saved settings change (token, base URL, agent) bumps an epoch so all
+// data hooks refetch: a page stuck on a 403 recovers right after signing in.
+let epoch = 0;
+const epochListeners = new Set<(n: number) => void>();
+onSettingsChange(() => {
+  epoch++;
+  epochListeners.forEach((l) => l(epoch));
+});
 
 export interface AsyncState<T> {
   data: T | undefined;
@@ -19,9 +29,17 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts: { silen
   const [error, setError] = useState<ApiError | null>(null);
   const [loading, setLoading] = useState(true);
   const [tick, setTick] = useState(0);
+  const [ep, setEp] = useState(epoch);
   const fnRef = useRef(fn);
   fnRef.current = fn;
   const enabled = opts.enabled ?? true;
+
+  useEffect(() => {
+    epochListeners.add(setEp);
+    return () => {
+      epochListeners.delete(setEp);
+    };
+  }, []);
 
   useEffect(() => {
     if (!enabled) {
@@ -49,7 +67,7 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[], opts: { silen
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [...deps, tick, enabled]);
+  }, [...deps, tick, enabled, ep]);
 
   const reload = useCallback(() => setTick((t) => t + 1), []);
   const setData = useCallback((u: T | ((prev: T | undefined) => T)) => {

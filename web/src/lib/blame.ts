@@ -1,8 +1,9 @@
-// Client-side blame. There is no server endpoint, so we walk the file's
-// history (`GET /commits?path=`), fetch the blob at each commit and attribute
-// lines with a Myers line diff, newest commit first.
+// Client-side blame, kept as the fallback for servers without
+// `GET /repos/{repo}/blame/{rev}` (and used by the mock to build its fixture):
+// walk the file's history (`GET /commits?path=`), fetch the blob at each commit
+// and attribute lines with a Myers line diff, newest commit first.
 
-import { api, ApiError } from "../api/client";
+import { api as facade, ApiError, type Api } from "../api/client";
 import type { CommitListItem } from "../api/types";
 
 export interface BlameLine {
@@ -117,7 +118,7 @@ const resultCache = new Map<string, Promise<BlameResult>>();
 const blobCache = new Map<string, Promise<string | null>>();
 const MAX_BLOB_CACHE = 400;
 
-function blobAt(repo: string, commitId: string, path: string, signal?: AbortSignal): Promise<string | null> {
+function blobAt(api: Api, repo: string, commitId: string, path: string, signal?: AbortSignal): Promise<string | null> {
   const key = `${repo}\0${commitId}\0${path}`;
   let p = blobCache.get(key);
   if (!p) {
@@ -142,7 +143,7 @@ export function blame(repo: string, rev: string, path: string, onProgress?: (p: 
   const key = `${repo}\0${rev}\0${path}`;
   const cached = resultCache.get(key);
   if (cached) return cached;
-  const p = computeBlame(repo, rev, path, onProgress, signal).catch((e) => {
+  const p = computeBlame(facade, repo, rev, path, onProgress, signal).catch((e) => {
     resultCache.delete(key);
     throw e;
   });
@@ -150,7 +151,8 @@ export function blame(repo: string, rev: string, path: string, onProgress?: (p: 
   return p;
 }
 
-async function computeBlame(repo: string, rev: string, path: string, onProgress?: (p: BlameProgress) => void, signal?: AbortSignal): Promise<BlameResult> {
+/** Uncached; `api` picks the data source (the mock passes itself). */
+export async function computeBlame(api: Api, repo: string, rev: string, path: string, onProgress?: (p: BlameProgress) => void, signal?: AbortSignal): Promise<BlameResult> {
   const head = await api.tree(repo, rev, path, signal);
   if (head.kind !== "blob") throw new ApiError(400, "invalid", `${path} is a directory`, false);
   if (head.binary || head.text == null) return { lines: [], commits: [], truncated: false, binary: true };
@@ -170,7 +172,7 @@ async function computeBlame(repo: string, rev: string, path: string, onProgress?
     while (next < total) {
       const i = next++;
       if (signal?.aborted) throw new DOMException("aborted", "AbortError");
-      contents[i] = i === 0 ? text : await blobAt(repo, history[i].id, path, signal);
+      contents[i] = i === 0 ? text : await blobAt(api, repo, history[i].id, path, signal);
       done++;
       onProgress?.({ done, total });
     }

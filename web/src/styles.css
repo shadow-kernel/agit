@@ -618,3 +618,33 @@ mark { background: var(--attention-subtle); color: inherit; border-radius: 2px; 
 /* ---- compare ---- */
 .compare-picker .box-row { gap: 10px; padding: 10px 16px; row-gap: 8px; }
 .compare-picker .box-row.wrap { flex-wrap: wrap; }
+
+/* ---- auth / identity ---- */
+.who-chip { padding: 0 8px 0 4px; gap: 6px; max-width: 260px; }
+.who-chip .avatar { width: 18px; height: 18px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: #fff; flex-shrink: 0; }
+.who-card { border: 1px solid var(--border-muted); border-radius: var(--radius); background: var(--bg-subtle); padding: 10px 12px; font-size: 13px; }
+.who-card .avatar { width: 24px; height: 24px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: #fff; flex-shrink: 0; }
+.auth-banner { display: flex; align-items: flex-start; gap: 12px; margin: 16px auto 0; max-width: 1280px; width: calc(100% - 64px); padding: 12px 16px; border: 1px solid var(--attention); border-radius: var(--radius); background: var(--attention-subtle); font-size: 13px; }
+.auth-banner.policy { border-color: var(--danger); background: var(--danger-subtle); }
+.auth-banner > span:first-child { font-size: 18px; line-height: 1; }
+@media (max-width: 768px) { .auth-banner { width: calc(100% - 32px); } }
+.token-reveal { display: block; margin-top: 6px; padding: 8px 10px; background: var(--bg); border: 1px dashed var(--success); border-radius: var(--radius); font-size: 12px; word-break: break-all; user-select: all; }
+.tokens-table tr.expired td { opacity: 0.6; }
+.scope-editor .input, .scope-editor .select { width: auto; }
+.key-row { align-items: flex-start; padding: 12px 16px; }
+.key-row .pubkey { max-width: 380px; display: inline-block; vertical-align: middle; }
+.chip-x { border: 0; background: none; cursor: pointer; color: inherit; font-size: 13px; line-height: 1; padding: 0 0 0 2px; }
+
+/* ---- renames ---- */
+.change-kind.renamed { background: var(--accent-subtle); color: var(--accent); }
+.change-path .from { color: var(--fg-muted); }
+.change-path .arrow { color: var(--fg-subtle); }
+.change-path .sim { margin-left: 6px; vertical-align: middle; }
+
+/* ---- knowledge v2 ---- */
+.note-row.draft { background: var(--done-subtle); }
+.note-row.draft:hover { filter: brightness(0.98); }
+.score { font-family: var(--font-mono); font-size: 11px; color: var(--fg-muted); background: var(--bg-subtle); border: 1px solid var(--border-muted); border-radius: 4px; padding: 1px 6px; }
+.context-file { border: 1px solid var(--border-muted); border-radius: var(--radius); padding: 4px 6px; }
+.context-pre { margin: 6px 0 2px; max-height: 240px; overflow: auto; font-size: 11px; line-height: 1.45; background: var(--bg-subtle); border-radius: 4px; padding: 8px; white-space: pre; }
+.segmented .count { background: var(--neutral-subtle); border-radius: 10px; padding: 0 6px; font-size: 11px; line-height: 16px; }
