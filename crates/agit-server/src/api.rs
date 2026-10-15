@@ -636,7 +636,6 @@ async fn stream_events(
     let all = futures::stream::iter(backlog).chain(live).map(|e| {
         Ok(SseEvent::default()
             .id(e.seq.to_string())
-            .event(e.kind.clone())
             .data(serde_json::to_string(&e).unwrap_or_default()))
     });
     Ok(Sse::new(all).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))

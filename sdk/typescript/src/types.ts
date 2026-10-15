@@ -417,6 +417,25 @@ export interface MergeConflictsDetails {
   count: number;
 }
 
+// ---- Webhooks ---------------------------------------------------------------
+
+export interface Webhook {
+  id: string;
+  url: string;
+  /** Exact kinds (`commit`), prefixes (`pull.*`) or empty for all. */
+  kinds: string[];
+  active: boolean;
+  /** The secret itself is never returned. */
+  has_secret: boolean;
+  created_ms: number;
+}
+
+export interface WebhookCreate {
+  url: string;
+  kinds?: string[];
+  secret?: string;
+}
+
 // ---- Policy -----------------------------------------------------------------
 
 export interface Policy {

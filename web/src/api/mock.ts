@@ -1101,7 +1101,7 @@ function diffBetween(st: RepoState, from: string, to: string): T.Diff {
   const paths = [...new Set([...a.keys(), ...b.keys()])].sort();
   const changes: T.Change[] = [];
   let patch = "";
-  let ins = 0, del = 0;
+  const stats: T.FileStat[] = [];
   for (const p of paths) {
     const o = a.get(p) ?? null, n = b.get(p) ?? null;
     if (o === n) continue;
@@ -1110,12 +1110,14 @@ function diffBetween(st: RepoState, from: string, to: string): T.Diff {
     changes.push({ path: p, kind, old: side(o), new: side(n) });
     const d = unifiedDiff(p, o, n);
     patch += d;
+    let added = 0, removed = 0;
     for (const line of d.split("\n")) {
-      if (line.startsWith("+") && !line.startsWith("+++")) ins++;
-      else if (line.startsWith("-") && !line.startsWith("---")) del++;
+      if (line.startsWith("+") && !line.startsWith("+++")) added++;
+      else if (line.startsWith("-") && !line.startsWith("---")) removed++;
     }
+    stats.push({ path: p, added, removed });
   }
-  return { changes, patch, stats: { files: changes.length, insertions: ins, deletions: del } };
+  return { changes, patch, stats };
 }
 
 function summary(n: T.Note): T.NoteSummary {

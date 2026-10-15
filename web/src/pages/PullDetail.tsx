@@ -358,13 +358,14 @@ function FilesChanged({ d, setData }: { d: PullDetailT; setData: (u: PullDetailT
 
   if (diff.error) return <ErrorState error={diff.error} retry={diff.reload} />;
   if (!diff.data) return <div className="box"><Skeleton lines={8} /></div>;
-  const stats = diff.data.stats ?? {};
+  const stats = diff.data.stats ?? [];
+  const totals = stats.reduce((acc, s) => ({ add: acc.add + s.added, del: acc.del + s.removed }), { add: 0, del: 0 });
   return (
     <div className="stack">
       <div className="box">
         <div className="box-head">
           <h3>{pluralize(diff.data.changes.length, "file")} changed</h3>
-          <DiffStat add={Number(stats.insertions ?? 0)} del={Number(stats.deletions ?? 0)} />
+          <DiffStat add={totals.add} del={totals.del} />
           <div className="grow" />
           <span className="muted small">Click a line to comment</span>
         </div>

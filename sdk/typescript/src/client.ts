@@ -544,6 +544,23 @@ export class AgitClient {
     setRules: (repo: string, rules: T.TagRule[], opts?: RequestOptions) => this.setTagRules(repo, rules, opts),
   };
 
+  // ---- webhooks -------------------------------------------------------------
+
+  listWebhooks(repo: string, opts?: RequestOptions): Promise<T.Webhook[]> {
+    return this.request("GET", `${repoPath(repo)}/webhooks`, opts);
+  }
+  /** Deliveries carry `X-Agit-Event`, `X-Agit-Delivery` and, with a secret, `X-Agit-Signature: blake3=<hex>`. */
+  createWebhook(repo: string, webhook: T.WebhookCreate, opts?: RequestOptions): Promise<T.Webhook> {
+    return this.request("POST", `${repoPath(repo)}/webhooks`, { ...opts, body: webhook });
+  }
+  deleteWebhook(repo: string, id: string, opts?: RequestOptions): Promise<{ deleted: string }> {
+    return this.request("DELETE", `${repoPath(repo)}/webhooks/${encodeURIComponent(id)}`, opts);
+  }
+  /** Queues a synthetic `ping` delivery. */
+  testWebhook(repo: string, id: string, opts?: RequestOptions): Promise<{ queued: boolean }> {
+    return this.request("POST", `${repoPath(repo)}/webhooks/${encodeURIComponent(id)}/test`, opts);
+  }
+
   // ---- policy ---------------------------------------------------------------
 
   getPolicy(repo: string, opts?: RequestOptions): Promise<T.Policy> {

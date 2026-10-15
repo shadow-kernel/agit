@@ -221,6 +221,17 @@ describe("repos, pulls, knowledge, policy, leases", () => {
     expect(last().method).toBe("PUT");
   });
 
+  it("webhooks: list, create, test, delete and 404", async () => {
+    expect(await client.listWebhooks("demo")).toEqual([fixtures.webhook]);
+    const wh = await client.createWebhook("demo", { url: "http://localhost:9/hook", kinds: ["pull.*"], secret: "s" });
+    expect(last().body).toEqual({ url: "http://localhost:9/hook", kinds: ["pull.*"], secret: "s" });
+    expect(wh.kinds).toEqual(["pull.*"]);
+    expect(wh.has_secret).toBe(true);
+    expect(await client.testWebhook("demo", "wh_1")).toEqual({ queued: true });
+    expect(await client.deleteWebhook("demo", "wh_1")).toEqual({ deleted: "wh_1" });
+    await expect(client.deleteWebhook("demo", "wh_missing")).rejects.toBeInstanceOf(NotFoundError);
+  });
+
   it("policy GET and PUT round-trip", async () => {
     expect(await client.getPolicy("demo")).toEqual(fixtures.policy);
     const next = { ...fixtures.policy, require_approvals: 2 };

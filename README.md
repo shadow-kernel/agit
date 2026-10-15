@@ -390,7 +390,7 @@ with AgentSession(client, "demo", "coder-1") as s:
     s.remember(title="Session store lags", body="...", tags=["kind:gotcha", "area:auth"], paths=["src/auth/**"])
 ```
 
-A TypeScript SDK (`sdk/typescript`) follows the same shape. The step-by-step agent workflow is in [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md).
+**TypeScript SDK ✅** (`sdk/typescript`, `@agit/sdk`, zero dependencies, ESM + CJS, Node 18+/Deno/Bun/browsers): the same surface as the Python SDK, SSE streaming over `fetch` with reconnect, typed errors, `AgentSession` with `withLeases(paths, fn)`. The step-by-step agent workflow is in [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md).
 
 ### Idempotency 📋
 

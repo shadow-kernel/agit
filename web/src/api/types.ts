@@ -142,12 +142,13 @@ export interface TreeBlob {
 
 export type TreeResponse = TreeDir | TreeBlob;
 
-export interface DiffStats {
-  files?: number;
-  insertions?: number;
-  deletions?: number;
-  [key: string]: unknown;
+/** Per-file line statistics, as returned by `/diff` and `/pulls/{n}/diff`. */
+export interface FileStat {
+  path: string;
+  added: number;
+  removed: number;
 }
+export type DiffStats = FileStat[];
 
 export interface Diff {
   changes: Change[];

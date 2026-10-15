@@ -62,6 +62,7 @@ export const fixtures = {
     updated_ms: 3,
     superseded_by: null,
   },
+  webhook: { id: "wh_1", url: "http://localhost:9/hook", kinds: ["ref.*"], active: true, has_secret: true, created_ms: 1_700_000_000_000 },
   policy: {
     protected_branches: ["main"],
     require_pull_request: true,
@@ -260,6 +261,17 @@ export async function startFakeServer(): Promise<FakeServer> {
         return json(res, 200, [{ pattern: "src/auth/**", tags: ["area:auth"] }]);
       case route === "PUT /api/v1/repos/demo/knowledge/rules":
         return json(res, 200, body);
+      case route === "GET /api/v1/repos/demo/webhooks":
+        return json(res, 200, [fixtures.webhook]);
+      case route === "POST /api/v1/repos/demo/webhooks":
+        if (!String((body as { url?: string }).url ?? "").startsWith("http")) return error(res, 400, "invalid", "webhook url must be http(s)");
+        return json(res, 201, { ...fixtures.webhook, url: (body as { url: string }).url, kinds: (body as { kinds?: string[] }).kinds ?? [], has_secret: Boolean((body as { secret?: string }).secret) });
+      case route === "DELETE /api/v1/repos/demo/webhooks/wh_1":
+        return json(res, 200, { deleted: "wh_1" });
+      case route === "DELETE /api/v1/repos/demo/webhooks/wh_missing":
+        return error(res, 404, "not_found", "webhook wh_missing");
+      case route === "POST /api/v1/repos/demo/webhooks/wh_1/test":
+        return json(res, 200, { queued: true });
       case route === "GET /api/v1/repos/demo/policy":
         return json(res, 200, fixtures.policy);
       case route === "PUT /api/v1/repos/demo/policy":

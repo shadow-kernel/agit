@@ -50,7 +50,7 @@ repeated frames `kind:u8 | len:u32 big-endian | payload`. kind 1 blob, 2 tree, 3
 
 ## Events
 - `GET /repos/{repo}/events?since=<seq>&limit=` -> `[event]`
-- `GET /repos/{repo}/events/stream?since=<seq>` -> `text/event-stream`, each `data:` is an event JSON.
+- `GET /repos/{repo}/events/stream?since=<seq>` -> `text/event-stream`; each message is a plain `data:` line with the event JSON (`id:` is the seq; no `event:` name, so `EventSource.onmessage` works). Without `since` only live events are sent; with `since=N` events with `seq > N` are replayed first.
 Event kinds mirror the CLI plus `ref.update`, `pull.open`, `pull.review`, `pull.merge`, `pull.close`, `note.create`.
 
 ## Leases (server-wide coordination between agents)
