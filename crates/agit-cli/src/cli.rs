@@ -346,6 +346,15 @@ pub enum GitCmd {
         #[arg(long)]
         no_checkout: bool,
     },
+    /// Export this repository's history into a git repository (created when missing).
+    Export {
+        /// Target git repository directory.
+        target: PathBuf,
+        #[arg(long = "branch")]
+        branches: Vec<String>,
+        #[arg(long)]
+        no_tags: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -994,6 +1003,35 @@ pub fn run(cli: Cli) -> Result<()> {
                         "branches: {}  tags: {}",
                         report.branches.join(", "),
                         report.tags.join(", ")
+                    );
+                });
+            }
+            GitCmd::Export {
+                target,
+                branches,
+                no_tags,
+            } => {
+                let base = cwd(&cli.dir)?;
+                let target = if target.is_absolute() {
+                    target
+                } else {
+                    base.join(target)
+                };
+                let repo = open(&cli.dir)?;
+                let report = agit_git_bridge::export(
+                    &repo,
+                    &target,
+                    &agit_git_bridge::ExportOptions {
+                        branches,
+                        tags: !no_tags,
+                    },
+                )?;
+                emit(json, &report, || {
+                    println!(
+                        "exported {} new commit(s) to {} (branches: {})",
+                        report.commits,
+                        target.display(),
+                        report.branches.join(", ")
                     );
                 });
             }

@@ -319,7 +319,7 @@ impl Importer<'_> {
         let id = self.repo.store().write_commit(&commit)?;
         self.commit_map.insert(sha.to_string(), id);
         self.report.commits += 1;
-        if self.verbose && self.report.commits % 100 == 0 {
+        if self.verbose && self.report.commits.is_multiple_of(100) {
             eprintln!(
                 "imported {} commits, {} blobs",
                 self.report.commits, self.report.blobs
@@ -439,6 +439,318 @@ pub fn import(git_dir: &Path, repo: &Repository, opts: &ImportOptions) -> Result
         serde_json::json!({ "source": git_dir, "commits": imp.report.commits, "branches": imp.report.branches }),
     )?;
     Ok(imp.report)
+}
+
+// ---------------------------------------------------------------------------
+// Export
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ExportReport {
+    pub commits: usize,
+    pub reused: usize,
+    pub branches: Vec<String>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ExportOptions {
+    /// Only these branches (short names); all when empty.
+    pub branches: Vec<String>,
+    pub tags: bool,
+}
+
+fn fi_data(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(format!("data {}\n", bytes.len()).as_bytes());
+    out.extend_from_slice(bytes);
+    out.push(b'\n');
+}
+
+fn quote_path(p: &str) -> String {
+    if p.contains(['"', '\n', '\\']) || p.starts_with('"') {
+        format!(
+            "\"{}\"",
+            p.replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+        )
+    } else {
+        p.to_string()
+    }
+}
+
+fn commit_message_with_trailers(c: &Commit) -> String {
+    let mut msg = c.message.trim_end().to_string();
+    let mut trailers: Vec<String> = Vec::new();
+    if let Some(i) = &c.intent {
+        trailers.push(format!("Intent: {i}"));
+    }
+    if let Some(t) = &c.task {
+        trailers.push(format!("Task: {t}"));
+    }
+    if let Some(a) = &c.agent {
+        trailers.push(format!("Agent: {}", a.id));
+        if let Some(m) = &a.model {
+            trailers.push(format!("Model: {m}"));
+        }
+        if let Some(r) = &a.run_id {
+            trailers.push(format!("Run-Id: {r}"));
+        }
+    }
+    for (k, v) in &c.meta {
+        if let Some(name) = k.strip_prefix("git.trailer.") {
+            if let Some(s) = v.as_str() {
+                let mut chars = name.chars();
+                let cap = match chars.next() {
+                    Some(f) => f.to_ascii_uppercase().to_string() + chars.as_str(),
+                    None => String::new(),
+                };
+                trailers.push(format!("{cap}: {s}"));
+            }
+        }
+    }
+    if !trailers.is_empty() {
+        msg.push_str("\n\n");
+        msg.push_str(&trailers.join("\n"));
+    }
+    msg.push('\n');
+    msg
+}
+
+/// Export agit history into `git_dir` (initialized when missing) using
+/// `git fast-import`. Commits that originally came from git (known in the
+/// mapping table and present in the target) are referenced, not recreated,
+/// so repeated exports only add what is new.
+pub fn export(repo: &Repository, git_dir: &Path, opts: &ExportOptions) -> Result<ExportReport> {
+    if !git_dir.join(".git").exists() && git(git_dir, &["rev-parse", "--git-dir"]).is_err() {
+        std::fs::create_dir_all(git_dir)?;
+        let branch = repo.config()?.default_branch;
+        git(git_dir, &["init", "-q", "-b", &branch])?;
+    }
+    let mut map: HashMap<String, ObjectId> = load_map(repo);
+    let mut known: HashMap<ObjectId, String> =
+        map.iter().map(|(sha, id)| (*id, sha.clone())).collect();
+    // Only trust mappings whose git object exists in the target.
+    known.retain(|_, sha| git(git_dir, &["cat-file", "-e", &format!("{sha}^{{commit}}")]).is_ok());
+
+    let heads = repo.refs().list(HEADS_PREFIX)?;
+    let branches: Vec<(String, ObjectId)> = heads
+        .into_iter()
+        .map(|(n, id)| (n[HEADS_PREFIX.len()..].to_string(), id))
+        .filter(|(n, _)| opts.branches.is_empty() || opts.branches.iter().any(|b| b == n))
+        .collect();
+    let tags: Vec<(String, ObjectId)> = if opts.tags {
+        repo.refs()
+            .list(TAGS_PREFIX)?
+            .into_iter()
+            .map(|(n, id)| (n[TAGS_PREFIX.len()..].to_string(), id))
+            .collect()
+    } else {
+        vec![]
+    };
+    if branches.is_empty() {
+        return Err(Error::Invalid("no branches to export".into()));
+    }
+
+    // Topological order (parents first) of commits not yet in git.
+    let store = repo.store();
+    let mut order: Vec<ObjectId> = Vec::new();
+    let mut seen: std::collections::HashSet<ObjectId> = std::collections::HashSet::new();
+    let mut stack: Vec<(ObjectId, bool)> = branches
+        .iter()
+        .chain(tags.iter())
+        .map(|(_, id)| (*id, false))
+        .collect();
+    while let Some((id, expanded)) = stack.pop() {
+        if known.contains_key(&id) {
+            continue;
+        }
+        if expanded {
+            if seen.insert(id) {
+                order.push(id);
+            }
+            continue;
+        }
+        if seen.contains(&id) {
+            continue;
+        }
+        stack.push((id, true));
+        for p in store.read_commit(&id)?.parents {
+            if !seen.contains(&p) && !known.contains_key(&p) {
+                stack.push((p, false));
+            }
+        }
+    }
+
+    let mut stream: Vec<u8> = Vec::new();
+    let mut marks: HashMap<ObjectId, usize> = HashMap::new();
+    let mut blob_marks: HashMap<ObjectId, usize> = HashMap::new();
+    let mut next_mark = 1usize;
+    let mut report = ExportReport {
+        reused: known.len().min(order.len() + known.len()),
+        ..Default::default()
+    };
+
+    let mut blob_ref =
+        |id: &ObjectId, stream: &mut Vec<u8>, next_mark: &mut usize| -> Result<String> {
+            if let Some(m) = blob_marks.get(id) {
+                return Ok(format!(":{m}"));
+            }
+            let bytes = store.read_blob(id)?;
+            let m = *next_mark;
+            *next_mark += 1;
+            stream.extend_from_slice(format!("blob\nmark :{m}\n").as_bytes());
+            fi_data(stream, &bytes);
+            blob_marks.insert(*id, m);
+            Ok(format!(":{m}"))
+        };
+
+    for (i, id) in order.iter().enumerate() {
+        let c = store.read_commit(id)?;
+        let first_parent = c.parents.first().copied();
+        let parent_tree = match first_parent {
+            Some(p) => Some(store.read_commit(&p)?.tree),
+            None => None,
+        };
+        // Blobs must precede the commit command: emit them now and buffer
+        // the file modifications.
+        let mut lines: Vec<String> = Vec::new();
+        for ch in agit_core::diff::diff_trees(store, parent_tree.as_ref(), Some(&c.tree))? {
+            match &ch.new {
+                None => lines.push(format!("D {}", quote_path(&ch.path))),
+                Some(side) => {
+                    let mode = match side.mode {
+                        EntryMode::Executable => "100755",
+                        EntryMode::Symlink => "120000",
+                        EntryMode::Submodule => {
+                            // Pins from an earlier import carry the git sha in the first 20 bytes.
+                            let sha = hex::encode(&side.id.as_bytes()[..20]);
+                            lines.push(format!("M 160000 {sha} {}", quote_path(&ch.path)));
+                            continue;
+                        }
+                        _ => "100644",
+                    };
+                    let r = blob_ref(&side.id, &mut stream, &mut next_mark)?;
+                    lines.push(format!("M {mode} {r} {}", quote_path(&ch.path)));
+                }
+            }
+        }
+        let m = next_mark;
+        next_mark += 1;
+        marks.insert(*id, m);
+        let parent_ref = |p: &ObjectId| -> Option<String> {
+            marks
+                .get(p)
+                .map(|m| format!(":{m}"))
+                .or_else(|| known.get(p).cloned())
+        };
+        // Write to a temporary branch; real refs are set at the end.
+        stream.extend_from_slice(format!("commit refs/agit-export/tmp\nmark :{m}\n").as_bytes());
+        let email = if c.author.email.is_empty() {
+            "unknown@agit"
+        } else {
+            &c.author.email
+        };
+        let secs = c.time_ms.div_euclid(1000);
+        stream.extend_from_slice(
+            format!("author {} <{}> {} +0000\n", c.author.name, email, secs).as_bytes(),
+        );
+        stream.extend_from_slice(
+            format!("committer {} <{}> {} +0000\n", c.author.name, email, secs).as_bytes(),
+        );
+        fi_data(&mut stream, commit_message_with_trailers(&c).as_bytes());
+        match first_parent.and_then(|p| parent_ref(&p)) {
+            Some(r) => stream.extend_from_slice(format!("from {r}\n").as_bytes()),
+            None => {
+                let _ = i;
+                stream.extend_from_slice(b"deleteall\n");
+            }
+        }
+        for p in c.parents.iter().skip(1) {
+            if let Some(r) = parent_ref(p) {
+                stream.extend_from_slice(format!("merge {r}\n").as_bytes());
+            }
+        }
+        for l in &lines {
+            stream.extend_from_slice(l.as_bytes());
+            stream.push(b'\n');
+        }
+        stream.push(b'\n');
+        report.commits += 1;
+    }
+    // Refs.
+    let reference = |id: &ObjectId| -> Option<String> {
+        marks
+            .get(id)
+            .map(|m| format!(":{m}"))
+            .or_else(|| known.get(id).cloned())
+    };
+    for (name, id) in &branches {
+        if let Some(r) = reference(id) {
+            stream.extend_from_slice(format!("reset refs/heads/{name}\nfrom {r}\n\n").as_bytes());
+            report.branches.push(name.clone());
+        }
+    }
+    for (name, id) in &tags {
+        if let Some(r) = reference(id) {
+            stream.extend_from_slice(format!("reset refs/tags/{name}\nfrom {r}\n\n").as_bytes());
+            report.tags.push(name.clone());
+        }
+    }
+    stream.extend_from_slice(b"reset refs/agit-export/tmp\n\n");
+
+    // Run fast-import and read back marks to extend the mapping table.
+    let marks_file = repo.common_dir().join("git-export-marks.txt");
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(git_dir)
+        .args([
+            "fast-import",
+            "--quiet",
+            "--force",
+            &format!("--export-marks={}", marks_file.display()),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| Error::Invalid(format!("cannot run git fast-import: {e}")))?;
+    child.stdin.take().unwrap().write_all(&stream)?;
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        return Err(Error::Invalid(format!(
+            "git fast-import failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    let _ = git(git_dir, &["update-ref", "-d", "refs/agit-export/tmp"]);
+    if let Ok(text) = std::fs::read_to_string(&marks_file) {
+        let by_mark: HashMap<usize, ObjectId> = marks.iter().map(|(id, m)| (*m, *id)).collect();
+        for line in text.lines() {
+            if let Some((m, sha)) = line.split_once(' ') {
+                if let Some(id) = m
+                    .strip_prefix(':')
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .and_then(|n| by_mark.get(&n))
+                {
+                    map.insert(sha.to_string(), *id);
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&marks_file);
+    }
+    agit_core::refs::write_atomic(&map_path(repo), &serde_json::to_vec(&map)?)?;
+    // Working tree of a non-bare target: keep HEAD's checkout in sync.
+    if git_dir.join(".git").is_dir() {
+        let _ = git(git_dir, &["reset", "-q", "--hard"]);
+    }
+    repo.events().append(
+        "git.export",
+        Some(repo.workspace()),
+        None,
+        serde_json::json!({ "target": git_dir, "commits": report.commits, "branches": report.branches }),
+    )?;
+    Ok(report)
 }
 
 #[cfg(test)]

@@ -17,5 +17,16 @@ symlinks, submodule pins. Trailers `Intent:`, `Task:`, `Agent:`, `Model:` and
 A mapping table `.agit/git-map.json` makes re-imports incremental and
 idempotent.
 
-Planned: export back to git and continuous two-way sync (RFC in
-`docs/ROADMAP.md`, Phase 3).
+Export back to git uses `git fast-import`:
+
+```sh
+agit git export ../repo-git            # creates the git repository when missing
+```
+
+Commits that came from git are referenced by their original SHA, so only
+new agit commits become new git commits; structured fields go back out as
+`Intent:`, `Task:`, `Agent:`, `Model:` and `Run-Id:` trailers. Together with
+import this gives a round trip: git -> agit -> commits in agit -> git.
+
+Planned: continuous two-way sync (watch mode) and git protocol serving so git
+clients can clone from an agit server.

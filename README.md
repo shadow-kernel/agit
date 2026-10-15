@@ -410,7 +410,7 @@ Status per item is marked. The first server exists today (`crates/agit-server`, 
 
 **Webhooks and event streaming.** ✅ SSE stream (`/events/stream?since=`), polling (`/events?since=`), and webhooks (`/repos/{repo}/webhooks`) with kind filters, retries and BLAKE3-keyed signatures. 📋 WebSocket.
 
-**Git bridge (`crates/agit-git-bridge`).** ✅ `agit git import <path> [--into dir]` imports a complete git history (merges, tags, modes, symlinks, submodule pins) with the original SHA kept in commit metadata and git trailers lifted into `intent`/`task`/`agent`; re-imports are incremental. agit's own git history imports cleanly into agit (see Dogfooding). 📋 export and bidirectional sync.
+**Git bridge (`crates/agit-git-bridge`).** ✅ `agit git import <path> [--into dir]` imports a complete git history (merges, tags, modes, symlinks, submodule pins) with the original SHA kept in commit metadata and git trailers lifted into `intent`/`task`/`agent`; re-imports are incremental. `agit git export <dir>` writes agit history back into a git repository through `git fast-import`, referencing already-known git commits by SHA so repeated exports are incremental. agit's own git history round-trips (see Dogfooding). 📋 continuous two-way sync and serving the git protocol.
 
 ## Performance goals
 
@@ -503,7 +503,7 @@ Planned sub-repositories: `agit-server`, `agit-protocol`, `agit-knowledge`, `agi
 | 0 | Local core: objects, index, commit, status, diff, branch, merge, leases, events, workspaces, checkpoints, JSON output, tests | ✅ / 🚧 |
 | 1 | Performance: pack segments, journal + group commit, mmap ref table, parallel status at 1M files, published benchmarks vs git | 📋 |
 | 2 | Protocol + server: clone/push/pull, auth, Raft log, blob tiers | 🚧 (clone/push/pull, CAS refs, token auth ✅; Raft, blob tiers 📋) |
-| 3 | Platform: PRs, reviews, policies, webhooks, event streaming, web UI (code browsing first, then PRs), git bridge | 🚧 (PRs, reviews, SSE, policies, webhooks, web UI v1, git import ✅; git export 📋) |
+| 3 | Platform: PRs, reviews, policies, webhooks, event streaming, web UI (code browsing first, then PRs), git bridge | 🚧 (PRs, reviews, SSE, policies, webhooks, web UI v1, git import/export ✅; git protocol serving 📋) |
 | 4 | Knowledge base + AI integration: notes, tags, query API, context packs, MCP server, SDKs | 🚧 (notes, typed tags, tag rules, query API, `context` endpoint, MCP server ✅; SDKs 📋) |
 | 5 | Self-hosting: agit repo managed by agit, 1.0 format freeze, spec | 📋 |
 
@@ -513,7 +513,7 @@ Deliverables, acceptance criteria and benchmark targets per phase are in [docs/R
 
 This repository is managed with git until agit is self-hosting (Phase 5). The switch is a milestone, not a shortcut: it happens when `clone`, `push`, `pull`, pull requests and the git bridge are solid enough that the agit project itself can live on agit without losing anything. `.agitignore` and `.agitmodules` are already present so the layout does not change on that day.
 
-First step taken: `agit git import . --into ../agit-self` imports this repository's full git history into agit with a clean working tree and a passing `agit fsck`. The remaining step before switching is the git export path, so contributors on git are not cut off.
+First step taken: `agit git import . --into ../agit-self` imports this repository's full git history into agit with a clean working tree and a passing `agit fsck`. `agit git export` writes new agit commits back into a git repository, so contributors on git are not cut off; the switch itself waits for the hosted server to be deployed.
 
 ## Contributing
 

@@ -92,7 +92,9 @@ interface InternalRequest extends RequestOptions {
 }
 
 function linkSignals(timeoutMs: number, outer?: AbortSignal): { signal: AbortSignal | undefined; cleanup: () => void; timedOut: () => boolean } {
-  if (timeoutMs <= 0 && !outer) return { signal: undefined, cleanup: () => {}, timedOut: () => false };
+  // Without a timeout the caller's signal is handed to fetch as-is, so aborting it also
+  // tears down a streaming body that outlives this function.
+  if (timeoutMs <= 0) return { signal: outer, cleanup: () => {}, timedOut: () => false };
   const ctl = new AbortController();
   let timedOut = false;
   const onAbort = () => ctl.abort(outer?.reason);
@@ -186,8 +188,19 @@ export class AgitClient {
 
   // ---- HTTP core ------------------------------------------------------------
 
-  /** Perform a request and return the `Response` (errors already mapped). */
+  /**
+   * Perform a request and return the `Response` (errors already mapped). The timeout, when
+   * set, covers connecting and the response headers only; pass `timeoutMs: 0` plus a
+   * `signal` to control a streaming body.
+   */
   async raw(method: string, path: string, opts: InternalRequest = {}): Promise<Response> {
+    const { res, done } = await this.send(method, path, opts);
+    done();
+    return res;
+  }
+
+  /** Like `raw`, but the timeout stays armed until `done()` is called (after the body is read). */
+  private async send(method: string, path: string, opts: InternalRequest = {}): Promise<{ res: Response; done: () => void; timedOut: () => boolean }> {
     const url = this.url(path, opts.query);
     const headers: Record<string, string> = { Accept: opts.accept ?? "application/json", ...this.headers() };
     let body: BodyInit | undefined;
@@ -224,20 +237,27 @@ export class AgitClient {
       }
       throw errorFromResponse(res.status, parsed, res.statusText);
     }
-    // Keep the timeout armed while the body is read for non-streaming calls; streaming
-    // callers pass timeoutMs: 0 so there is nothing to clean up.
-    if (link.signal && timeoutMs > 0) {
-      const origBody = res;
-      void origBody;
+    return { res, done: link.cleanup, timedOut: link.timedOut };
+  }
+
+  /** Read a whole body under the request's timeout, mapping a timeout to an `AgitError`. */
+  private async readBody<B>(method: string, path: string, opts: InternalRequest, read: (res: Response) => Promise<B>): Promise<{ res: Response; body: B }> {
+    const { res, done, timedOut } = await this.send(method, path, opts);
+    try {
+      return { res, body: await read(res) };
+    } catch (e) {
+      if (isAbortError(e) && timedOut()) {
+        throw new AgitError({ code: "timeout", message: `${method} ${path} timed out while reading the response`, retryable: true, cause: e });
+      }
+      throw e;
+    } finally {
+      done();
     }
-    link.cleanup();
-    return res;
   }
 
   /** JSON request; empty bodies resolve to `undefined`. */
   async request<R>(method: string, path: string, opts: InternalRequest = {}): Promise<R> {
-    const res = await this.raw(method, path, opts);
-    const text = await res.text();
+    const { res, body: text } = await this.readBody(method, path, opts, (r) => r.text());
     if (!text) return undefined as R;
     let json: unknown;
     try {
@@ -250,8 +270,8 @@ export class AgitClient {
   }
 
   private async bytes(method: string, path: string, opts: InternalRequest = {}): Promise<Uint8Array> {
-    const res = await this.raw(method, path, { accept: "application/octet-stream, application/x-agit-objects", ...opts });
-    return new Uint8Array(await res.arrayBuffer());
+    const { body } = await this.readBody(method, path, { accept: "application/octet-stream, application/x-agit-objects", ...opts }, (r) => r.arrayBuffer());
+    return new Uint8Array(body);
   }
 
   // ---- health ---------------------------------------------------------------
@@ -298,9 +318,9 @@ export class AgitClient {
   }
   /** Raw object payload plus its kind from `X-Agit-Kind`. */
   async getObject(repo: string, id: T.ObjectId, opts?: RequestOptions): Promise<T.RawObject> {
-    const res = await this.raw("GET", `${repoPath(repo)}/objects/${enc(id)}`, { ...opts, accept: "application/octet-stream" });
+    const { res, body } = await this.readBody("GET", `${repoPath(repo)}/objects/${enc(id)}`, { ...opts, accept: "application/octet-stream" }, (r) => r.arrayBuffer());
     const kind = (res.headers.get("x-agit-kind") ?? "blob") as T.ObjectKind;
-    return { kind, payload: new Uint8Array(await res.arrayBuffer()) };
+    return { kind, payload: new Uint8Array(body) };
   }
   getObjectJson(repo: string, id: T.ObjectId, opts?: RequestOptions): Promise<T.ObjectJson> {
     return this.request("GET", `${repoPath(repo)}/objects/${enc(id)}/json`, opts);
