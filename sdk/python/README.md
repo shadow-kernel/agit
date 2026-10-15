@@ -42,6 +42,11 @@ pr = client.create_pull("demo", "Add x", source="refs/heads/ws/coder-1", intent=
 client.review_pull("demo", pr.number, "approve", "lgtm")
 merged = client.merge_pull("demo", pr.number)            # MergeResponse(pr=..., merged_commit=...)
 
+# policy: protect main, require a PR with one approval
+pol = client.policy("demo")
+pol.protected_branches, pol.require_pull_request, pol.require_approvals = ["main"], True, 1
+client.set_policy("demo", pol)                           # violations raise PolicyViolation (403)
+
 # knowledge
 note = client.create_note("demo", "x.txt is consumed by the importer",
                           tags=["kind:decision", "area:import"], paths=["x.txt"])
@@ -98,8 +103,8 @@ for event in stream(["events", "--follow"], cwd="."):           # one object per
 Responses are parsed into dataclasses from `agit.types` with the exact field
 names of `docs/API.md` (`RepoSummary`, `RefEntry`, `CommitEntry`, `CommitDetail`,
 `Change`, `DiffResponse`, `PullRequest`, `PullDetail`, `Review`, `Comment`,
-`Check`, `MergeResponse`, `Note`, `NoteSummary`, `TagCount`, `TagRule`, `Lease`,
-`Event`, `ContextResponse`, `AgentActivity`). Parsing is lenient: unknown fields
+`Check`, `MergeResponse`, `Note`, `NoteSummary`, `TagCount`, `TagRule`, `Policy`,
+`Lease`, `Event`, `ContextResponse`, `AgentActivity`). Parsing is lenient: unknown fields
 are ignored and the raw payload is kept on `.raw`. A few small responses are
 plain dicts: `tree()`, `delete_repo()`, `release_lease()`, `check_lease()`,
 `delete_note()`, `object_json()`. `fetch_objects()` returns the raw object
@@ -127,7 +132,7 @@ Every failure raises `agit.AgitError` (or a subclass) built from the
 Subclasses selected by code: `RefConflict` (`.name`, `.expected`, `.actual`),
 `LeaseConflict` (`.path`, `.holder`, `.lease_id`), `MergeConflicts` (`.count`),
 `NotFound` (`not_found`, `*_not_found`, `unknown_revision`, 404), `AlreadyExists`,
-`Forbidden`, `Invalid`, `TransportError` (connection refused / timeout, always retryable).
+`Forbidden`, `PolicyViolation` (403 `policy_violation` from a protected-branch rule), `Invalid`, `TransportError` (connection refused / timeout, always retryable).
 
 ```python
 from agit import AgitError, RefConflict, LeaseConflict

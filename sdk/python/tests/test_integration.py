@@ -38,6 +38,8 @@ def test_roundtrip_against_real_server(server_url):
                 other.claim_lease(name, "sdk-other", ["src/main.rs"])
             assert ei.value.holder == "sdk-it"
             assert other.check_lease(name, "sdk-other", ["docs/x"])["allowed"] is True
+            me = [a for a in client.agents(name) if a.id == "sdk-it"]  # active leases count as activity
+            assert me and me[0].leases == 1
 
             note = s.remember("integration note", "body", tags=["kind:test"], paths=["src/**"])
             assert client.note(name, note.id).title == "integration note"
@@ -63,7 +65,7 @@ def test_roundtrip_against_real_server(server_url):
             gen.close()
 
         assert client.leases(name) == []
-        assert any(a.id == "sdk-it" for a in client.agents(name))
+        assert not any(a.id == "sdk-it" for a in client.agents(name))  # no commits, lease released
         with pytest.raises(NotFound):
             client.pull(name, 999)
     finally:

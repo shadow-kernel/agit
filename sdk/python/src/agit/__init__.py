@@ -19,6 +19,7 @@ from .errors import (
     LeaseConflict,
     MergeConflicts,
     NotFound,
+    PolicyViolation,
     RefConflict,
     TransportError,
 )
@@ -41,6 +42,7 @@ from .types import (
     MergeResponse,
     Note,
     NoteSummary,
+    Policy,
     PullDetail,
     PullRequest,
     RefEntry,
@@ -70,6 +72,7 @@ __all__ = [
     "LeaseConflict",
     "MergeConflicts",
     "NotFound",
+    "PolicyViolation",
     "RefConflict",
     "TransportError",
     # types
@@ -91,6 +94,7 @@ __all__ = [
     "MergeResponse",
     "Note",
     "NoteSummary",
+    "Policy",
     "PullDetail",
     "PullRequest",
     "RefEntry",

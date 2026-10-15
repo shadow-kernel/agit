@@ -430,6 +430,41 @@ class ContextResponse(Model):
     }
 
 
+# -- policy ------------------------------------------------------------------
+
+
+@dataclass
+class Policy(Model):
+    """Per-repository rules enforced at ``refs/update`` and ``pulls/{n}/merge`` (403 ``policy_violation``)."""
+
+    protected_branches: list[str] = field(default_factory=list)
+    require_pull_request: bool = False
+    require_approvals: int = 0
+    require_intent: bool = False
+    require_agent: bool = False
+    require_checks: bool = False
+    block_on_blockers: bool = True
+    allowed_merge_agents: list[str] = field(default_factory=list)
+    allowed_push_agents: list[str] = field(default_factory=list)
+    max_files_per_commit: int = 0
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        """The full policy body for ``PUT /repos/{repo}/policy``."""
+        return {
+            "protected_branches": list(self.protected_branches),
+            "require_pull_request": self.require_pull_request,
+            "require_approvals": self.require_approvals,
+            "require_intent": self.require_intent,
+            "require_agent": self.require_agent,
+            "require_checks": self.require_checks,
+            "block_on_blockers": self.block_on_blockers,
+            "allowed_merge_agents": list(self.allowed_merge_agents),
+            "allowed_push_agents": list(self.allowed_push_agents),
+            "max_files_per_commit": self.max_files_per_commit,
+        }
+
+
 # -- activity ----------------------------------------------------------------
 
 
@@ -479,6 +514,7 @@ __all__ = [
     "Note",
     "NoteSummary",
     "PULL_STATES",
+    "Policy",
     "PullDetail",
     "PullRequest",
     "REVIEW_DECISIONS",

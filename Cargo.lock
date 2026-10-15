@@ -63,6 +63,7 @@ dependencies = [
  "agit-protocol",
  "anyhow",
  "axum",
+ "blake3",
  "clap",
  "futures",
  "globset",

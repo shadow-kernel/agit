@@ -113,6 +113,9 @@ pub fn router(state: Arc<AppState>, web_dir: Option<&std::path::Path>) -> Router
         .route("/repos/{repo}/knowledge/tags", get(list_tags_kb))
         .route("/repos/{repo}/knowledge/rules", get(get_rules).put(put_rules))
         .route("/repos/{repo}/policy", get(get_policy).put(put_policy))
+        .route("/repos/{repo}/webhooks", get(list_webhooks).post(create_webhook))
+        .route("/repos/{repo}/webhooks/{id}", delete(delete_webhook))
+        .route("/repos/{repo}/webhooks/{id}/test", post(test_webhook))
         .route("/repos/{repo}/context", get(get_context))
         .route("/repos/{repo}/agents", get(list_agents))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
@@ -610,6 +613,32 @@ async fn get_policy(State(st): S, Path(repo): Path<String>) -> ApiResult<Json<Po
 async fn put_policy(State(st): S, Path(repo): Path<String>, Agent(agent): Agent, Json(p): Json<Policy>) -> ApiResult<Json<Policy>> {
     let r = st.get(&repo)?;
     Ok(Json(crate::policy::PolicyStore::new(&r).set(p, &agent)?))
+}
+
+// ---------------------------------------------------------------------------
+// webhooks
+// ---------------------------------------------------------------------------
+
+async fn list_webhooks(State(st): S, Path(repo): Path<String>) -> ApiResult<Json<Vec<Webhook>>> {
+    let r = st.get(&repo)?;
+    Ok(Json(crate::webhooks::WebhookStore::new(&r).list()?))
+}
+
+async fn create_webhook(State(st): S, Path(repo): Path<String>, Agent(agent): Agent, Json(req): Json<WebhookCreate>) -> ApiResult<(StatusCode, Json<Webhook>)> {
+    let r = st.get(&repo)?;
+    Ok((StatusCode::CREATED, Json(crate::webhooks::WebhookStore::new(&r).create(req, &agent)?)))
+}
+
+async fn delete_webhook(State(st): S, Path((repo, id)): Path<(String, String)>, Agent(agent): Agent) -> ApiResult<Json<serde_json::Value>> {
+    let r = st.get(&repo)?;
+    crate::webhooks::WebhookStore::new(&r).delete(&id, &agent)?;
+    Ok(Json(serde_json::json!({ "deleted": id })))
+}
+
+async fn test_webhook(State(st): S, Path((repo, id)): Path<(String, String)>) -> ApiResult<Json<serde_json::Value>> {
+    let r = st.get(&repo)?;
+    crate::webhooks::WebhookStore::new(&r).test(&id)?;
+    Ok(Json(serde_json::json!({ "queued": true })))
 }
 
 // ---------------------------------------------------------------------------

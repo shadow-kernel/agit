@@ -35,6 +35,7 @@ from .types import (
     MergeResponse,
     Note,
     NoteSummary,
+    Policy,
     PullDetail,
     PullRequest,
     RefEntry,
@@ -490,6 +491,17 @@ class Client:
 
     def close_pull(self, repo: str, number: int) -> PullRequest:
         return PullRequest.from_dict(self._post(f"/repos/{_seg(repo)}/pulls/{int(number)}/close"))
+
+    # -- policy -------------------------------------------------------------
+
+    def policy(self, repo: str) -> Policy:
+        """Repository policy (defaults when unset)."""
+        return Policy.from_dict(self._get(f"/repos/{_seg(repo)}/policy"))
+
+    def set_policy(self, repo: str, policy: Policy | Mapping[str, Any]) -> Policy:
+        """``PUT`` the whole policy. Violations later surface as :class:`~agit.errors.PolicyViolation`."""
+        body = policy.to_dict() if isinstance(policy, Policy) else dict(policy)
+        return Policy.from_dict(self.request("PUT", f"/repos/{_seg(repo)}/policy", json_body=body))
 
     # -- knowledge ----------------------------------------------------------
 

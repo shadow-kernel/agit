@@ -395,7 +395,7 @@ Status per item is marked. The first server exists today (`crates/agit-server`, 
 
 **Web UI (`web/`).** ✅ first version: Vite + React + TypeScript, no UI kit, light and dark. Code browsing with syntax highlighting and a file finder, commits with agent/intent/task filters, commit diffs, pull requests with conversation, reviews, inline comments and merge, live agent activity from the SSE stream, a lease board with expiry countdowns, and the knowledge browser with tag filters and the per-path context panel. Runs against the server or in mock mode (`VITE_AGIT_MOCK=1`); `agit-server --web-dir web/dist` serves it from the same process. 📋 next: blame, symbol navigation, server-side rendering. Clean, GitHub-like, fast. Code browsing with syntax highlighting and symbol navigation, history and blame, diffs, PRs and reviews, branches and workspaces, live agent activity from the event stream, a lease board showing who is working where, and a knowledge browser. TypeScript and React with server-side rendering. The UI uses only the public API that agents use; there are no private endpoints. [RFC 0006](docs/rfcs/0006-web-ui.md).
 
-**Webhooks and event streaming.** ✅ SSE stream (`/events/stream?since=`) and polling (`/events?since=`). 📋 WebSocket and webhooks.
+**Webhooks and event streaming.** ✅ SSE stream (`/events/stream?since=`), polling (`/events?since=`), and webhooks (`/repos/{repo}/webhooks`) with kind filters, retries and BLAKE3-keyed signatures. 📋 WebSocket.
 
 **Git bridge (`crates/agit-git-bridge`).** `agit git import <url>`, `agit git export`, and bidirectional sync with a git-compatible SHA mapping table so teams can adopt agit incrementally.
 
@@ -490,7 +490,7 @@ Planned sub-repositories: `agit-server`, `agit-protocol`, `agit-knowledge`, `agi
 | 0 | Local core: objects, index, commit, status, diff, branch, merge, leases, events, workspaces, checkpoints, JSON output, tests | ✅ / 🚧 |
 | 1 | Performance: pack segments, journal + group commit, mmap ref table, parallel status at 1M files, published benchmarks vs git | 📋 |
 | 2 | Protocol + server: clone/push/pull, auth, Raft log, blob tiers | 🚧 (clone/push/pull, CAS refs, token auth ✅; Raft, blob tiers 📋) |
-| 3 | Platform: PRs, reviews, policies, webhooks, event streaming, web UI (code browsing first, then PRs), git bridge | 🚧 (PRs, reviews, SSE, policies, web UI v1 ✅; webhooks, git bridge 📋) |
+| 3 | Platform: PRs, reviews, policies, webhooks, event streaming, web UI (code browsing first, then PRs), git bridge | 🚧 (PRs, reviews, SSE, policies, webhooks, web UI v1 ✅; git bridge 📋) |
 | 4 | Knowledge base + AI integration: notes, tags, query API, context packs, MCP server, SDKs | 🚧 (notes, typed tags, tag rules, query API, `context` endpoint, MCP server ✅; SDKs 📋) |
 | 5 | Self-hosting: agit repo managed by agit, 1.0 format freeze, spec | 📋 |
 

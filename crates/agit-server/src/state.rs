@@ -55,6 +55,9 @@ impl RepoHandle {
     pub fn emit(&self, kind: &str, actor: Option<&str>, data: serde_json::Value) -> Result<Event> {
         let ev = self.events.append(kind, None, actor, data)?;
         let _ = self.tx.send(ev.clone());
+        if !kind.starts_with("webhook.") {
+            crate::webhooks::WebhookStore::new(self).dispatch(&ev);
+        }
         Ok(ev)
     }
 

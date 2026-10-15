@@ -523,6 +523,30 @@ pub struct ContextResponse {
     pub open_pulls: Vec<PullRequest>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Webhook {
+    pub id: String,
+    pub url: String,
+    /// Event kinds to deliver: exact (`commit`), prefix (`pull.*`), or empty for all.
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    #[serde(default)]
+    pub active: bool,
+    /// Whether a signing secret is configured (the secret itself is never returned).
+    #[serde(default)]
+    pub has_secret: bool,
+    pub created_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WebhookCreate {
+    pub url: String,
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    #[serde(default)]
+    pub secret: Option<String>,
+}
+
 /// Repository policy, enforced server-side at ref updates and PR merges.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Policy {

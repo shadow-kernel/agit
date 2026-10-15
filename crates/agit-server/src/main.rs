@@ -6,6 +6,7 @@ mod knowledge;
 mod policy;
 mod pulls;
 mod state;
+mod webhooks;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

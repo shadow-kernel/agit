@@ -213,6 +213,16 @@ impl Client {
     pub fn create_note(&self, repo: &str, req: &NoteCreate) -> Result<Note> {
         self.send_json("POST", &format!("/repos/{repo}/knowledge/notes"), req)
     }
+    pub fn webhooks(&self, repo: &str) -> Result<Vec<Webhook>> {
+        self.get_json(&format!("/repos/{repo}/webhooks"))
+    }
+    pub fn create_webhook(&self, repo: &str, req: &WebhookCreate) -> Result<Webhook> {
+        self.send_json("POST", &format!("/repos/{repo}/webhooks"), req)
+    }
+    pub fn delete_webhook(&self, repo: &str, id: &str) -> Result<serde_json::Value> {
+        let resp = self.req("DELETE", &format!("/repos/{repo}/webhooks/{id}")).call().map_err(map_err)?;
+        resp.into_json().map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
+    }
     pub fn policy(&self, repo: &str) -> Result<Policy> {
         self.get_json(&format!("/repos/{repo}/policy"))
     }

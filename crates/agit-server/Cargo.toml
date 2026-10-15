@@ -27,6 +27,8 @@ clap.workspace = true
 anyhow.workspace = true
 uuid.workspace = true
 globset.workspace = true
+ureq.workspace = true
+blake3.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

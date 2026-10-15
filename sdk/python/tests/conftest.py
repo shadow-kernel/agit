@@ -116,9 +116,17 @@ class Recorded:
         return v[0] if v else None
 
 
+POLICY = {
+    "protected_branches": [], "require_pull_request": False, "require_approvals": 0, "require_intent": False,
+    "require_agent": False, "require_checks": False, "block_on_blockers": True, "allowed_merge_agents": [],
+    "allowed_push_agents": [], "max_files_per_commit": 0,
+}
+
+
 @dataclass
 class FakeState:
     requests: list[Recorded] = field(default_factory=list)
+    policy: dict = field(default_factory=lambda: dict(POLICY))
     repos: dict[str, dict] = field(default_factory=dict)
     notes: dict[str, dict] = field(default_factory=dict)
     leases: dict[str, dict] = field(default_factory=dict)
@@ -232,6 +240,8 @@ class Handler(BaseHTTPRequestHandler):
                 updates = rec.json["updates"]
                 for u in updates:
                     exp = u["expect"]
+                    if u["new"] is None and u["name"].split("/")[-1] in st.policy["protected_branches"]:
+                        return self._err(403, "policy_violation", f"{u['name']} is protected")
                     if "is" in exp and exp["is"] != ID_A:
                         return self._err(409, "ref_conflict", "reference changed concurrently", True,
                                          {"name": u["name"], "expected": exp["is"], "actual": ID_A})
@@ -384,6 +394,13 @@ class Handler(BaseHTTPRequestHandler):
                 if tail == ["update"]:
                     return self._send(200, {**PR, **{k: v for k, v in rec.json.items()}})
 
+            if rest == ["policy"]:
+                if m == "GET":
+                    return self._send(200, st.policy)
+                if m == "PUT":
+                    st.policy = {**POLICY, **rec.json}
+                    return self._send(200, st.policy)
+
             if rest == ["knowledge", "notes"]:
                 if m == "GET":
                     out = []
@@ -445,7 +462,7 @@ class FakeServer:
         handler = type("BoundHandler", (Handler,), {"state": self.state})
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.httpd.daemon_threads = True
-        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
         self.thread.start()
         host, port = self.httpd.server_address[:2]
         self.base_url = f"http://{host}:{port}/api/v1"

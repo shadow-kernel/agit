@@ -95,6 +95,13 @@ Per-repository rules enforced at `refs/update` (direct pushes) and `pulls/{n}/me
 - `PUT /repos/{repo}/policy` -> policy
 Rules: protected branches cannot be deleted; with `require_pull_request` they only move through PR merges; approvals count the latest decision per reviewer and exclude the PR author; any `request_changes` blocks; unresolved `blocker` comments block when `block_on_blockers`; `require_intent`/`require_agent`/`max_files_per_commit` are checked on every new commit the update introduces.
 
+## Webhooks
+Deliver events to HTTP endpoints. Payload `{"repo":"<name>","event":<event>}`, headers `X-Agit-Event` (kind), `X-Agit-Repo`, `X-Agit-Delivery` (unique id), `X-Agit-Webhook` (id) and, when a secret is set, `X-Agit-Signature: blake3=<hex>` where the value is `blake3::keyed_hash(derive_key("agit webhook v1", secret), body)`. Deliveries retry 3 times with backoff.
+- `GET /repos/{repo}/webhooks` -> `[{id, url, kinds, active, has_secret, created_ms}]`
+- `POST /repos/{repo}/webhooks` `{url, kinds?: ["commit","pull.*"], secret?}` -> webhook
+- `DELETE /repos/{repo}/webhooks/{id}`
+- `POST /repos/{repo}/webhooks/{id}/test` -> queues a `ping` event
+
 ## Knowledge notes
 Note object:
 ```json

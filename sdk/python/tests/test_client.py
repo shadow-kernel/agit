@@ -16,6 +16,8 @@ from agit import (
     MergeConflicts,
     NotFound,
     Note,
+    Policy,
+    PolicyViolation,
     PullDetail,
     PullRequest,
     RefConflict,
@@ -326,6 +328,27 @@ def test_merge_conflicts(client):
     with pytest.raises(MergeConflicts) as ei:
         client.merge_pull("demo", 2)
     assert ei.value.count == 2 and ei.value.status == 409 and ei.value.code == "merge_conflicts"
+
+
+# -- policy -----------------------------------------------------------------
+
+
+def test_policy(server, client):
+    pol = client.policy("demo")
+    assert isinstance(pol, Policy) and pol.block_on_blockers is True and pol.protected_branches == []
+    pol.protected_branches = ["main"]
+    pol.require_pull_request = True
+    pol.require_approvals = 1
+    saved = client.set_policy("demo", pol)
+    assert server.last.method == "PUT" and server.last.path == "/api/v1/repos/demo/policy"
+    assert server.last.json["protected_branches"] == ["main"] and server.last.json["require_approvals"] == 1
+    assert set(server.last.json) == set(Policy().to_dict())  # the whole document is sent
+    assert saved.require_pull_request is True
+    client.set_policy("demo", {"protected_branches": ["main"]})  # plain dicts are accepted as-is
+    assert server.last.json == {"protected_branches": ["main"]}
+    with pytest.raises(PolicyViolation) as ei:
+        client.set_ref("demo", "refs/heads/main", None)
+    assert ei.value.code == "policy_violation" and ei.value.status == 403 and ei.value.retryable is False
 
 
 # -- knowledge --------------------------------------------------------------

@@ -170,6 +170,12 @@ class Forbidden(AgitError):
     codes = ("forbidden",)
 
 
+class PolicyViolation(AgitError):
+    """The repository policy rejected a ref update or merge (403 ``policy_violation``)."""
+
+    codes = ("policy_violation",)
+
+
 class Invalid(AgitError):
     """Invalid argument or state (HTTP 400)."""
 
@@ -183,7 +189,8 @@ class TransportError(AgitError):
 
 
 _BY_CODE: dict[str, type[AgitError]] = {}
-for _klass in (RefConflict, LeaseConflict, MergeConflicts, NotFound, AlreadyExists, Forbidden, Invalid, TransportError):
+for _klass in (RefConflict, LeaseConflict, MergeConflicts, NotFound, AlreadyExists, Forbidden, PolicyViolation, Invalid,
+               TransportError):
     for _code in _klass.codes:
         _BY_CODE[_code] = _klass
 
@@ -210,6 +217,7 @@ __all__ = [
     "LeaseConflict",
     "MergeConflicts",
     "NotFound",
+    "PolicyViolation",
     "RefConflict",
     "TransportError",
     "error_class_for",

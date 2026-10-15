@@ -29,6 +29,9 @@ mod pulls;
 #[path = "../src/state.rs"]
 #[allow(dead_code)]
 mod state;
+#[path = "../src/webhooks.rs"]
+#[allow(dead_code)]
+mod webhooks;
 
 fn write(root: &Path, rel: &str, content: &str) {
     let p = root.join(rel);
@@ -266,6 +269,70 @@ async fn policies_are_enforced() {
         rv.review_pull("p", pr2.number, &ReviewCreate { decision: ReviewDecision::Approve, body: String::new() }).unwrap();
         let err = ca.merge_pull("p", pr2.number, &MergeRequest::default()).unwrap_err();
         assert!(err.to_string().contains("intent"), "{err}");
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn webhooks_deliver_signed_events() {
+    use axum::{routing::post, Router};
+    let received: Arc<std::sync::Mutex<Vec<(axum::http::HeaderMap, Vec<u8>)>>> = Arc::new(std::sync::Mutex::new(vec![]));
+    let rx = received.clone();
+    let app = Router::new().route(
+        "/hook",
+        post(move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+            let rx = rx.clone();
+            async move {
+                rx.lock().unwrap().push((headers, body.to_vec()));
+                "ok"
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook_url = format!("http://{}/hook", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let base = start_server(&tmp.path().join("data")).await;
+    let tmp_path = tmp.path().to_path_buf();
+    let received2 = received.clone();
+    tokio::task::spawn_blocking(move || {
+        let c = Client::new(&base).with_agent(Some("ops".into()));
+        c.create_repo("w", Some("main")).unwrap();
+        let wh = c.create_webhook("w", &WebhookCreate { url: hook_url.clone(), kinds: vec!["ref.*".into(), "pull.open".into()], secret: Some("s3cret".into()) }).unwrap();
+        assert!(wh.has_secret);
+        assert_eq!(c.webhooks("w").unwrap().len(), 1);
+
+        let a = Repository::init(&tmp_path.join("a")).unwrap();
+        write(a.work_dir(), "f.txt", "1\n");
+        commit_all(&a, "one", "agent-a");
+        sync::add_remote(&a, "origin", &format!("{base}/repos/w")).unwrap();
+        sync::push(&a, "origin", "main", false, false).unwrap(); // emits ref.update
+        c.claim_lease("w", &LeaseCreate { holder: "x".into(), paths: vec!["f.txt".into()], mode: Default::default(), ttl_secs: Some(10), note: None }).unwrap(); // lease.claim: filtered out
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let n = received2.lock().unwrap().len();
+            if n >= 1 || std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let got = received2.lock().unwrap().clone();
+        assert_eq!(got.len(), 1, "expected exactly one matching delivery, got {}", got.len());
+        let (headers, body) = &got[0];
+        assert_eq!(headers.get("x-agit-event").unwrap(), "ref.update");
+        assert_eq!(headers.get("x-agit-repo").unwrap(), "w");
+        let sig = headers.get("x-agit-signature").unwrap().to_str().unwrap().to_string();
+        assert_eq!(sig, webhooks::sign("s3cret", body));
+        let payload: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(payload["event"]["kind"], "ref.update");
+        assert_eq!(payload["event"]["data"]["ref"], "refs/heads/main");
+
+        c.delete_webhook("w", &wh.id).unwrap();
+        assert!(c.webhooks("w").unwrap().is_empty());
     })
     .await
     .unwrap();
