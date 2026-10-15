@@ -1,0 +1,15 @@
+[book]
+title = "agit handbook"
+authors = ["agit contributors"]
+language = "en"
+src = "handbook"
+
+[build]
+build-dir = "../target/book"
+
+[output.html]
+git-repository-url = "https://github.com/shadow-kernel/agit"
+edit-url-template = "https://github.com/shadow-kernel/agit/edit/main/docs/{path}"
+site-url = "/agit/"
+default-theme = "light"
+preferred-dark-theme = "navy"

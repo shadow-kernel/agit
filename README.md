@@ -6,6 +6,8 @@ agit is an open-source version control system and platform that keeps the git me
 
 > **Status: Phase 0 local core complete, Phase 2/3 server in progress.** Implemented in Rust: object model, index, commit, status, diff, branch, merge, leases, events, workspaces, checkpoints, JSON output, and a hosting server (`agit-server`) with clone/push/pull, compare-and-swap ref updates, pull requests with reviews and server-side merge, server-wide leases, an event stream (SSE), and a first file-backed knowledge base with typed tags and tag rules. The web UI lives in `web/`. First local measurements against git are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). See [Roadmap](#roadmap).
 
+**Documentation:** the complete [handbook](docs/handbook/README.md) (installation, quickstarts for developers and agents, concepts, CLI/MCP/HTTP/SDK references, knowledge base, multi-agent workflows, administration, internals, FAQ) and a German overview, [Überblick auf Deutsch](docs/handbook/de/UEBERBLICK.md). Published at https://shadow-kernel.github.io/agit/ once GitHub Pages is enabled for the repository.
+
 Legend used throughout this document and the docs:
 
 | Mark | Meaning |
