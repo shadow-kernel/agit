@@ -48,9 +48,11 @@ impl RepoHandle {
             fs::create_dir_all(dir.join(sub))?;
         }
         let (tx, _) = broadcast::channel(1024);
+        let store = ObjectStore::open(dir.join("objects"));
+        let hook_store = store.clone();
         Ok(RepoHandle {
-            store: ObjectStore::open(dir.join("objects")),
-            refs: RefStore::open(&dir),
+            store,
+            refs: RefStore::open(&dir).with_before_update(Arc::new(move || hook_store.flush())),
             events: EventLog::open(&dir),
             leases: LeaseStore::open(&dir),
             meta,

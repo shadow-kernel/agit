@@ -1,0 +1,40 @@
+# Caddy reverse proxy for agit-server with automatic HTTPS (Let's Encrypt).
+#
+#   sudo install -m 0644 deploy/Caddyfile /etc/caddy/Caddyfile   # edit the hostname
+#   sudo systemctl reload caddy
+#
+# Caddy obtains and renews the certificate itself; port 80 and 443 must reach
+# this host. agit-server listens on 127.0.0.1:7878 (AGIT_LISTEN).
+
+agit.example.com {
+	encode zstd gzip
+
+	# Security headers. The API is used from CLIs and SDKs with a bearer
+	# token, so no cookies and no CSRF surface; HSTS keeps clients on TLS.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	reverse_proxy 127.0.0.1:7878 {
+		# Server-sent events (/api/v1/repos/*/events/stream): do not buffer.
+		flush_interval -1
+		# Pushes stream many objects; allow long-running requests.
+		transport http {
+			read_timeout 0
+			write_timeout 0
+			dial_timeout 10s
+		}
+	}
+
+	# Caddy does not limit request bodies by default. To cap uploads:
+	# request_body {
+	# 	max_size 2GB
+	# }
+
+	log {
+		output file /var/log/caddy/agit.log
+	}
+}

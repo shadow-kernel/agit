@@ -115,7 +115,9 @@ hook_cwd() {
 }
 
 # run_agit <root> <args...>: run agit in JSON mode rooted at <root>.
-# stdout: the JSON envelope; exit code: agit's.
+# stdout: the JSON envelope; exit code: agit's. Pass repository-relative
+# paths: agit canonicalises the work dir, so an absolute path that goes
+# through a symlink (macOS /var -> /private/var) would not resolve.
 run_agit() {
     local root="$1"
     shift

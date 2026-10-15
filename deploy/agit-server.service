@@ -1,0 +1,65 @@
+# systemd unit for agit-server.
+#
+#   sudo useradd --system --home-dir /var/lib/agit --shell /usr/sbin/nologin agit
+#   sudo install -m 0755 agit-server agit /usr/local/bin/
+#   sudo mkdir -p /etc/agit && sudo install -m 0640 -o root -g agit deploy/agit-server.env /etc/agit/
+#   sudo install -m 0644 deploy/agit-server.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now agit-server
+#   journalctl -u agit-server -f
+#
+# Data lives in /var/lib/agit (StateDirectory). Settings come from
+# /etc/agit/agit-server.env; see deploy/agit-server.env and docs/DEPLOYMENT.md.
+
+[Unit]
+Description=agit server (version control and collaboration for AI agents)
+Documentation=https://github.com/agit-vcs/agit/blob/main/docs/DEPLOYMENT.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agit
+Group=agit
+EnvironmentFile=-/etc/agit/agit-server.env
+# Creates /var/lib/agit owned by agit:agit and keeps it writable under
+# ProtectSystem=strict. Point AGIT_DATA_DIR at it (the env file does).
+StateDirectory=agit
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/agit
+ExecStart=/usr/local/bin/agit-server
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=20s
+KillSignal=SIGTERM
+LimitNOFILE=65536
+
+# Hardening. The server needs nothing beyond its data directory and a socket.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0027
+# To listen on a privileged port (80/443) directly instead of behind a proxy:
+# CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

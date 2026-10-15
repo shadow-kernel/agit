@@ -72,6 +72,7 @@ pub fn import(store: &ObjectStore, bytes: &[u8]) -> Result<(usize, usize)> {
             stored += 1;
         }
     }
+    store.flush()?;
     Ok((stored, skipped))
 }
 

@@ -346,7 +346,12 @@ async fn upload_objects(
     body: Bytes,
 ) -> ApiResult<Json<StoreResponse>> {
     let r = st.get(&repo)?;
-    let (stored, skipped) = tokio::task::spawn_blocking(move || stream::import(&r.store, &body))
+    let (stored, skipped) =
+        tokio::task::spawn_blocking(move || -> agit_core::Result<(usize, usize)> {
+            let n = stream::import(&r.store, &body)?;
+            r.store.flush()?;
+            Ok(n)
+        })
         .await
         .map_err(|e| ApiErr::BadRequest(e.to_string()))??;
     Ok(Json(StoreResponse { stored, skipped }))

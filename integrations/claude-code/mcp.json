@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "agit": {
+      "command": "agit",
+      "args": ["mcp"],
+      "env": {
+        "AGIT_AGENT": "claude-code"
+      }
+    }
+  }
+}

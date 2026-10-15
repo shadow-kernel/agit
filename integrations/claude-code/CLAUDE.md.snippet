@@ -1,0 +1,19 @@
+<!-- agit-claude-code:begin -->
+## Working in this agit repository
+
+This project is versioned with **agit**, not git. Use `agit` for every version-control action; `--json` is available everywhere and the `agit` MCP tools (`agit_status`, `agit_context`, `agit_commit`, ...) are the same operations. Hooks enforce part of this loop automatically; the rest is on you.
+
+1. **Read before you touch.** `agit know context <path>` (MCP: `agit_context`) returns the notes, suggested tags, recent commits, leases and open PRs for a path. The pre-edit hook injects a summary; read it.
+2. **Respect leases.** An edit on a path under another agent's exclusive lease is blocked by the hook. Do not work around it: pick other work, wait, or ask. The post-edit hook claims a 30 min exclusive lease on each file you edit; for a larger scope claim it yourself: `agit lease claim src/auth --ttl 30m --note "<what you are doing>"`. Release with `agit lease release --all` when done.
+3. **Checkpoint before risky edits.** `agit checkpoint -m "before <risky thing>"`; undo with `agit restore <id>`. The Stop hook checkpoints a dirty tree at the end of every turn.
+4. **Commit with intent.** `agit add -A` then `agit commit -m "<what changed>" --intent "<why>" --task <ticket>`. Commits without `--intent` are refused by the hook. Small, frequent commits; never `--force` through a lease without being told to.
+5. **Open a pull request when the work is done**: `agit pr create --push -t "<title>" --intent "<why>" --task <ticket>`; check `agit pr view <n> --json` for mergeability and reviews. Never push directly to a protected branch.
+6. **Record what you learned**: `agit know add -t "<title>" --tag kind:<gotcha|decision|howto|fact> --tag area:<component> --path "<glob>" --commit HEAD -b "<markdown>"`. Use the `suggested_tags` from the context call.
+7. **React to error codes, not messages** (`error.code` in JSON, exit 3 = conflict, 75 = retryable):
+   - `lease_conflict`: another agent owns the path. Pick other work or wait; do not force.
+   - `ref_conflict` / `lock_timeout`: retryable. `agit pull`, re-check, retry.
+   - `merge_conflicts`: resolve the marked files, `agit add`, commit.
+   - `dirty_worktree`: `agit checkpoint` or commit first.
+   - `policy_violation`: read the message; usually a missing intent, approval or a direct push to a protected branch. Open a PR instead.
+8. Do not run `git commit`/`git push` here; they bypass leases, policies and the agit server.
+<!-- agit-claude-code:end -->

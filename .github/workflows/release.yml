@@ -1,0 +1,383 @@
+# Release pipeline. Triggered by pushing a tag `vX.Y.Z` (scripts/release.sh
+# creates it). Produces:
+#   - agit-<version>-<target>.tar.gz|zip (+ .sha256) for five targets
+#   - agit-web-<version>.tar.gz (+ .sha256): the built web UI
+#   - SHA256SUMS, agit.rb (Homebrew formula with real hashes)
+#   - a GitHub release with generated notes
+#   - ghcr.io/agit-vcs/agit:<version>, :<major.minor> and :latest (amd64 + arm64)
+#   - @agit/sdk on npm and agit-sdk on PyPI, only when NPM_TOKEN / PYPI_TOKEN exist
+#
+# Required repository settings:
+#   - Actions > General > Workflow permissions: "Read and write" (release + GHCR)
+#   - Packages: the first push creates ghcr.io/agit-vcs/agit; make it public afterwards
+#   - Optional secrets: NPM_TOKEN (npm automation token), PYPI_TOKEN (PyPI API token)
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+  IMAGE: ghcr.io/agit-vcs/agit
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Derive the version from the tag and decide which optional publishers run.
+  # Secrets are not available in job-level `if:`, so this job turns their
+  # presence into outputs.
+  # ---------------------------------------------------------------------------
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+      publish_npm: ${{ steps.plan.outputs.publish_npm }}
+      publish_pypi: ${{ steps.plan.outputs.publish_pypi }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          cargo_version=$(awk '/^\[workspace\.package\]/{s=1;next} /^\[/{s=0} s && /^version *= *"/{gsub(/.*= *"|".*/,""); print; exit}' Cargo.toml)
+          if [ "$version" != "$cargo_version" ]; then
+            echo "::error::tag $tag does not match Cargo.toml workspace version $cargo_version (run scripts/release.sh)"
+            exit 1
+          fi
+          prerelease=false
+          case "$version" in *-*) prerelease=true ;; esac
+          {
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+            echo "publish_npm=$([ -n "$NPM_TOKEN" ] && echo true || echo false)"
+            echo "publish_pypi=$([ -n "$PYPI_TOKEN" ] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing agit $version (prerelease=$prerelease)" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Web UI, built once. The API base URL is relative so the bundle works when
+  # agit-server serves it (--web-dir) behind any hostname.
+  # ---------------------------------------------------------------------------
+  web:
+    name: Web UI
+    needs: plan
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: web
+      - run: pnpm build
+        working-directory: web
+        env:
+          VITE_AGIT_API: /api/v1
+      - name: Package
+        run: |
+          set -euo pipefail
+          name="agit-web-${VERSION}"
+          mkdir -p "dist/$name"
+          cp -R web/dist/. "dist/$name/"
+          cp LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+          rm -rf "dist/$name"
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: dist/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Release binaries. Linux targets build with `cross` (containers based on an
+  # old glibc, so the binaries run on any current distribution; aarch64 is a
+  # real cross-compile, not emulation). macOS x86_64 is cross-compiled from the
+  # arm64 runner with the stock toolchain. Windows builds natively.
+  # ---------------------------------------------------------------------------
+  binaries:
+    name: Build (${{ matrix.target }})
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+            smoke: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+            smoke: false
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+            smoke: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+            smoke: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+            smoke: true
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: Build
+        shell: bash
+        env:
+          USE_CROSS: ${{ matrix.cross }}
+        run: |
+          set -euo pipefail
+          tool=cargo; [ "$USE_CROSS" = "true" ] && tool=cross
+          "$tool" build --release --locked --target "$TARGET" -p agit-cli -p agit-server
+      - name: Smoke test
+        if: matrix.smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          ext=""; case "$TARGET" in *windows*) ext=".exe" ;; esac
+          "target/$TARGET/release/agit$ext" --version
+          "target/$TARGET/release/agit-server$ext" --help >/dev/null
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          ext=""; case "$TARGET" in *windows*) ext=".exe" ;; esac
+          name="agit-${VERSION}-${TARGET}"
+          mkdir -p "dist/$name"
+          cp "target/$TARGET/release/agit$ext" "target/$TARGET/release/agit-server$ext" "dist/$name/"
+          cp LICENSE-MIT LICENSE-APACHE README.md "dist/$name/"
+          cd dist
+          case "$TARGET" in
+            *windows*) asset="$name.zip"; 7z a -tzip "$asset" "$name" >/dev/null ;;
+            *)         asset="$name.tar.gz"; tar -czf "$asset" "$name" ;;
+          esac
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$asset" > "$asset.sha256"
+          else
+            shasum -a 256 "$asset" > "$asset.sha256"
+          fi
+          rm -rf "$name"
+          cat "$asset.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # GitHub release with every asset, a combined SHA256SUMS and the Homebrew
+  # formula rendered with the real hashes.
+  # ---------------------------------------------------------------------------
+  release:
+    name: GitHub release
+    needs: [plan, web, binaries]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums and Homebrew formula
+        run: |
+          set -euo pipefail
+          cd dist
+          cat ./*.sha256 > SHA256SUMS
+          sha256sum -c SHA256SUMS
+          formula=agit.rb
+          sed "s/^  version \".*\"/  version \"${VERSION}\"/" ../homebrew/agit.rb > "$formula"
+          for t in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+            sum=$(cut -d' ' -f1 "agit-${VERSION}-${t}.tar.gz.sha256")
+            placeholder="SHA256_$(echo "$t" | tr 'a-z-' 'A-Z_')"
+            sed -i "s/${placeholder}/${sum}/" "$formula"
+          done
+          grep -q 'SHA256_' "$formula" && { echo "::error::unfilled placeholder in $formula"; exit 1; }
+          ls -l
+      - name: Release notes header
+        run: |
+          set -euo pipefail
+          {
+            echo "Install with:"
+            echo
+            echo '```sh'
+            echo "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/install.sh | sh -s -- --version v${VERSION}"
+            echo "docker pull ${IMAGE}:${VERSION}"
+            echo '```'
+            echo
+            echo "See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}/CHANGELOG.md) and [docs/DEPLOYMENT.md](https://github.com/${GITHUB_REPOSITORY}/blob/v${VERSION}/docs/DEPLOYMENT.md)."
+            echo
+          } > notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: agit v${{ env.VERSION }}
+          body_path: notes.md
+          generate_release_notes: true
+          prerelease: ${{ needs.plan.outputs.prerelease == 'true' }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/agit-*.tar.gz
+            dist/agit-*.tar.gz.sha256
+            dist/agit-*.zip
+            dist/agit-*.zip.sha256
+            dist/SHA256SUMS
+            dist/agit.rb
+
+  # ---------------------------------------------------------------------------
+  # Container image. Reuses the Linux release binaries (BINARIES=prebuilt in
+  # the Dockerfile) so the arm64 image does not compile Rust under QEMU; only
+  # the small Debian runtime stage runs emulated.
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Docker image
+    needs: [plan, binaries]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*-unknown-linux-gnu
+          path: artifacts
+          merge-multiple: true
+      - name: Unpack Linux binaries
+        run: |
+          set -euo pipefail
+          for pair in "x86_64:amd64" "aarch64:arm64"; do
+            rust="${pair%%:*}"; docker="${pair##*:}"
+            name="agit-${VERSION}-${rust}-unknown-linux-gnu"
+            mkdir -p "dist/linux-${docker}"
+            tar -xzf "artifacts/${name}.tar.gz" -C "dist/linux-${docker}" --strip-components=1 \
+              "${name}/agit" "${name}/agit-server"
+          done
+          ls -lR dist
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ needs.plan.outputs.prerelease == 'false' }}
+          labels: |
+            org.opencontainers.image.title=agit
+            org.opencontainers.image.description=Version control and collaboration for AI agents
+            org.opencontainers.image.licenses=MIT OR Apache-2.0
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            BINARIES=prebuilt
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false
+
+  # ---------------------------------------------------------------------------
+  # Optional package registries. Skipped unless the secret is configured.
+  # ---------------------------------------------------------------------------
+  npm:
+    name: Publish @agit/sdk to npm
+    needs: [plan, release]
+    if: needs.plan.outputs.publish_npm == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Check package version
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          pkg=$(node -p "require('./package.json').version")
+          [ "$pkg" = "$VERSION" ] || { echo "::error::sdk/typescript/package.json is $pkg, tag is $VERSION"; exit 1; }
+      - run: pnpm install --frozen-lockfile
+      # prepublishOnly runs typecheck, build and tests.
+      - run: pnpm publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  pypi:
+    name: Publish agit-sdk to PyPI
+    needs: [plan, release]
+    if: needs.plan.outputs.publish_pypi == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check package version
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          pkg=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          [ "$pkg" = "$VERSION" ] || { echo "::error::sdk/python/pyproject.toml is $pkg, tag is $VERSION"; exit 1; }
+      - run: python -m pip install --upgrade build
+      - run: python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_TOKEN }}
+          packages-dir: sdk/python/dist/

@@ -1,0 +1,15 @@
+# Allowlist: only what the Dockerfile needs reaches the build context.
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+!web/
+!dist/
+!LICENSE-MIT
+!LICENSE-APACHE
+
+# Never ship local build output or dependencies.
+**/target/
+**/node_modules/
+web/dist/
+**/.DS_Store

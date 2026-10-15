@@ -1077,22 +1077,39 @@ pub fn gc(repo: &Repository, opts: &GcOptions) -> Result<GcReport> {
     let mut reachable = HashSet::new();
     mark_reachable(store, roots, &mut reachable)?;
 
-    // 4. Sweep.
+    // 4. Sweep. Loose objects are deleted one by one; packed objects are
+    //    dropped by repacking the segments whose writers are gone. Objects
+    //    younger than the grace period count as live for both.
     let all = store.iter_ids()?;
     report.objects_total = all.len();
     report.objects_reachable = all.iter().filter(|id| reachable.contains(id)).count();
-    for id in all {
-        if reachable.contains(&id) {
+    let mut live: HashSet<ObjectId> = reachable.clone();
+    let mut dead_packed = 0usize;
+    for id in &all {
+        if reachable.contains(id) {
             continue;
         }
-        if store.age_secs(&id).is_none_or(|a| a < opts.grace_secs) {
+        if store.age_secs(id).is_none_or(|a| a < opts.grace_secs) {
             report.objects_kept_young += 1;
+            live.insert(*id);
             continue;
         }
-        report.bytes_removed += store.disk_size(&id);
-        report.objects_removed += 1;
-        if !opts.dry_run {
-            store.remove(&id)?;
+        report.bytes_removed += store.disk_size(id);
+        if store.is_loose(id) {
+            report.objects_removed += 1;
+            if !opts.dry_run {
+                store.remove(id)?;
+            }
+        } else {
+            dead_packed += 1;
+        }
+    }
+    if dead_packed > 0 {
+        if opts.dry_run {
+            report.objects_removed += dead_packed;
+        } else {
+            let (dropped, _) = store.repack(&live)?;
+            report.objects_removed += dropped;
         }
     }
     repo.events().append(

@@ -416,6 +416,8 @@ Status per item is marked. The first server exists today (`crates/agit-server`, 
 
 **Git bridge (`crates/agit-git-bridge`).** ✅ `agit git import <path> [--into dir]` imports a complete git history (merges, tags, modes, symlinks, submodule pins) with the original SHA kept in commit metadata and git trailers lifted into `intent`/`task`/`agent`; re-imports are incremental. `agit git export <dir>` writes agit history back into a git repository through `git fast-import`, referencing already-known git commits by SHA so repeated exports are incremental. agit's own git history round-trips (see Dogfooding). 📋 continuous two-way sync and serving the git protocol.
 
+**Deployment.** Single binary, Docker image (`ghcr.io/agit-vcs/agit`), Compose, systemd unit and reverse-proxy examples with TLS: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md); security model and hardening checklist: [docs/SECURITY.md](docs/SECURITY.md).
+
 ## Performance goals
 
 The headline target is **100,000 micro-commits per second platform-wide**, with 10k to 20k per second per shard for a hot repository and more than 10k per second on one laptop core for small local commits.

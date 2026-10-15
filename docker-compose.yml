@@ -1,0 +1,57 @@
+# agit server with Docker Compose.
+#
+#   docker compose up -d                 # pulls ghcr.io/agit-vcs/agit:latest
+#   docker compose up -d --build         # or build from this checkout
+#   AGIT_SERVER_TOKEN=$(openssl rand -hex 32) docker compose up -d   # with auth
+#
+# Data lives in the named volume `agit-data` (/data in the container). See
+# docs/DEPLOYMENT.md for backups, upgrades and reverse proxies with TLS.
+
+services:
+  agit:
+    image: ghcr.io/agit-vcs/agit:${AGIT_IMAGE_TAG:-latest}
+    build:
+      context: .
+      # args:
+      #   AGIT_WEB_API: /api/v1     # API base URL baked into the web UI
+    container_name: agit
+    restart: unless-stopped
+    ports:
+      # Bind to localhost when a reverse proxy terminates TLS on this host;
+      # use "7878:7878" to expose the server directly.
+      - "127.0.0.1:7878:7878"
+    environment:
+      - AGIT_DATA_DIR=/data
+      - AGIT_LISTEN=0.0.0.0:7878
+      - AGIT_WEB_DIR=/opt/agit/web
+      - RUST_LOG=${RUST_LOG:-info,tower_http=info}
+      - AGIT_FSYNC=${AGIT_FSYNC:-refs}
+      # Optional bearer token. Passed through from the host environment (or a
+      # .env file next to this compose file) only when it is set; an unset
+      # token means an open server, so keep such a server on a private network.
+      - AGIT_SERVER_TOKEN
+    volumes:
+      - agit-data:/data
+      # Alternative: keep repositories in a host directory instead of a named
+      # volume. The directory must be writable by uid 10001 (the `agit` user):
+      #   mkdir -p ./agit-data && sudo chown -R 10001:10001 ./agit-data
+      # - ./agit-data:/data
+      #
+      # Mount an existing repos directory from another agit server (same layout:
+      # <dir>/<repo>/meta.json, objects/, refs/ ...):
+      # - /srv/agit/repos:/data/repos
+    healthcheck:
+      # Mirrors the image HEALTHCHECK; the token is required on /health too.
+      test: ["CMD", "sh", "-c", "curl -fsS -H \"Authorization: Bearer $${AGIT_SERVER_TOKEN:-none}\" http://127.0.0.1:7878/api/v1/health >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # Resource guard rails for a small deployment; raise for busy servers.
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 1g
+
+volumes:
+  agit-data:

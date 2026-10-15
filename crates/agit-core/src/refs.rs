@@ -28,10 +28,21 @@ pub enum Expect {
     Is(ObjectId),
 }
 
-#[derive(Debug, Clone)]
+type BeforeUpdate = std::sync::Arc<dyn Fn() -> Result<()> + Send + Sync>;
+
+#[derive(Clone)]
 pub struct RefStore {
     dir: PathBuf,
     lock_path: PathBuf,
+    /// Called before any ref is written; the repository uses it to publish
+    /// pending objects so a ref never points at an unpublished object.
+    before_update: Option<BeforeUpdate>,
+}
+
+impl std::fmt::Debug for RefStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RefStore").field("dir", &self.dir).finish()
+    }
 }
 
 impl RefStore {
@@ -39,6 +50,20 @@ impl RefStore {
         RefStore {
             dir: agit_dir.to_path_buf(),
             lock_path: agit_dir.join("locks").join("refs.lock"),
+            before_update: None,
+        }
+    }
+
+    /// Install the publish hook (see [`crate::store::ObjectStore::flush`]).
+    pub fn with_before_update(mut self, f: BeforeUpdate) -> Self {
+        self.before_update = Some(f);
+        self
+    }
+
+    fn publish(&self) -> Result<()> {
+        match &self.before_update {
+            Some(f) => f(),
+            None => Ok(()),
         }
     }
 
@@ -108,6 +133,9 @@ impl RefStore {
         message: &str,
     ) -> Result<()> {
         Self::validate_name(name)?;
+        if new.is_some() {
+            self.publish()?;
+        }
         let _guard = self.lock()?;
         let current = self.read(name)?;
         let ok = match expect {
@@ -161,6 +189,9 @@ impl RefStore {
     ) -> Result<()> {
         for (name, _, _) in updates {
             Self::validate_name(name)?;
+        }
+        if updates.iter().any(|(_, _, n)| n.is_some()) {
+            self.publish()?;
         }
         let _guard = self.lock()?;
         let mut olds = Vec::with_capacity(updates.len());

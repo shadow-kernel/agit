@@ -154,9 +154,12 @@ impl Repository {
     }
 
     fn open_primary(common_dir: PathBuf, work_dir: PathBuf) -> Result<Repository> {
+        let store = ObjectStore::open(common_dir.join("objects"));
+        let hook_store = store.clone();
         Ok(Repository {
-            store: ObjectStore::open(common_dir.join("objects")),
-            refs: RefStore::open(&common_dir),
+            store,
+            refs: RefStore::open(&common_dir)
+                .with_before_update(std::sync::Arc::new(move || hook_store.flush())),
             events: EventLog::open(&common_dir),
             leases: LeaseStore::open(&common_dir),
             ws_dir: common_dir.clone(),
@@ -171,9 +174,12 @@ impl Repository {
         if !ws_dir.is_dir() {
             return Err(Error::WorkspaceNotFound(name));
         }
+        let store = ObjectStore::open(common_dir.join("objects"));
+        let hook_store = store.clone();
         Ok(Repository {
-            store: ObjectStore::open(common_dir.join("objects")),
-            refs: RefStore::open(&common_dir),
+            store,
+            refs: RefStore::open(&common_dir)
+                .with_before_update(std::sync::Arc::new(move || hook_store.flush())),
             events: EventLog::open(&common_dir),
             leases: LeaseStore::open(&common_dir),
             ws_dir,
@@ -256,6 +262,8 @@ impl Repository {
     }
 
     pub fn save_index(&self, index: &Index) -> Result<()> {
+        // The index references blobs: publish them first.
+        self.store.flush()?;
         index.save(&self.index_path())
     }
 
@@ -319,6 +327,7 @@ impl Repository {
 
     /// Set HEAD and record the move in the workspace's HEAD reflog.
     pub fn set_head_with(&self, head: &Head, message: &str) -> Result<()> {
+        self.store.flush()?;
         let old = self.head_commit().unwrap_or(None);
         let content = match head {
             Head::Branch(b) => format!("ref: {HEADS_PREFIX}{b}\n"),
