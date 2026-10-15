@@ -118,6 +118,9 @@ pub enum Cmd {
         /// Ignore other agents' exclusive leases.
         #[arg(long)]
         force: bool,
+        /// Sign the commit (optionally naming the key; default: AGIT_KEY, the agent id, or `default`).
+        #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "KEY")]
+        sign: Option<String>,
         #[command(flatten)]
         agent: AgentArgs,
     },
@@ -233,6 +236,9 @@ pub enum Cmd {
         abort: bool,
         #[arg(long)]
         force: bool,
+        /// Sign the merge commit (see `commit --sign`).
+        #[arg(long, num_args = 0..=1, default_missing_value = "", value_name = "KEY")]
+        sign: Option<String>,
         #[command(flatten)]
         agent: AgentArgs,
     },
@@ -339,6 +345,16 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: SubmoduleCmd,
     },
+    /// Manage Ed25519 signing keys (~/.agit/keys).
+    Key {
+        #[command(subcommand)]
+        cmd: KeyCmd,
+    },
+    /// Verify a commit's signature.
+    Verify {
+        #[arg(default_value = "HEAD")]
+        rev: String,
+    },
     /// Bridge to git repositories.
     Git {
         #[command(subcommand)]
@@ -356,6 +372,37 @@ pub enum Cmd {
         remote: String,
         #[command(subcommand)]
         cmd: crate::remote::KnowCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum KeyCmd {
+    /// Generate a key (default name: AGIT_AGENT or `default`).
+    Generate {
+        name: Option<String>,
+        /// Register the public key with the remote repository for --agent (default: key name).
+        #[arg(long)]
+        register: bool,
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    List,
+    /// Print the public key.
+    Show {
+        name: Option<String>,
+    },
+    /// Register an existing key's public half with the remote repository.
+    Register {
+        name: Option<String>,
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    Delete {
+        name: String,
     },
 }
 
@@ -663,9 +710,11 @@ pub fn run(cli: Cli) -> Result<()> {
             all,
             allow_empty,
             force,
+            sign,
             agent,
         } => {
             let repo = open(&cli.dir)?;
+            let sign_with = signing_key(sign.as_deref(), agent.agent.as_deref())?;
             let r = ops::commit(
                 &repo,
                 CommitOptions {
@@ -678,6 +727,7 @@ pub fn run(cli: Cli) -> Result<()> {
                     allow_empty,
                     force,
                     all,
+                    sign_with,
                 },
             )?;
             emit(json, &r, || {
@@ -963,6 +1013,7 @@ pub fn run(cli: Cli) -> Result<()> {
             no_ff,
             abort,
             force,
+            sign,
             agent,
         } => {
             let repo = open(&cli.dir)?;
@@ -974,6 +1025,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 return Ok(());
             }
             let rev = rev.context("merge needs a revision")?;
+            let sign_with = signing_key(sign.as_deref(), agent.agent.as_deref())?;
             let r = ops::merge(
                 &repo,
                 &rev,
@@ -983,6 +1035,7 @@ pub fn run(cli: Cli) -> Result<()> {
                     agent: agent.info(),
                     no_ff,
                     force,
+                    sign_with,
                 },
             )?;
             let conflicted = matches!(r, MergeResult::Conflicts { .. });
@@ -1067,6 +1120,31 @@ pub fn run(cli: Cli) -> Result<()> {
         Cmd::Pr { remote, cmd } => crate::remote::run_pr(&open(&cli.dir)?, json, &remote, cmd)?,
         Cmd::Know { remote, cmd } => crate::remote::run_know(&open(&cli.dir)?, json, &remote, cmd)?,
         Cmd::Mcp { remote } => crate::mcp::serve(cwd(&cli.dir)?, remote)?,
+        Cmd::Key { cmd } => run_key(&cli.dir, json, cmd)?,
+        Cmd::Verify { rev } => {
+            let repo = open(&cli.dir)?;
+            let (id, c) = repo.resolve_commit(&rev)?;
+            let status = agit_core::sign::verify_commit(&c);
+            let ok = status.is_valid();
+            emit(
+                json,
+                &serde_json::json!({ "id": id, "signature": status }),
+                || match &status {
+                    agit_core::sign::SignatureStatus::Unsigned => {
+                        println!("{}: unsigned", id.short())
+                    }
+                    agit_core::sign::SignatureStatus::Valid { key_id, signer, .. } => {
+                        println!("{}: valid signature by {signer} (key {key_id})", id.short())
+                    }
+                    agit_core::sign::SignatureStatus::Invalid { reason } => {
+                        println!("{}: INVALID signature: {reason}", id.short())
+                    }
+                },
+            );
+            if !ok {
+                bail!("commit {} has no valid signature", id.short());
+            }
+        }
         Cmd::Git { cmd } => match cmd {
             GitCmd::Import {
                 source,
@@ -1753,4 +1831,127 @@ fn label(k: ChangeKind) -> &'static str {
         ChangeKind::Deleted => "deleted:",
         ChangeKind::TypeChanged => "typechange:",
     }
+}
+
+/// Resolve which key (if any) to sign with.
+///
+/// `--sign` (empty = default name) forces signing. Without it, signing is
+/// automatic when `AGIT_SIGN` is `1`/`auto` (default `auto`) and a key named
+/// after the agent (or `AGIT_KEY`) exists.
+pub fn signing_key(explicit: Option<&str>, agent: Option<&str>) -> Result<Option<String>> {
+    let default_name = std::env::var("AGIT_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| agent.map(str::to_string))
+        .unwrap_or_else(|| "default".into());
+    match explicit {
+        Some("") => Ok(Some(default_name)),
+        Some(name) => Ok(Some(name.to_string())),
+        None => {
+            let mode = std::env::var("AGIT_SIGN")
+                .unwrap_or_else(|_| "auto".into())
+                .to_lowercase();
+            match mode.as_str() {
+                "0" | "off" | "false" | "no" => Ok(None),
+                "1" | "on" | "true" | "yes" => Ok(Some(default_name)),
+                _ => Ok(if agit_core::sign::Keypair::exists(&default_name) {
+                    Some(default_name)
+                } else {
+                    None
+                }),
+            }
+        }
+    }
+}
+
+fn run_key(dir: &Option<PathBuf>, json: bool, cmd: KeyCmd) -> Result<()> {
+    use agit_core::sign::Keypair;
+    let default_name = || {
+        std::env::var("AGIT_KEY")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("AGIT_AGENT").ok())
+            .unwrap_or_else(|| "default".into())
+    };
+    match cmd {
+        KeyCmd::Generate {
+            name,
+            register,
+            remote,
+            agent,
+        } => {
+            let name = name.unwrap_or_else(default_name);
+            let kp = Keypair::generate(&name);
+            let path = kp.save()?;
+            let info = kp.info();
+            let mut registered = None;
+            if register {
+                let repo = open(dir)?;
+                let (client, repo_name) = agit_protocol::sync::client_for(&repo, &remote)?;
+                registered = Some(client.register_key(
+                    &repo_name,
+                    agent.as_deref().unwrap_or(&name),
+                    &info.public_key,
+                )?);
+            }
+            emit(
+                json,
+                &serde_json::json!({ "key": info, "path": path, "registered": registered }),
+                || {
+                    println!(
+                        "generated key {} ({}) at {}",
+                        info.name,
+                        info.key_id,
+                        path.display()
+                    );
+                    if let Some(r) = &registered {
+                        println!("registered for agent {} on {remote}", r.agent);
+                    }
+                },
+            );
+        }
+        KeyCmd::List => {
+            let list = Keypair::list()?;
+            emit(json, &list, || {
+                for k in &list {
+                    println!("{:<20} {} {}", k.name, k.key_id, k.public_key);
+                }
+            });
+        }
+        KeyCmd::Show { name } => {
+            let kp = Keypair::load(&name.unwrap_or_else(default_name))?;
+            let info = kp.info();
+            emit(json, &info, || {
+                println!("{} {} {}", agit_core::sign::ALG, info.public_key, info.name)
+            });
+        }
+        KeyCmd::Register {
+            name,
+            remote,
+            agent,
+        } => {
+            let name = name.unwrap_or_else(default_name);
+            let kp = Keypair::load(&name)?;
+            let repo = open(dir)?;
+            let (client, repo_name) = agit_protocol::sync::client_for(&repo, &remote)?;
+            let r = client.register_key(
+                &repo_name,
+                agent.as_deref().unwrap_or(&name),
+                &kp.public_key_hex(),
+            )?;
+            emit(json, &r, || {
+                println!(
+                    "registered key {} for agent {} on {remote}",
+                    r.key_id, r.agent
+                )
+            });
+        }
+        KeyCmd::Delete { name } => {
+            Keypair::delete(&name)?;
+            emit(json, &serde_json::json!({ "deleted": name }), || {
+                println!("deleted key {name}")
+            });
+        }
+    }
+    Ok(())
 }

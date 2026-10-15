@@ -28,6 +28,8 @@ globset = "0.4"
 uuid = { version = "1", features = ["v4"] }
 hostname = "0.4"
 toml = "0.8"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 ureq = { version = "2", features = ["json"] }
 axum = { version = "0.8", features = ["json", "macros"] }
 tokio = { version = "1", features = ["full"] }

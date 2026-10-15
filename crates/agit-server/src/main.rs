@@ -2,6 +2,7 @@
 
 mod api;
 mod error;
+mod keys;
 mod knowledge;
 mod policy;
 mod pulls;

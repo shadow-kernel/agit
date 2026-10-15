@@ -116,6 +116,7 @@ pub fn objects_to_send(
                         agent: None,
                         checkpoint: false,
                         meta: Default::default(),
+                        signature: None,
                     },
                 ));
             }

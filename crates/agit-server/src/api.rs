@@ -133,6 +133,8 @@ pub fn router(state: Arc<AppState>, web_dir: Option<&std::path::Path>) -> Router
             get(get_rules).put(put_rules),
         )
         .route("/repos/{repo}/policy", get(get_policy).put(put_policy))
+        .route("/repos/{repo}/keys", get(list_keys).post(add_key))
+        .route("/repos/{repo}/keys/{key_id}", delete(delete_key))
         .route(
             "/repos/{repo}/webhooks",
             get(list_webhooks).post(create_webhook),
@@ -480,11 +482,13 @@ async fn get_commit(
     };
     let changes = diff_trees(&r.store, parent_tree.as_ref(), Some(&c.tree))?;
     let patch = render_patch(&r.store, &changes, 3)?;
+    let signature = Some(crate::keys::KeyStore::new(&r).info(&c)?);
     Ok(Json(CommitDetail {
         id,
         commit: c,
         changes,
         patch,
+        signature,
     }))
 }
 
@@ -1020,6 +1024,38 @@ async fn put_policy(
 ) -> ApiResult<Json<Policy>> {
     let r = st.get(&repo)?;
     Ok(Json(crate::policy::PolicyStore::new(&r).set(p, &agent)?))
+}
+
+// ---------------------------------------------------------------------------
+// signing keys
+// ---------------------------------------------------------------------------
+
+async fn list_keys(State(st): S, Path(repo): Path<String>) -> ApiResult<Json<Vec<KeyEntry>>> {
+    let r = st.get(&repo)?;
+    Ok(Json(crate::keys::KeyStore::new(&r).list()?))
+}
+
+async fn add_key(
+    State(st): S,
+    Path(repo): Path<String>,
+    Agent(agent): Agent,
+    Json(req): Json<KeyCreate>,
+) -> ApiResult<(StatusCode, Json<KeyEntry>)> {
+    let r = st.get(&repo)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(crate::keys::KeyStore::new(&r).add(&req.agent, &req.public_key, &agent)?),
+    ))
+}
+
+async fn delete_key(
+    State(st): S,
+    Path((repo, key_id)): Path<(String, String)>,
+    Agent(agent): Agent,
+) -> ApiResult<Json<serde_json::Value>> {
+    let r = st.get(&repo)?;
+    crate::keys::KeyStore::new(&r).remove(&key_id, &agent)?;
+    Ok(Json(serde_json::json!({ "deleted": key_id })))
 }
 
 // ---------------------------------------------------------------------------

@@ -146,6 +146,35 @@ pub struct CommitDetail {
     pub commit: Commit,
     pub changes: Vec<Change>,
     pub patch: String,
+    /// Signature status plus whether the key is registered for the signer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<SignatureInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SignatureInfo {
+    #[serde(flatten)]
+    pub status: agit_core::sign::SignatureStatus,
+    /// True when the key is registered for the signer in the repository.
+    #[serde(default)]
+    pub trusted: bool,
+}
+
+/// A public signing key registered for an agent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeyEntry {
+    pub agent: String,
+    pub key_id: String,
+    pub public_key: String,
+    pub added_ms: i64,
+    #[serde(default)]
+    pub added_by: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyCreate {
+    pub agent: String,
+    pub public_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -580,6 +609,10 @@ pub struct Policy {
     /// Reject commits touching more than this many files (0 = unlimited).
     #[serde(default)]
     pub max_files_per_commit: u32,
+    /// Every commit reaching a protected branch must carry a valid Ed25519
+    /// signature whose key is registered for the signer (`/keys`).
+    #[serde(default)]
+    pub require_signed: bool,
 }
 
 fn default_true() -> bool {
@@ -599,6 +632,7 @@ impl Default for Policy {
             allowed_merge_agents: vec![],
             allowed_push_agents: vec![],
             max_files_per_commit: 0,
+            require_signed: false,
         }
     }
 }

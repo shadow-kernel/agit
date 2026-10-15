@@ -17,6 +17,9 @@ mod api;
 #[path = "../src/error.rs"]
 #[allow(dead_code)]
 mod error;
+#[path = "../src/keys.rs"]
+#[allow(dead_code)]
+mod keys;
 #[path = "../src/knowledge.rs"]
 #[allow(dead_code)]
 mod knowledge;
@@ -559,6 +562,111 @@ async fn webhooks_deliver_signed_events() {
 
         c.delete_webhook("w", &wh.id).unwrap();
         assert!(c.webhooks("w").unwrap().is_empty());
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn signed_commits_and_key_registry() {
+    use agit_core::sign::{Keypair, SignatureStatus};
+    let tmp = tempfile::tempdir().unwrap();
+    let base = start_server(&tmp.path().join("data")).await;
+    let tmp_path = tmp.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        std::env::set_var("AGIT_KEYS_DIR", tmp_path.join("keys"));
+        let admin = Client::new(&base).with_agent(Some("admin".into()));
+        admin.create_repo("s", Some("main")).unwrap();
+        let url = format!("{base}/repos/s");
+        let a = Repository::init(&tmp_path.join("a")).unwrap();
+        write(a.work_dir(), "f.txt", "1\n");
+        commit_all(&a, "one", "agent-a");
+        sync::add_remote(&a, "origin", &url).unwrap();
+        sync::push(&a, "origin", "main", false, false).unwrap();
+        admin
+            .set_policy(
+                "s",
+                &Policy {
+                    protected_branches: vec!["main".into()],
+                    require_signed: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        // Unsigned commit is refused on the protected branch.
+        write(a.work_dir(), "f.txt", "2\n");
+        commit_all(&a, "two", "agent-a");
+        let err = sync::push(&a, "origin", "main", false, false).unwrap_err();
+        assert!(err.to_string().contains("not signed"), "{err}");
+
+        // Signed but unregistered key is refused too.
+        let kp = Keypair::generate("agent-a");
+        kp.save().unwrap();
+        ops::reset(&a, "HEAD~1", ops::ResetMode::Soft).unwrap();
+        let signed = ops::commit(
+            &a,
+            CommitOptions {
+                message: "two signed".into(),
+                intent: Some("i".into()),
+                agent: Some(AgentInfo {
+                    id: "agent-a".into(),
+                    ..Default::default()
+                }),
+                sign_with: Some("agent-a".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let c = a.store().read_commit(&signed.id).unwrap();
+        assert!(matches!(
+            agit_core::sign::verify_commit(&c),
+            SignatureStatus::Valid { .. }
+        ));
+        let err = sync::push(&a, "origin", "main", false, false).unwrap_err();
+        assert!(err.to_string().contains("not registered"), "{err}");
+
+        // Register the key for agent-a: push succeeds; detail shows trusted.
+        let k = admin
+            .register_key("s", "agent-a", &kp.public_key_hex())
+            .unwrap();
+        assert_eq!(k.key_id, kp.key_id());
+        assert!(admin
+            .register_key("s", "agent-b", &kp.public_key_hex())
+            .is_err());
+        sync::push(&a, "origin", "main", false, false).unwrap();
+        let d = admin.commit_detail("s", "main").unwrap();
+        let sig = d.signature.unwrap();
+        assert!(sig.trusted);
+        assert!(
+            matches!(sig.status, SignatureStatus::Valid { ref signer, .. } if signer == "agent-a")
+        );
+
+        // A key registered for another agent does not make agent-b's commits trusted.
+        write(a.work_dir(), "f.txt", "3\n");
+        worktree::add(&a, &[], false).unwrap();
+        ops::commit(
+            &a,
+            CommitOptions {
+                message: "three".into(),
+                agent: Some(AgentInfo {
+                    id: "agent-b".into(),
+                    ..Default::default()
+                }),
+                sign_with: Some("agent-a".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let err = sync::push(&a, "origin", "main", false, false).unwrap_err();
+        assert!(
+            err.to_string().contains("not registered for agent-b"),
+            "{err}"
+        );
+
+        admin.delete_key("s", &k.key_id).unwrap();
+        assert!(admin.keys("s").unwrap().is_empty());
+        std::env::remove_var("AGIT_KEYS_DIR");
     })
     .await
     .unwrap();

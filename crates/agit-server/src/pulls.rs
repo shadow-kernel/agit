@@ -390,6 +390,7 @@ impl<'a> PullStore<'a> {
                     }),
                     checkpoint: false,
                     meta,
+                    signature: None,
                 };
                 store.write_commit(&commit)?
             }

@@ -40,7 +40,7 @@ fn tools() -> Vec<Tool> {
         Tool { name: "agit_read_file", description: "Read a file from the working tree or, with rev, from a commit.", schema: obj(json!({ "path": {"type":"string"}, "rev": {"type":"string"} }), &["path"]) },
         Tool { name: "agit_ls", description: "List a directory of the working tree's HEAD tree (or any rev).", schema: obj(json!({ "path": {"type":"string","default":""}, "rev": {"type":"string","default":"HEAD"} }), &[]) },
         Tool { name: "agit_add", description: "Stage paths (files or directories). all=true stages everything.", schema: obj(json!({ "paths": {"type":"array","items":{"type":"string"}}, "all": {"type":"boolean"} }), &[]) },
-        Tool { name: "agit_commit", description: "Commit staged changes with intent, task and agent identity. Refuses to touch paths under another agent's exclusive lease unless force=true.", schema: obj(json!({ "message": {"type":"string"}, "intent": {"type":"string"}, "task": {"type":"string"}, "agent": {"type":"string"}, "model": {"type":"string"}, "run_id": {"type":"string"}, "all": {"type":"boolean","description":"stage tracked modifications first"}, "force": {"type":"boolean"}, "meta": {"type":"object"} }), &["message"]) },
+        Tool { name: "agit_commit", description: "Commit staged changes with intent, task and agent identity. Refuses to touch paths under another agent's exclusive lease unless force=true.", schema: obj(json!({ "message": {"type":"string"}, "intent": {"type":"string"}, "task": {"type":"string"}, "agent": {"type":"string"}, "model": {"type":"string"}, "run_id": {"type":"string"}, "all": {"type":"boolean","description":"stage tracked modifications first"}, "force": {"type":"boolean"}, "meta": {"type":"object"}, "sign": {"type":"string","description":"key name to sign with (empty string = default key)"} }), &["message"]) },
         Tool { name: "agit_checkpoint", description: "Snapshot the whole working tree (tracked and untracked) without moving HEAD. Cheap; use before risky edits.", schema: obj(json!({ "message": {"type":"string"} }), &[]) },
         Tool { name: "agit_checkpoint_list", description: "List checkpoints of this workspace, newest first.", schema: obj(json!({ "limit": {"type":"integer","default":20} }), &[]) },
         Tool { name: "agit_restore", description: "Restore the working tree to a checkpoint or commit (overwrites local changes).", schema: obj(json!({ "rev": {"type":"string"} }), &["rev"]) },
@@ -252,6 +252,12 @@ impl Server {
                         allow_empty: false,
                         force: b(args, "force"),
                         all: b(args, "all"),
+                        sign_with: crate::cli::signing_key(
+                            s(args, "sign").as_deref(),
+                            s(args, "agent")
+                                .or_else(|| std::env::var("AGIT_AGENT").ok())
+                                .as_deref(),
+                        )?,
                     },
                 )?)?
             }
@@ -286,6 +292,12 @@ impl Server {
                     agent: self.agent(args),
                     no_ff: b(args, "no_ff"),
                     force: false,
+                    sign_with: crate::cli::signing_key(
+                        None,
+                        s(args, "agent")
+                            .or_else(|| std::env::var("AGIT_AGENT").ok())
+                            .as_deref(),
+                    )?,
                 },
             )?)?,
             "agit_lease_claim" => {

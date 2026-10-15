@@ -89,11 +89,18 @@ Per-repository rules enforced at `refs/update` (direct pushes) and `pulls/{n}/me
 ```json
 {"protected_branches":["main","release/*"],"require_pull_request":true,"require_approvals":1,
  "require_intent":true,"require_agent":false,"require_checks":false,"block_on_blockers":true,
- "allowed_merge_agents":[],"allowed_push_agents":[],"max_files_per_commit":0}
+ "allowed_merge_agents":[],"allowed_push_agents":[],"max_files_per_commit":0,"require_signed":false}
 ```
 - `GET /repos/{repo}/policy` -> policy (defaults when unset)
 - `PUT /repos/{repo}/policy` -> policy
 Rules: protected branches cannot be deleted; with `require_pull_request` they only move through PR merges; approvals count the latest decision per reviewer and exclude the PR author; any `request_changes` blocks; unresolved `blocker` comments block when `block_on_blockers`; `require_intent`/`require_agent`/`max_files_per_commit` are checked on every new commit the update introduces.
+
+## Signing keys
+Agents sign commits with Ed25519 (`agit key generate`, `agit commit --sign`). The public key travels inside the commit; the registry decides which keys are trusted for which agent. `GET /repos/{repo}/commits/{rev}` returns `signature: {status: unsigned|valid|invalid, key_id?, signer?, public_key?, reason?, trusted}`.
+- `GET /repos/{repo}/keys` -> `[{agent, key_id, public_key, added_ms, added_by}]`
+- `POST /repos/{repo}/keys` `{agent, public_key}` -> key (409 when the key belongs to another agent)
+- `DELETE /repos/{repo}/keys/{key_id}`
+Policy `require_signed` makes every commit reaching a protected branch need a valid signature with a key registered for its signer.
 
 ## Webhooks
 Deliver events to HTTP endpoints. Payload `{"repo":"<name>","event":<event>}`, headers `X-Agit-Event` (kind), `X-Agit-Repo`, `X-Agit-Delivery` (unique id), `X-Agit-Webhook` (id) and, when a secret is set, `X-Agit-Signature: blake3=<hex>` where the value is `blake3::keyed_hash(derive_key("agit webhook v1", secret), body)`. Deliveries retry 3 times with backoff.

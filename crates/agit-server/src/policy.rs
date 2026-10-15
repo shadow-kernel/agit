@@ -60,9 +60,14 @@ impl<'a> PolicyStore<'a> {
         old: Option<ObjectId>,
         new: ObjectId,
     ) -> Result<()> {
-        if !policy.require_intent && !policy.require_agent && policy.max_files_per_commit == 0 {
+        if !policy.require_intent
+            && !policy.require_agent
+            && !policy.require_signed
+            && policy.max_files_per_commit == 0
+        {
             return Ok(());
         }
+        let keys = crate::keys::KeyStore::new(self.repo);
         let store = &self.repo.store;
         let have = match old {
             Some(o) => commit_closure(store, &[o], Some(50_000))?,
@@ -87,6 +92,32 @@ impl<'a> PolicyStore<'a> {
                     "commit {} has no agent identity (require_agent)",
                     id.short()
                 )));
+            }
+            if policy.require_signed {
+                let info = keys.info(&c)?;
+                match &info.status {
+                    agit_core::sign::SignatureStatus::Unsigned => {
+                        return Err(Error::PolicyViolation(format!(
+                            "commit {} is not signed (require_signed)",
+                            id.short()
+                        )));
+                    }
+                    agit_core::sign::SignatureStatus::Invalid { reason } => {
+                        return Err(Error::PolicyViolation(format!(
+                            "commit {} has an invalid signature: {reason}",
+                            id.short()
+                        )));
+                    }
+                    agit_core::sign::SignatureStatus::Valid { key_id, signer, .. }
+                        if !info.trusted =>
+                    {
+                        return Err(Error::PolicyViolation(format!(
+                            "commit {} is signed with key {key_id}, which is not registered for {signer} (POST /keys)",
+                            id.short()
+                        )));
+                    }
+                    _ => {}
+                }
             }
             if policy.max_files_per_commit > 0 && c.parents.len() <= 1 {
                 let parent_tree = match c.parents.first() {

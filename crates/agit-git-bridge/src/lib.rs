@@ -315,6 +315,7 @@ impl Importer<'_> {
             agent,
             checkpoint: false,
             meta,
+            signature: None,
         };
         let id = self.repo.store().write_commit(&commit)?;
         self.commit_map.insert(sha.to_string(), id);

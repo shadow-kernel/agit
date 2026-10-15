@@ -35,6 +35,8 @@ pub struct CommitOptions {
     pub force: bool,
     /// Stage all tracked modifications first (`-a`).
     pub all: bool,
+    /// Sign with this key name from `~/.agit/keys` (see [`crate::sign`]).
+    pub sign_with: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -113,7 +115,7 @@ pub fn commit(repo: &Repository, opts: CommitOptions) -> Result<CommitResult> {
     if let Some(m) = merge_head {
         parents.push(m);
     }
-    let commit = Commit {
+    let mut commit = Commit {
         tree,
         parents: parents.clone(),
         author,
@@ -124,7 +126,12 @@ pub fn commit(repo: &Repository, opts: CommitOptions) -> Result<CommitResult> {
         agent: opts.agent,
         checkpoint: false,
         meta: opts.meta,
+        signature: None,
     };
+    if let Some(key) = &opts.sign_with {
+        let kp = crate::sign::Keypair::load(key)?;
+        commit.signature = Some(kp.sign_commit(&commit, &actor));
+    }
     let id = repo.store().write_commit(&commit)?;
     repo.advance_head_with(head, id, &format!("commit: {}", commit.summary()))?;
     repo.set_merge_head(None)?;
@@ -194,6 +201,7 @@ pub fn checkpoint(
         agent,
         checkpoint: true,
         meta,
+        signature: None,
     };
     let id = repo.store().write_commit(&commit)?;
     repo.refs().update(&ref_name, Expect::Any, Some(id))?;
@@ -549,6 +557,7 @@ pub struct MergeOptions {
     pub agent: Option<AgentInfo>,
     pub no_ff: bool,
     pub force: bool,
+    pub sign_with: Option<String>,
 }
 
 pub fn merge(repo: &Repository, rev: &str, opts: MergeOptions) -> Result<MergeResult> {
@@ -666,7 +675,7 @@ pub fn merge(repo: &Repository, rev: &str, opts: MergeOptions) -> Result<MergeRe
     let message = opts
         .message
         .unwrap_or_else(|| format!("Merge {rev} into {}", labels.ours));
-    let commit = Commit {
+    let mut commit = Commit {
         tree: outcome.tree,
         parents: vec![ours_id, theirs],
         author,
@@ -677,7 +686,12 @@ pub fn merge(repo: &Repository, rev: &str, opts: MergeOptions) -> Result<MergeRe
         agent: opts.agent,
         checkpoint: false,
         meta: BTreeMap::new(),
+        signature: None,
     };
+    if let Some(key) = &opts.sign_with {
+        let kp = crate::sign::Keypair::load(key)?;
+        commit.signature = Some(kp.sign_commit(&commit, &actor));
+    }
     let id = store.write_commit(&commit)?;
     repo.advance_head_with(Some(ours_id), id, &format!("merge {rev}"))?;
     repo.events().append(

@@ -309,6 +309,30 @@ impl Client {
         resp.into_json()
             .map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
     }
+    pub fn keys(&self, repo: &str) -> Result<Vec<KeyEntry>> {
+        self.get_json(&format!("/repos/{repo}/keys"))
+    }
+    pub fn register_key(&self, repo: &str, agent: &str, public_key: &str) -> Result<KeyEntry> {
+        self.send_json(
+            "POST",
+            &format!("/repos/{repo}/keys"),
+            &KeyCreate {
+                agent: agent.into(),
+                public_key: public_key.into(),
+            },
+        )
+    }
+    pub fn delete_key(&self, repo: &str, key_id: &str) -> Result<serde_json::Value> {
+        let resp = self
+            .req("DELETE", &format!("/repos/{repo}/keys/{key_id}"))
+            .call()
+            .map_err(map_err)?;
+        resp.into_json()
+            .map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
+    }
+    pub fn commit_detail(&self, repo: &str, rev: &str) -> Result<CommitDetail> {
+        self.get_json(&format!("/repos/{repo}/commits/{rev}"))
+    }
     pub fn policy(&self, repo: &str) -> Result<Policy> {
         self.get_json(&format!("/repos/{repo}/policy"))
     }

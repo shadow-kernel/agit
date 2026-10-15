@@ -291,9 +291,38 @@ pub struct Commit {
     /// (`tool.name`), values must be JSON.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub meta: BTreeMap<String, serde_json::Value>,
+    /// Detached signature over the canonical bytes of this commit with
+    /// `signature` removed. See [`crate::sign`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<CommitSignature>,
+}
+
+/// Ed25519 signature attached to a commit. The public key travels with the
+/// commit so verification needs no lookup; trust (which key belongs to which
+/// agent) is decided by the server's key registry and policies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommitSignature {
+    /// Always `ed25519` for now.
+    pub alg: String,
+    /// Short id: first 16 hex chars of blake3(public_key).
+    pub key_id: String,
+    /// Hex-encoded 32-byte public key.
+    pub public_key: String,
+    /// Who claims the key: agent id or author name.
+    pub signer: String,
+    /// Hex-encoded 64-byte signature.
+    pub sig: String,
 }
 
 impl Commit {
+    /// Canonical bytes that a signature covers (the commit without its
+    /// `signature` field).
+    pub fn signable_bytes(&self) -> Vec<u8> {
+        let mut c = self.clone();
+        c.signature = None;
+        c.encode()
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         // serde_json on a struct emits fields in declaration order, which is
         // deterministic. Maps are BTreeMaps so key order is canonical too.
@@ -429,6 +458,7 @@ mod tests {
             }),
             checkpoint: false,
             meta: BTreeMap::new(),
+            signature: None,
         };
         let a = c.encode();
         let b = Commit::decode(ObjectId::ZERO, &a).unwrap().encode();
