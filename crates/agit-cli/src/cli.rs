@@ -308,6 +308,11 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: SubmoduleCmd,
     },
+    /// Bridge to git repositories.
+    Git {
+        #[command(subcommand)]
+        cmd: GitCmd,
+    },
     /// Run as an MCP server over stdio (tools for AI agents).
     Mcp {
         /// Remote used by pr/know/context tools.
@@ -320,6 +325,26 @@ pub enum Cmd {
         remote: String,
         #[command(subcommand)]
         cmd: crate::remote::KnowCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GitCmd {
+    /// Import a git repository's history (commits, trees, blobs, branches, tags).
+    Import {
+        /// Path to a git working copy or bare repository.
+        source: PathBuf,
+        /// Target directory for the new agit repository (default: current repository).
+        #[arg(long)]
+        into: Option<PathBuf>,
+        /// Only these branches.
+        #[arg(long = "branch")]
+        branches: Vec<String>,
+        #[arg(long)]
+        no_tags: bool,
+        /// Do not check out the default branch afterwards.
+        #[arg(long)]
+        no_checkout: bool,
     },
 }
 
@@ -918,6 +943,61 @@ pub fn run(cli: Cli) -> Result<()> {
         Cmd::Pr { remote, cmd } => crate::remote::run_pr(&open(&cli.dir)?, json, &remote, cmd)?,
         Cmd::Know { remote, cmd } => crate::remote::run_know(&open(&cli.dir)?, json, &remote, cmd)?,
         Cmd::Mcp { remote } => crate::mcp::serve(cwd(&cli.dir)?, remote)?,
+        Cmd::Git { cmd } => match cmd {
+            GitCmd::Import {
+                source,
+                into,
+                branches,
+                no_tags,
+                no_checkout,
+            } => {
+                let base = cwd(&cli.dir)?;
+                let source = if source.is_absolute() {
+                    source
+                } else {
+                    base.join(source)
+                };
+                let repo = match into {
+                    Some(dir) => {
+                        let dir = if dir.is_absolute() {
+                            dir
+                        } else {
+                            base.join(dir)
+                        };
+                        if dir.join(agit_core::repo::AGIT_DIR).exists() {
+                            Repository::discover(&dir)?
+                        } else {
+                            Repository::init(&dir)?
+                        }
+                    }
+                    None => open(&cli.dir)?,
+                };
+                let report = agit_git_bridge::import(
+                    &source,
+                    &repo,
+                    &agit_git_bridge::ImportOptions {
+                        branches,
+                        tags: !no_tags,
+                        checkout: !no_checkout,
+                        verbose: !json,
+                    },
+                )?;
+                emit(json, &report, || {
+                    println!(
+                        "imported {} commit(s), {} tree(s), {} blob(s) into {}",
+                        report.commits,
+                        report.trees,
+                        report.blobs,
+                        repo.work_dir().display()
+                    );
+                    println!(
+                        "branches: {}  tags: {}",
+                        report.branches.join(", "),
+                        report.tags.join(", ")
+                    );
+                });
+            }
+        },
         Cmd::Submodule { cmd } => {
             let repo = open(&cli.dir)?;
             let cwd = cwd(&cli.dir)?;
