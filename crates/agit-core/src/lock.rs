@@ -32,7 +32,7 @@ impl Lock {
             .open(path)
             .map_err(io_at(path))?;
         let start = Instant::now();
-        let mut backoff = Duration::from_millis(1);
+        let mut backoff = Duration::from_micros(50);
         loop {
             match file.try_lock_exclusive() {
                 Ok(()) => {
@@ -46,7 +46,7 @@ impl Lock {
                         return Err(Error::LockTimeout(path.to_path_buf()));
                     }
                     std::thread::sleep(backoff);
-                    backoff = (backoff * 2).min(Duration::from_millis(50));
+                    backoff = (backoff * 2).min(Duration::from_millis(2));
                 }
                 Err(e) => {
                     return Err(Error::IoAt {

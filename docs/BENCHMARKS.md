@@ -70,6 +70,27 @@ entries, twice per commit); an append-only index is the next step. The
 remaining 4 to 5 ms at default durability is the single `fsync` of the ref
 file, which only a journal with group commit can amortize.
 
+## 2026-10-15: server load test (single node)
+
+`cargo run --release -p agit-server --example load -- <agents> <commits>`
+starts an in-process server and drives it from many clients. Same laptop.
+
+| Phase | 8 clients | 32 clients | 8 clients, `AGIT_FSYNC=none` |
+| --- | ---: | ---: | ---: |
+| 1: commit locally + push, per micro-commit (client and server on the same disk) | 95/s | 91/s | 687/s |
+| 2: CAS updates advancing one hot branch (latency bound: every client re-reads after each success) | 344/s | 209/s | 1471/s |
+| 3: CAS updates on independent branches (group commit) | 359/s | 405/s | 2140/s |
+
+Reading: phase 1 is dominated by the clients' own fsyncs because they
+share the laptop's disk with the server; in a deployment they are on other
+machines. Phase 2 is bounded by one fsync latency per step by design.
+Phase 3 is the server's own ref path: the journal with group commit makes
+it scale with concurrent writers, and the `AGIT_FSYNC=none` column shows
+the CPU ceiling of the current per-update work (flock, reflog, events,
+audit, commit events) at about 2,000 updates per second on one core-ish
+path. Reaching the 100k platform target needs sharding across repositories
+and nodes plus a leaner per-update path; both are tracked in RFC 0004.
+
 ## What the numbers say
 
 - The single ref fsync is the dominant cost at default durability. This is

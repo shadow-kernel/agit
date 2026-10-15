@@ -108,6 +108,17 @@ pub struct WebhookStore<'a> {
     repo: &'a RepoHandle,
 }
 
+/// Process-wide cache of webhook lists keyed by file path, invalidated by
+/// the file's mtime, so emitting an event does not re-read the file.
+static CACHE: OnceLock<
+    Mutex<
+        std::collections::HashMap<
+            std::path::PathBuf,
+            (Option<std::time::SystemTime>, Vec<StoredWebhook>),
+        >,
+    >,
+> = OnceLock::new();
+
 impl<'a> WebhookStore<'a> {
     pub fn new(repo: &'a RepoHandle) -> Self {
         WebhookStore { repo }
@@ -175,11 +186,26 @@ impl<'a> WebhookStore<'a> {
     }
 
     /// Queue deliveries of `event` to every matching webhook.
+    fn load_cached(&self) -> Vec<StoredWebhook> {
+        let path = self.path();
+        let mtime = fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        let cache = CACHE.get_or_init(|| Mutex::new(Default::default()));
+        let mut map = cache.lock().unwrap();
+        if let Some((seen, hooks)) = map.get(&path) {
+            if *seen == mtime {
+                return hooks.clone();
+            }
+        }
+        let hooks = self.load().unwrap_or_default();
+        map.insert(path, (mtime, hooks.clone()));
+        hooks
+    }
+
     pub fn dispatch(&self, event: &Event) {
-        let hooks = match self.load() {
-            Ok(h) => h,
-            Err(_) => return,
-        };
+        let hooks = self.load_cached();
+        if hooks.is_empty() {
+            return;
+        }
         let matching: Vec<&StoredWebhook> =
             hooks.iter().filter(|w| w.matches(&event.kind)).collect();
         if matching.is_empty() {

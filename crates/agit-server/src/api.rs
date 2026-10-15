@@ -415,7 +415,7 @@ async fn update_refs(
         // so subscribers see what arrived, not only that the ref moved.
         if let (true, Some(new)) = (u.name.starts_with(HEADS_PREFIX), u.new) {
             let have = match old {
-                Some(o) => walk::commit_closure(&r.store, &[o], Some(20_000))?,
+                Some(o) => walk::commit_closure(&r.store, &[o], Some(2_000))?,
                 None => Default::default(),
             };
             let mut fresh: Vec<(ObjectId, agit_core::Commit)> = Vec::new();

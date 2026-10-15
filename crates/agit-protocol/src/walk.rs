@@ -82,7 +82,9 @@ pub fn objects_to_send(
     wants: &[ObjectId],
     haves: &[ObjectId],
 ) -> Result<Vec<ObjectId>> {
-    let have_commits = commit_closure(store, haves, None)?;
+    // Bounded: a deep history only costs a few redundant uploads, which the
+    // receiver skips, instead of a full walk per push.
+    let have_commits = commit_closure(store, haves, Some(4096))?;
     // Commits to send: BFS from wants, stop at have_commits.
     let mut send_commits = Vec::new();
     let mut seen = HashSet::new();

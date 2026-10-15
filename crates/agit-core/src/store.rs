@@ -521,12 +521,23 @@ impl ObjectStore {
         let (kind, compressed, raw_len) = match loc {
             Location::Own(e) => {
                 let guard = self.inner.writer.lock().unwrap();
-                let w = guard.as_ref().unwrap();
-                (
-                    e.kind,
-                    Self::read_at(&w.file, e.offset, e.comp_len as usize)?,
-                    e.raw_len,
-                )
+                match guard.as_ref() {
+                    // The writer may have been sealed by another thread
+                    // between locate and read; the segment is now a pack.
+                    Some(w) if w.entries.contains_key(id) => (
+                        e.kind,
+                        Self::read_at(&w.file, e.offset, e.comp_len as usize)?,
+                        e.raw_len,
+                    ),
+                    _ => {
+                        drop(guard);
+                        let _ = self.scan_packs(true);
+                        return match self.locate_in_packs(id) {
+                            Some(loc) => self.read_entry(id, loc),
+                            None => Err(Error::ObjectNotFound(*id)),
+                        };
+                    }
+                }
             }
             Location::Pack(p, e) => {
                 let mut f = p.file.lock().unwrap();

@@ -1103,14 +1103,16 @@ async fn scoped_tokens_bind_identity_and_limit_access() {
         a.release_lease("t", &l.id).unwrap();
 
         // Scope limits: no access to `other`, no admin on `t`.
-        assert!(matches!(
-            a.repo("other"),
-            Err(agit_core::Error::Forbidden(_))
-        ));
-        assert!(matches!(
-            a.set_policy("t", &Policy::default()),
-            Err(agit_core::Error::Forbidden(_))
-        ));
+        let r = a.repo("other");
+        assert!(
+            matches!(r, Err(agit_core::Error::Forbidden(_))),
+            "expected forbidden, got {r:?}"
+        );
+        let r = a.set_policy("t", &Policy::default());
+        assert!(
+            matches!(r, Err(agit_core::Error::Forbidden(_))),
+            "expected forbidden, got {r:?}"
+        );
         assert!(matches!(
             a.create_token(&TokenCreate {
                 name: "x".into(),

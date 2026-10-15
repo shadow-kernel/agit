@@ -30,6 +30,184 @@ pub enum Expect {
 
 type BeforeUpdate = std::sync::Arc<dyn Fn() -> Result<()> + Send + Sync>;
 
+/// Group-commit journal shared by every `RefStore` handle of a directory
+/// within one process.
+///
+/// Durability of ref updates comes from `refs.journal`, not from fsyncing
+/// each ref file: an update writes its ref file without fsync, appends one
+/// line to the journal and then joins the next journal flush. Concurrent
+/// updaters share that single fsync, so throughput scales with the number
+/// of writers instead of being serialized on the disk. On open, the journal
+/// tail is replayed over the ref files (`recover`), so a crash after the
+/// fsync never loses an acknowledged update.
+struct Journal {
+    path: PathBuf,
+    state: std::sync::Mutex<JournalState>,
+    cv: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct JournalState {
+    pending: Vec<u8>,
+    /// Generation number: bumped after every fsync.
+    committed: u64,
+    /// Generation that the pending buffer will become.
+    next: u64,
+    flushing: bool,
+}
+
+/// Checkpoint (fsync every ref file and truncate) once the journal grows past this.
+const JOURNAL_ROTATE_BYTES: u64 = 8 * 1024 * 1024;
+
+static JOURNALS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, std::sync::Arc<Journal>>>,
+> = std::sync::OnceLock::new();
+
+impl Journal {
+    fn for_dir(dir: &Path) -> std::sync::Arc<Journal> {
+        let map = JOURNALS.get_or_init(|| std::sync::Mutex::new(Default::default()));
+        let mut map = map.lock().unwrap();
+        map.entry(dir.to_path_buf())
+            .or_insert_with(|| {
+                std::sync::Arc::new(Journal {
+                    path: dir.join("refs.journal"),
+                    state: std::sync::Mutex::new(JournalState {
+                        next: 1,
+                        ..Default::default()
+                    }),
+                    cv: std::sync::Condvar::new(),
+                })
+            })
+            .clone()
+    }
+
+    /// Append `line` and return once it is durable (one fsync per batch).
+    fn commit(&self, line: &str) -> Result<()> {
+        if !crate::durability::sync_refs() {
+            // No durability requested: still keep the journal for recovery of
+            // torn ref files, but never wait on the disk.
+            let mut f = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)
+                .map_err(io_at(&self.path))?;
+            use std::io::Write;
+            f.write_all(line.as_bytes()).map_err(io_at(&self.path))?;
+            return Ok(());
+        }
+        let mut st = self.state.lock().unwrap();
+        st.pending.extend_from_slice(line.as_bytes());
+        let my_gen = st.next;
+        loop {
+            if st.committed >= my_gen {
+                return Ok(());
+            }
+            if st.flushing {
+                // A leader is writing an earlier batch; wait for it.
+                st = self.cv.wait(st).unwrap();
+                continue;
+            }
+            // Become the leader for everything queued so far. Writers that
+            // arrive during the fsync queue for the next batch, so under
+            // load batches form by themselves and a lone writer never waits.
+            st.flushing = true;
+            let batch = std::mem::take(&mut st.pending);
+            let gen = st.next;
+            st.next += 1;
+            drop(st);
+            let result = (|| -> Result<()> {
+                let mut f = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)
+                    .map_err(io_at(&self.path))?;
+                use std::io::Write;
+                f.write_all(&batch).map_err(io_at(&self.path))?;
+                f.sync_data().map_err(io_at(&self.path))?;
+                Ok(())
+            })();
+            st = self.state.lock().unwrap();
+            st.committed = gen;
+            st.flushing = false;
+            self.cv.notify_all();
+            result?;
+        }
+    }
+
+    /// Replay the journal over the ref files: the last entry per ref wins.
+    fn recover(&self, dir: &Path) -> Result<usize> {
+        let text = match fs::read_to_string(&self.path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => {
+                return Err(Error::IoAt {
+                    path: self.path.clone(),
+                    source: e,
+                })
+            }
+        };
+        let mut last: std::collections::HashMap<&str, Option<&str>> =
+            std::collections::HashMap::new();
+        for line in text.lines() {
+            let mut parts = line.split(' ');
+            if let (Some(name), Some(new)) = (parts.next(), parts.next()) {
+                last.insert(name, if new == "-" { None } else { Some(new) });
+            }
+        }
+        let mut repaired = 0;
+        for (name, new) in last {
+            if RefStore::validate_name(name).is_err() {
+                continue;
+            }
+            let path = dir.join(name);
+            let current = fs::read_to_string(&path).ok().map(|s| s.trim().to_string());
+            match new {
+                Some(id) if current.as_deref() != Some(id) => {
+                    write_atomic_with(&path, format!("{id}\n").as_bytes(), false)?;
+                    repaired += 1;
+                }
+                None if current.is_some() => {
+                    let _ = fs::remove_file(&path);
+                    repaired += 1;
+                }
+                _ => {}
+            }
+        }
+        Ok(repaired)
+    }
+
+    /// Make every ref file durable on its own and truncate the journal.
+    fn checkpoint(&self, dir: &Path) -> Result<()> {
+        let len = fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        if len < JOURNAL_ROTATE_BYTES {
+            return Ok(());
+        }
+        let _st = self.state.lock().unwrap();
+        for sub in [
+            "refs/heads",
+            "refs/tags",
+            "refs/checkpoints",
+            "refs/remotes",
+        ] {
+            let base = dir.join(sub);
+            let mut stack = vec![base];
+            while let Some(d) = stack.pop() {
+                let Ok(rd) = fs::read_dir(&d) else { continue };
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        stack.push(p);
+                    } else if let Ok(f) = fs::File::open(&p) {
+                        let _ = f.sync_data();
+                    }
+                }
+            }
+        }
+        write_atomic_with(&self.path, b"", true)?;
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct RefStore {
     dir: PathBuf,
@@ -37,6 +215,7 @@ pub struct RefStore {
     /// Called before any ref is written; the repository uses it to publish
     /// pending objects so a ref never points at an unpublished object.
     before_update: Option<BeforeUpdate>,
+    journal: std::sync::Arc<Journal>,
 }
 
 impl std::fmt::Debug for RefStore {
@@ -47,11 +226,24 @@ impl std::fmt::Debug for RefStore {
 
 impl RefStore {
     pub fn open(agit_dir: &Path) -> Self {
+        let journal = Journal::for_dir(agit_dir);
+        // Replay whatever the last process acknowledged but did not get to
+        // write into the ref files (crash between journal fsync and rename).
+        let _ = journal.recover(agit_dir);
         RefStore {
             dir: agit_dir.to_path_buf(),
             lock_path: agit_dir.join("locks").join("refs.lock"),
             before_update: None,
+            journal,
         }
+    }
+
+    fn journal_line(name: &str, new: Option<ObjectId>) -> String {
+        format!(
+            "{name} {} {}\n",
+            new.map(|i| i.to_hex()).unwrap_or_else(|| "-".into()),
+            crate::events::now_ms()
+        )
     }
 
     /// Install the publish hook (see [`crate::store::ObjectStore::flush`]).
@@ -155,7 +347,7 @@ impl RefStore {
         }
         let path = self.path_for(name);
         match new {
-            Some(id) => write_atomic(&path, format!("{id}\n").as_bytes())?,
+            Some(id) => write_atomic_with(&path, format!("{id}\n").as_bytes(), false)?,
             None => match fs::remove_file(&path) {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -165,6 +357,10 @@ impl RefStore {
         if current != new {
             crate::reflog::append(&self.dir, name, current, new, message)?;
         }
+        drop(_guard);
+        // Durability: one group fsync of the journal instead of one per ref.
+        self.journal.commit(&Self::journal_line(name, new))?;
+        let _ = self.journal.checkpoint(&self.dir);
         Ok(())
     }
 
@@ -216,10 +412,12 @@ impl RefStore {
             }
         }
         // Phase 2: apply.
+        let mut lines = String::new();
         for ((name, _, new), old) in updates.iter().zip(olds) {
+            lines.push_str(&Self::journal_line(name, *new));
             let path = self.path_for(name);
             match new {
-                Some(id) => write_atomic(&path, format!("{id}\n").as_bytes())?,
+                Some(id) => write_atomic_with(&path, format!("{id}\n").as_bytes(), false)?,
                 None => {
                     if let Err(e) = fs::remove_file(&path) {
                         if e.kind() != std::io::ErrorKind::NotFound {
@@ -232,6 +430,9 @@ impl RefStore {
                 crate::reflog::append(&self.dir, name, old, *new, message)?;
             }
         }
+        drop(_guard);
+        self.journal.commit(&lines)?;
+        let _ = self.journal.checkpoint(&self.dir);
         Ok(())
     }
 
@@ -240,6 +441,14 @@ impl RefStore {
         let base = self.path_for(prefix.trim_end_matches('/'));
         let mut out = Vec::new();
         if !base.exists() {
+            return Ok(out);
+        }
+        // The prefix names one ref exactly.
+        if base.is_file() {
+            let name = prefix.trim_end_matches('/').to_string();
+            if let Some(id) = self.read(&name)? {
+                out.push((name, id));
+            }
             return Ok(out);
         }
         let mut stack = vec![base.clone()];
@@ -338,5 +547,62 @@ mod tests {
         assert!(RefStore::validate_branch_name("bad name").is_err());
         assert!(RefStore::validate_branch_name("../etc").is_err());
         assert!(RefStore::validate_branch_name(".hidden").is_err());
+    }
+}
+
+#[cfg(test)]
+mod journal_tests {
+    use super::*;
+
+    fn id(n: u8) -> ObjectId {
+        ObjectId::from_bytes([n; 32])
+    }
+
+    #[test]
+    fn journal_recovers_torn_ref_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let refs = RefStore::open(dir.path());
+        refs.update("refs/heads/main", Expect::Any, Some(id(1)))
+            .unwrap();
+        refs.update("refs/heads/main", Expect::Any, Some(id(2)))
+            .unwrap();
+        refs.update("refs/heads/gone", Expect::Any, Some(id(3)))
+            .unwrap();
+        refs.update("refs/heads/gone", Expect::Any, None).unwrap();
+        // Simulate a crash after the journal fsync but before the ref file
+        // reached disk: clobber the ref file and resurrect the deleted one.
+        fs::write(dir.path().join("refs/heads/main"), format!("{}\n", id(1))).unwrap();
+        fs::write(dir.path().join("refs/heads/gone"), format!("{}\n", id(3))).unwrap();
+        let again = RefStore::open(dir.path());
+        assert_eq!(again.read("refs/heads/main").unwrap(), Some(id(2)));
+        assert_eq!(again.read("refs/heads/gone").unwrap(), None);
+    }
+
+    #[test]
+    fn concurrent_updates_share_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let refs = RefStore::open(dir.path());
+        let handles: Vec<_> = (0..8u8)
+            .map(|i| {
+                let r = refs.clone();
+                std::thread::spawn(move || {
+                    for j in 0..20u8 {
+                        r.update(&format!("refs/heads/b{i}"), Expect::Any, Some(id(j)))
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        for i in 0..8u8 {
+            assert_eq!(
+                refs.read(&format!("refs/heads/b{i}")).unwrap(),
+                Some(id(19))
+            );
+        }
+        let journal = fs::read_to_string(dir.path().join("refs.journal")).unwrap();
+        assert_eq!(journal.lines().count(), 160);
     }
 }

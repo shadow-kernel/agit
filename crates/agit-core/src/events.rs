@@ -32,6 +32,10 @@ pub struct Event {
 pub struct EventLog {
     path: PathBuf,
     lock_path: PathBuf,
+    /// (last seq we know, file length when we learned it). Reused while the
+    /// file length is unchanged, so the tail is scanned only when another
+    /// process appended.
+    cache: std::sync::Arc<std::sync::Mutex<Option<(u64, u64)>>>,
 }
 
 pub fn now_ms() -> i64 {
@@ -46,6 +50,7 @@ impl EventLog {
         EventLog {
             path: agit_dir.join("events.jsonl"),
             lock_path: agit_dir.join("locks").join("events.lock"),
+            cache: Default::default(),
         }
     }
 
@@ -92,7 +97,13 @@ impl EventLog {
         data: serde_json::Value,
     ) -> Result<Event> {
         let _guard = Lock::acquire(&self.lock_path, Duration::from_secs(5))?;
-        let seq = self.last_seq()? + 1;
+        let len_now = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        let cached = *self.cache.lock().unwrap();
+        let last = match cached {
+            Some((seq, len)) if len == len_now => seq,
+            _ => self.last_seq()?,
+        };
+        let seq = last + 1;
         let ev = Event {
             seq,
             time_ms: now_ms(),
@@ -109,6 +120,7 @@ impl EventLog {
             .open(&self.path)
             .map_err(io_at(&self.path))?;
         f.write_all(&line).map_err(io_at(&self.path))?;
+        *self.cache.lock().unwrap() = Some((seq, len_now + line.len() as u64));
         if crate::durability::sync_data() {
             f.sync_data().map_err(io_at(&self.path))?;
         }
