@@ -1,4 +1,4 @@
-> Status update 2026-10-15: Phase 0 is complete. Parts of Phases 2, 3 and 4 shipped early as a single-node server (`crates/agit-server`): clone/push/pull with CAS refs, pull requests with reviews and server-side merge, server-wide leases, SSE event stream, and a file-backed knowledge base with typed tags, tag rules and a `context` endpoint. Raft replication, blob tiers, policies, webhooks and the git bridge remain open. The web UI is in progress in `web/`.
+> Status update 2026-10-15: Phase 0 is complete. Parts of Phases 2, 3 and 4 shipped early as a single-node server (`crates/agit-server`): clone/push/pull with CAS refs, pull requests with reviews and server-side merge, repository policies, server-wide leases, SSE event stream, a file-backed knowledge base with typed tags, tag rules and a `context` endpoint, submodules, an MCP server (`agit mcp`) and the first web UI (`web/`). Raft replication, pack segments and the journal, blob tiers, webhooks, the git bridge and SDKs remain open.
 
 # agit roadmap
 

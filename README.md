@@ -377,7 +377,7 @@ Register it in an MCP client, started inside a repository:
 
 The server's `instructions` describe the intended loop: `agit_context(path)` before editing, `agit_lease_claim` for the paths you will change, `agit_checkpoint` before risky edits, `agit_add` + `agit_commit` with intent and task, `agit_pr_create` when done, `agit_know_add` to record what you learned.
 
-Python and TypeScript SDKs over the HTTP API are planned in `sdk/`.
+Python and TypeScript SDKs over the HTTP API are planned in `sdk/`. The step-by-step agent workflow is in [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md).
 
 ### Idempotency 📋
 

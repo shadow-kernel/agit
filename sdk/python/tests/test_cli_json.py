@@ -11,9 +11,11 @@ from agit import AgitError, RefConflict
 from agit.cli_json import binary, run, stream
 
 FAKE = r'''#!/bin/sh
-# fake agit: echo args back inside the JSON envelope
+# fake agit: echo args back inside the JSON envelope (--json may come first, as a global flag)
+ALL="$*"
+[ "$1" = "--json" ] && shift
 case "$1" in
-  status) printf '{"ok":true,"result":{"args":"%s","cwd":"%s","agent":"%s","json":"%s"}}\n' "$*" "$(pwd)" "$AGIT_AGENT" "$AGIT_JSON" ;;
+  status) printf '{"ok":true,"result":{"args":"%s","cwd":"%s","agent":"%s","json":"%s"}}\n' "$ALL" "$(pwd)" "$AGIT_AGENT" "$AGIT_JSON" ;;
   push)   printf '{"ok":false,"error":{"code":"ref_conflict","message":"ref moved","retryable":true,"details":{"name":"refs/heads/main"}}}\n'; exit 75 ;;
   crash)  echo "panic: boom" >&2; exit 1 ;;
   events) printf '{"ok":true,"result":{"seq":1}}\n{"ok":true,"result":{"seq":2}}\n' ;;
