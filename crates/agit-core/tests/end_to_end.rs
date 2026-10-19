@@ -750,6 +750,17 @@ fn user_agit_dir_in_home_is_not_a_repository() {
         Err(Error::NotARepository(_)) => {}
         other => panic!("expected not_a_repository, got {other:?}"),
     }
+    // agit 0.1.0 wrote a config.json into ~/.agit when `remote add` ran
+    // outside a repository; that alone must not turn it into one.
+    fs::write(
+        home.join(".agit/config.json"),
+        r#"{"format_version":1,"default_branch":"main","remotes":{"origin":{"url":"http://h/api/v1/repos/x"}}}"#,
+    )
+    .unwrap();
+    match Repository::discover(&plain) {
+        Err(Error::NotARepository(_)) => {}
+        other => panic!("expected not_a_repository with a stray config.json, got {other:?}"),
+    }
     match Repository::init(home) {
         Err(Error::Invalid(msg)) => assert!(msg.contains("not a repository"), "{msg}"),
         other => panic!(

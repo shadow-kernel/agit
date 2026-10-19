@@ -60,7 +60,7 @@ print(cur if not isinstance(cur, bool) else str(cur).lower())
 }
 
 # Walk up from <dir> until a directory containing an agit repository is found:
-# a `.agit` directory with HEAD or config.json, or a workspace pointer file.
+# a `.agit` directory with HEAD and objects/, or a workspace pointer file.
 # A bare `~/.agit` (signing keys, sessions) is not a repository. Prints the
 # repository root or nothing.
 agit_find_root() {
@@ -70,7 +70,7 @@ agit_find_root() {
         *) dir="$PWD/$dir" ;;
     esac
     while :; do
-        if [ -f "$dir/.agit" ] || [ -f "$dir/.agit/HEAD" ] || [ -f "$dir/.agit/config.json" ]; then
+        if [ -f "$dir/.agit" ] || { [ -f "$dir/.agit/HEAD" ] && [ -d "$dir/.agit/objects" ]; }; then
             printf '%s\n' "$dir"
             return 0
         fi

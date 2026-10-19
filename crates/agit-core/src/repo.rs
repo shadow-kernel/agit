@@ -39,9 +39,12 @@ pub const AGIT_DIR: &str = ".agit";
 /// Whether `dir` (a `.agit` directory) holds a repository. agit also keeps a
 /// per-user `~/.agit` (signing keys in `keys/`, cached sessions in
 /// `sessions.json`), which is not a repository and must not stop discovery
-/// for directories below the home directory.
+/// for directories below the home directory. Only `init` creates both `HEAD`
+/// and `objects/`, so both are required: agit 0.1.0 could leave a stray
+/// `config.json` in `~/.agit` when `agit remote add` ran outside a
+/// repository, and that file alone must not make it a repository.
 pub fn is_repository_dir(dir: &Path) -> bool {
-    dir.is_dir() && (dir.join("HEAD").is_file() || dir.join("config.json").is_file())
+    dir.is_dir() && dir.join("HEAD").is_file() && dir.join("objects").is_dir()
 }
 pub const PRIMARY_WORKSPACE: &str = "main";
 pub const FORMAT_VERSION: u32 = 1;

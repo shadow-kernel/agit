@@ -40,6 +40,13 @@ pub fn report_error(e: &anyhow::Error, json: bool) -> u8 {
         if retryable {
             eprintln!("hint: this error is transient; retry the command");
         }
+        if code == "not_a_repository" {
+            eprintln!(
+                "hint: run agit inside a repository: the directory you created with `agit init` \
+                 or `agit git import --into <dir>`, which contains a `.agit` directory \
+                 (a `.git` mirror is not an agit repository)"
+            );
+        }
     }
     exit
 }

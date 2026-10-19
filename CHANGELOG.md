@@ -13,6 +13,15 @@ release will be 0.1.0 (the current workspace version).
 
 ## [Unreleased]
 
+### Fixed
+
+- `~/.agit` was still taken for a repository after 0.1.1 when agit 0.1.0 had
+  left a `config.json` in it (an `agit remote add` run outside a repository
+  wrote one), so commands outside a repository kept failing with
+  `io error at ~/.agit/HEAD`. A repository now needs both `HEAD` and
+  `objects/`, which only `agit init` creates; the stray file is ignored and
+  can be deleted. `not_a_repository` now prints a hint on where to run agit.
+
 ## [0.1.1] - 2026-10-19
 
 ### Fixed
