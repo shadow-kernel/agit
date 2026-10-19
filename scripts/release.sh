@@ -62,7 +62,12 @@ for f in "${FILES[@]}"; do [[ -f "$f" ]] || die "missing $f"; done
 
 OLD=$(awk '/^\[workspace\.package\]/{s=1;next} /^\[/{s=0} s && /^version *= *"/{gsub(/.*= *"|".*/,""); print; exit}' Cargo.toml)
 [[ -n "$OLD" ]] || die "could not read the current version from Cargo.toml"
-[[ "$OLD" != "$NEW" ]] || die "version is already $NEW"
+# The first release ships the version the manifests already carry; later
+# releases bump them.
+SAME=0
+if [[ "$OLD" == "$NEW" ]]; then
+    SAME=1
+fi
 
 # ---------------------------------------------------------------------------
 # Preflight
@@ -77,7 +82,12 @@ fi
 grep -q '^## \[Unreleased\]' CHANGELOG.md || die "CHANGELOG.md has no '## [Unreleased]' section"
 PREV=$(sed -n 's/^## \[\([0-9][^]]*\)\].*/\1/p' CHANGELOG.md | head -1 || true)
 
-say "bump $OLD -> $NEW (tag $TAG, date $DATE, previous release: ${PREV:-none})"
+if [[ "$SAME" = 1 ]]; then
+    [[ -z "$PREV" ]] || die "version is already $NEW and $PREV was released; bump to a new version"
+    say "first release: manifests already at $NEW, cutting the CHANGELOG only (tag $TAG, date $DATE)"
+else
+    say "bump $OLD -> $NEW (tag $TAG, date $DATE, previous release: ${PREV:-none})"
+fi
 [[ "$EXECUTE" = 1 ]] || say "dry run: showing the diffs that --execute would apply"
 
 # ---------------------------------------------------------------------------
@@ -115,6 +125,7 @@ bump_changelog() {
         END {if (!l) {print ""; print ul; print rl}}' CHANGELOG.md
 }
 
+STAGED=()
 stage() { # <relative file> <generator...>: write new content to $TMP, show diff
     local f="$1"; shift
     mkdir -p "$TMP/$(dirname "$f")"
@@ -123,17 +134,21 @@ stage() { # <relative file> <generator...>: write new content to $TMP, show diff
         die "no change produced for $f; its version line may be in an unexpected place"
     fi
     diff -u "$f" "$TMP/$f" --label "a/$f" --label "b/$f" || true
+    STAGED+=("$f")
 }
 
-stage Cargo.toml                 bump_toml_section Cargo.toml workspace.package
-stage web/package.json           bump_package_json web/package.json
-stage sdk/typescript/package.json bump_package_json sdk/typescript/package.json
-stage sdk/python/pyproject.toml  bump_toml_section sdk/python/pyproject.toml project
+if [[ "$SAME" = 0 ]]; then
+    stage Cargo.toml                 bump_toml_section Cargo.toml workspace.package
+    stage web/package.json           bump_package_json web/package.json
+    stage sdk/typescript/package.json bump_package_json sdk/typescript/package.json
+    stage sdk/python/pyproject.toml  bump_toml_section sdk/python/pyproject.toml project
+fi
 stage CHANGELOG.md               bump_changelog
 
-# Sanity: every staged manifest now carries the new version exactly once.
+# Sanity: every manifest carries the release version.
 for f in Cargo.toml web/package.json sdk/typescript/package.json sdk/python/pyproject.toml; do
-    grep -q "\"$NEW\"" "$TMP/$f" || die "internal: $f was not bumped"
+    src="$f"; [[ -f "$TMP/$f" ]] && src="$TMP/$f"
+    grep -q "\"$NEW\"" "$src" || die "internal: $f does not carry version $NEW"
 done
 
 if [[ "$EXECUTE" = 0 ]]; then
@@ -147,8 +162,8 @@ fi
 # ---------------------------------------------------------------------------
 # Apply
 # ---------------------------------------------------------------------------
-for f in "${FILES[@]}"; do cp "$TMP/$f" "$f"; done
-say "updated ${FILES[*]}"
+for f in "${STAGED[@]}"; do cp "$TMP/$f" "$f"; done
+say "updated ${STAGED[*]}"
 
 if command -v cargo >/dev/null 2>&1; then
     cargo update --workspace --quiet
@@ -157,8 +172,12 @@ else
     die "cargo not found; Cargo.lock must be refreshed before committing"
 fi
 
-git add "${FILES[@]}" Cargo.lock
-git commit -q -m "Release $TAG" -m "Bump workspace, web and SDK versions to $NEW and cut the CHANGELOG section."
+git add "${STAGED[@]}" Cargo.lock
+if [[ "$SAME" = 1 ]]; then
+    git commit -q -m "Release $TAG" -m "Cut the CHANGELOG section for $NEW, the version the manifests already carry."
+else
+    git commit -q -m "Release $TAG" -m "Bump workspace, web and SDK versions to $NEW and cut the CHANGELOG section."
+fi
 say "committed $(git rev-parse --short HEAD)"
 
 if [[ "$TAG_IT" = 1 ]]; then
