@@ -253,6 +253,7 @@ export interface Lease {
   expires_ms?: number | null;
   note?: string | null;
   workspace?: string | null;
+  remote?: string | null;
 }
 
 export interface LeaseCreateRequest {
@@ -504,6 +505,8 @@ export interface Policy {
   max_files_per_commit: number;
   /** Commits reaching a protected branch must carry a valid Ed25519 signature with a key registered under `/keys`. */
   require_signed: boolean;
+  /** Pushes may not bring another agent's commits into paths under an active exclusive lease. */
+  enforce_leases: boolean;
 }
 
 export const DEFAULT_POLICY: Policy = {
@@ -518,6 +521,7 @@ export const DEFAULT_POLICY: Policy = {
   allowed_push_agents: [],
   max_files_per_commit: 0,
   require_signed: false,
+  enforce_leases: true,
 };
 
 // ---- Webhooks ---------------------------------------------------------------

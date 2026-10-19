@@ -13,6 +13,21 @@ release will be 0.1.0 (the current workspace version).
 
 ## [Unreleased]
 
+### Added
+
+- Team-wide leases. In a repository with an HTTP remote, `agit lease claim`,
+  the MCP lease tools and the Claude Code hooks register every lease on the
+  server first and mirror it locally with the same id (`"remote":"origin"`);
+  `release` and `renew` act on both; `agit lease list` merges the team's
+  leases with local-only ones; `agit lease check`, `commit` and `merge` also
+  ask the server, so a lease taken on one machine stops commits on every
+  other. Offline, agit falls back to local leases with one warning and backs
+  off for 60 s; `agit lease sync` registers them later. `AGIT_LEASE_SYNC`
+  (`auto`, `required`, `off`) and `AGIT_LEASE_REMOTE` control it.
+- Policy `enforce_leases` (default on): the server refuses a push whose new
+  non-merge commits change a path under another agent's active exclusive
+  lease (`409 lease_conflict`); toggle in the web UI settings.
+
 ## [0.1.4] - 2026-10-19
 
 ### Added

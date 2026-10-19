@@ -96,7 +96,9 @@ fn list(v: &Value, k: &str) -> Vec<String> {
 
 impl Server {
     fn repo(&self) -> Result<Repository> {
-        Ok(Repository::discover(&self.cwd)?)
+        let mut repo = Repository::discover(&self.cwd)?;
+        agit_protocol::leases::attach(&mut repo);
+        Ok(repo)
     }
 
     fn agent(&self, args: &Value) -> Option<AgentInfo> {
@@ -313,18 +315,22 @@ impl Server {
                     })
                     .collect::<Result<_>>()?;
                 let holder = s(args, "holder").ok_or_else(|| anyhow!("holder required"))?;
-                let lease = repo.leases().claim(LeaseRequest {
-                    holder: holder.clone(),
-                    paths,
-                    mode: if b(args, "shared") {
-                        LeaseMode::Shared
-                    } else {
-                        LeaseMode::Exclusive
+                let lease = agit_protocol::leases::claim(
+                    &repo,
+                    LeaseRequest {
+                        holder: holder.clone(),
+                        paths,
+                        mode: if b(args, "shared") {
+                            LeaseMode::Shared
+                        } else {
+                            LeaseMode::Exclusive
+                        },
+                        ttl: Some(std::time::Duration::from_secs(n(args, "ttl_secs", 3600))),
+                        note: s(args, "note"),
+                        workspace: Some(repo.workspace().to_string()),
                     },
-                    ttl: Some(std::time::Duration::from_secs(n(args, "ttl_secs", 3600))),
-                    note: s(args, "note"),
-                    workspace: Some(repo.workspace().to_string()),
-                })?;
+                )?
+                .lease;
                 repo.events().append(
                     "lease.claim",
                     Some(repo.workspace()),
@@ -335,8 +341,8 @@ impl Server {
             }
             "agit_lease_release" => {
                 let released = match (s(args, "id"), s(args, "holder")) {
-                    (Some(id), _) => vec![repo.leases().release(&id)?],
-                    (None, Some(h)) => repo.leases().release_all(&h)?,
+                    (Some(id), _) => vec![agit_protocol::leases::release(&repo, &id)?],
+                    (None, Some(h)) => agit_protocol::leases::release_all(&repo, &h)?,
                     _ => return Err(anyhow!("id or holder required")),
                 };
                 for l in &released {
@@ -349,17 +355,13 @@ impl Server {
                 }
                 serde_json::to_value(released)?
             }
-            "agit_lease_list" => serde_json::to_value(repo.leases().list()?)?,
+            "agit_lease_list" => serde_json::to_value(agit_protocol::leases::list(&repo)?)?,
             "agit_lease_check" => {
                 let paths: Vec<String> = list(args, "paths")
                     .iter()
                     .map(|p| self.rel(&repo, p))
                     .collect::<Result<_>>()?;
-                ops::enforce_leases(
-                    repo.leases(),
-                    &s(args, "holder").unwrap_or_default(),
-                    &paths,
-                )?;
+                repo.enforce_leases(&s(args, "holder").unwrap_or_default(), &paths)?;
                 json!({ "allowed": true })
             }
             "agit_events" => {

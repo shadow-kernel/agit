@@ -494,8 +494,13 @@ async fn update_refs(
         .collect::<Result<_, _>>()?;
     {
         let ps = crate::policy::PolicyStore::new(&r);
+        let policy = ps.get()?;
         for (u, old) in req.updates.iter().zip(olds.iter()) {
             ps.check_push(&u.name, *old, u.new, &agent)?;
+            // Team-wide leases: no one else's commits into paths someone holds.
+            if let (true, Some(new)) = (u.name.starts_with(HEADS_PREFIX), u.new) {
+                ps.check_leases(&policy, *old, new)?;
+            }
         }
     }
     let updates: Vec<(String, agit_core::refs::Expect, Option<ObjectId>)> = req

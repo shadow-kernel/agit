@@ -120,6 +120,8 @@ pub struct Repository {
     refs: RefStore,
     events: EventLog,
     leases: LeaseStore,
+    /// Leases held elsewhere (the shared server), checked after the local store.
+    remote_leases: Option<crate::lease::RemoteLeaseHook>,
 }
 
 impl Repository {
@@ -180,6 +182,7 @@ impl Repository {
                 .with_before_update(std::sync::Arc::new(move || hook_store.flush())),
             events: EventLog::open(&common_dir),
             leases: LeaseStore::open(&common_dir),
+            remote_leases: None,
             ws_dir: common_dir.clone(),
             common_dir,
             work_dir,
@@ -200,6 +203,7 @@ impl Repository {
                 .with_before_update(std::sync::Arc::new(move || hook_store.flush())),
             events: EventLog::open(&common_dir),
             leases: LeaseStore::open(&common_dir),
+            remote_leases: None,
             ws_dir,
             common_dir,
             work_dir,
@@ -264,6 +268,28 @@ impl Repository {
     }
     pub fn leases(&self) -> &LeaseStore {
         &self.leases
+    }
+
+    /// Also consult `remote` (the server's leases) in every lease check.
+    pub fn set_remote_leases(&mut self, remote: std::sync::Arc<dyn crate::lease::RemoteLeases>) {
+        self.remote_leases = Some(crate::lease::RemoteLeaseHook(remote));
+    }
+
+    pub fn has_remote_leases(&self) -> bool {
+        self.remote_leases.is_some()
+    }
+
+    /// Refuse when any of `paths` is under another holder's exclusive lease,
+    /// in this repository or, when attached, on the shared server.
+    pub fn enforce_leases(&self, holder: &str, paths: &[String]) -> Result<()> {
+        crate::ops::enforce_leases(&self.leases, holder, paths)?;
+        if paths.is_empty() {
+            return Ok(());
+        }
+        if let Some(remote) = &self.remote_leases {
+            remote.0.check(holder, paths)?;
+        }
+        Ok(())
     }
     pub fn index_path(&self) -> PathBuf {
         self.ws_dir.join("index")

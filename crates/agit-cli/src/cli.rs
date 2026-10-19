@@ -585,14 +585,16 @@ pub enum LeaseCmd {
         #[arg(long, default_value = "1h")]
         ttl: String,
     },
-    /// List active leases.
+    /// List active leases: the team's on the server and this machine's.
     List,
-    /// Check whether --holder may modify the given paths.
+    /// Check whether --holder may modify the given paths (locally and on the server).
     Check {
         paths: Vec<String>,
         #[arg(long, env = "AGIT_AGENT")]
         holder: String,
     },
+    /// Register leases claimed while the server was unreachable; drop stale mirrors.
+    Sync,
 }
 
 #[derive(Subcommand)]
@@ -624,7 +626,11 @@ fn open(dir: &Option<PathBuf>) -> Result<Repository> {
         Some(d) => d.clone(),
         None => std::env::current_dir()?,
     };
-    Ok(Repository::discover(&start)?)
+    let mut repo = Repository::discover(&start)?;
+    // Commits, merges and lease checks also respect the leases other agents
+    // hold on the shared server (no network until a check actually runs).
+    agit_protocol::leases::attach(&mut repo);
+    Ok(repo)
 }
 
 fn cwd(dir: &Option<PathBuf>) -> Result<PathBuf> {
@@ -1695,8 +1701,8 @@ pub fn run(cli: Cli) -> Result<()> {
 }
 
 fn run_lease(dir: &Option<PathBuf>, json: bool, cmd: LeaseCmd) -> Result<()> {
+    use agit_protocol::leases as shared;
     let repo = open(dir)?;
-    let leases = repo.leases();
     match cmd {
         LeaseCmd::Claim {
             paths,
@@ -1719,18 +1725,22 @@ fn run_lease(dir: &Option<PathBuf>, json: bool, cmd: LeaseCmd) -> Result<()> {
                     }
                 })
                 .collect::<Result<_>>()?;
-            let lease = leases.claim(LeaseRequest {
-                holder: holder.clone(),
-                paths,
-                mode: if shared {
-                    LeaseMode::Shared
-                } else {
-                    LeaseMode::Exclusive
+            let claimed = shared::claim(
+                &repo,
+                LeaseRequest {
+                    holder: holder.clone(),
+                    paths,
+                    mode: if shared {
+                        LeaseMode::Shared
+                    } else {
+                        LeaseMode::Exclusive
+                    },
+                    ttl: Some(parse_duration(&ttl)?),
+                    note,
+                    workspace: Some(repo.workspace().to_string()),
                 },
-                ttl: Some(parse_duration(&ttl)?),
-                note,
-                workspace: Some(repo.workspace().to_string()),
-            })?;
+            )?;
+            let lease = claimed.lease;
             repo.events().append(
                 "lease.claim",
                 Some(repo.workspace()),
@@ -1739,20 +1749,24 @@ fn run_lease(dir: &Option<PathBuf>, json: bool, cmd: LeaseCmd) -> Result<()> {
             )?;
             emit(json, &lease, || {
                 println!(
-                    "lease {} granted to {} for {}",
+                    "lease {} granted to {} for {} ({})",
                     lease.id,
                     lease.holder,
-                    lease.paths.join(", ")
+                    lease.paths.join(", "),
+                    match &lease.remote {
+                        Some(r) => format!("shared via {r}"),
+                        None => "this machine only".into(),
+                    }
                 )
             });
         }
         LeaseCmd::Release { id, holder, all } => {
             let released = if all {
                 let h = holder.context("--all needs --holder")?;
-                leases.release_all(&h)?
+                shared::release_all(&repo, &h)?
             } else {
                 let id = id.context("lease release needs an id or --all")?;
-                vec![leases.release(&id)?]
+                vec![shared::release(&repo, &id)?]
             };
             for l in &released {
                 repo.events().append(
@@ -1767,7 +1781,7 @@ fn run_lease(dir: &Option<PathBuf>, json: bool, cmd: LeaseCmd) -> Result<()> {
             });
         }
         LeaseCmd::Renew { id, ttl } => {
-            let l = leases.renew(&id, parse_duration(&ttl)?)?;
+            let l = shared::renew(&repo, &id, parse_duration(&ttl)?)?;
             repo.events().append(
                 "lease.renew",
                 Some(repo.workspace()),
@@ -1783,15 +1797,39 @@ fn run_lease(dir: &Option<PathBuf>, json: bool, cmd: LeaseCmd) -> Result<()> {
             });
         }
         LeaseCmd::List => {
-            let list = leases.list()?;
+            let list = shared::list(&repo)?;
             emit(json, &list, || {
                 for l in &list {
                     println!(
-                        "{} {:<10} {:<9} {} {}",
+                        "{} {:<10} {:<9} {} {:<7} {}",
                         l.id,
                         l.holder,
                         format!("{:?}", l.mode).to_lowercase(),
                         l.expires_ms.map(fmt_time).unwrap_or_else(|| "never".into()),
+                        if l.remote.is_some() {
+                            "shared"
+                        } else {
+                            "local"
+                        },
+                        l.paths.join(", ")
+                    );
+                }
+            });
+        }
+        LeaseCmd::Sync => {
+            let r = shared::sync(&repo)?;
+            emit(json, &r, || {
+                println!(
+                    "registered {} lease(s) on the server, {} refused, {} stale mirror(s) dropped; {} active on the server",
+                    r.registered.len(),
+                    r.refused.len(),
+                    r.dropped.len(),
+                    r.server_leases
+                );
+                for (l, holder) in &r.refused {
+                    println!(
+                        "  refused {} ({}): held by {holder}",
+                        l.id,
                         l.paths.join(", ")
                     );
                 }
@@ -1809,7 +1847,7 @@ fn run_lease(dir: &Option<PathBuf>, json: bool, cmd: LeaseCmd) -> Result<()> {
                     }
                 })
                 .collect::<Result<_>>()?;
-            ops::enforce_leases(leases, &holder, &paths)?;
+            repo.enforce_leases(&holder, &paths)?;
             emit(
                 json,
                 &serde_json::json!({ "allowed": true, "holder": holder, "paths": paths }),

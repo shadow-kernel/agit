@@ -26,7 +26,7 @@ changing a path, and it is cheap enough to call every time.
 agit lease claim src/auth --ttl 30m --note "refactor session handling"
 ```
 
-Other agents now see the claim (`agit lease list`, lease board in the UI).
+Other agents now see the claim (`agit lease list`, lease board in the UI), on every machine that uses the same server: with a remote, the claim is registered there at once.
 A commit by another agent into your exclusive lease fails with
 `lease_conflict` unless they pass `--force`. Leases expire on their own, so a
 crashed agent never blocks anyone for long. Release early with

@@ -111,6 +111,23 @@ Per-step breakdown with `AGIT_FSYNC=none` on the same run (`profile_commit`):
 index rewrite on flush are the next targets; `status` on 2,000 files sits at
 7.3 to 8.4 ms across these runs.
 
+## 2026-10-19: cost of team-wide leases
+
+With a remote, every `agit commit` also asks the server whether another
+agent holds one of the changed paths (`POST /leases/check`). Same M3 Pro,
+agit-server on 127.0.0.1, 300-file repository with one foreign lease, median
+of 60 `add` + `commit` cycles of one file, one process per command:
+
+| Leases | add + commit |
+| --- | ---: |
+| this machine only (`AGIT_LEASE_SYNC=off`) | 9.5 ms |
+| shared through the server (default with a remote) | 14.1 ms |
+
+The check adds about 4.6 ms against a local server; over a network add the
+round-trip time. While the server is unreachable the check is skipped for
+60 seconds after one failed attempt (2 s connect timeout), so offline commits
+do not wait.
+
 ## 2026-10-19: agit against git, side by side
 
 `python3 scripts/compare_git.py --real-repo https://github.com/BurntSushi/ripgrep.git`

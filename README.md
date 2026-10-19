@@ -45,7 +45,7 @@ git is the best developer tool of the last twenty years. Used by a fleet of agen
 | --- | --- |
 | parse prose output with regexes that break on locale and version | `--json` on every command, one envelope, stable error codes, a `retryable` flag and exit codes 0 / 1 / 3 / 75 |
 | leave `index.lock` behind on every crash and block everyone | advisory `flock` locks the kernel releases when a process dies; nothing to clean up, ever |
-| discover at merge time that two of them edited the same module | **leases**: claim `src/auth/**` for 30 minutes, everyone else gets `lease_conflict` in milliseconds |
+| discover at merge time that two of them edited the same module | **leases**: claim `src/auth/**` for 30 minutes and everyone else, on every machine that uses the server, gets `lease_conflict` in milliseconds |
 | race on shared branches, last writer wins | **compare-and-swap** on every ref update, atomic multi-ref transactions |
 | bury the *why* in a commit message | `intent`, `task` and `agent {id, model, run_id}` as structured commit fields, Ed25519 signatures |
 | pollute history with WIP commits to be able to roll back | **checkpoints** outside branch history, untracked files included, `agit restore` in one command |
@@ -136,7 +136,7 @@ Two halves that work on their own and better together: an **MCP server** (`agit 
 | | |
 | --- | --- |
 | **Local core** | BLAKE3 ids, zstd objects verified on every read, append-only pack segments, journal with group commit, index with stat and tree cache, branches, merges with diff3 markers, stash, revert, cherry-pick, blame, grep, reflog, reset, gc, submodules |
-| **Coordination** | leases with TTL and globs, workspaces (one working directory per agent, one object store), checkpoints, event log |
+| **Coordination** | team-wide leases with TTL and globs (shared through the server, enforced on commit and push, local fallback offline), workspaces (one working directory per agent, one object store), checkpoints, event log |
 | **Server** | one static binary, plain files, no database: clone / push / pull with want/have transfer, CAS refs, SSE events, webhooks, audit log |
 | **Platform** | pull requests with typed comments (`blocker`, `suggestion`, `question`), reviews, checks, server-side merge, branch policies, signing-key registry |
 | **Knowledge** | notes with typed tags, path rules, BM25 search, staleness when code changes, drafts from every merged PR, one-call context packs, offline store |

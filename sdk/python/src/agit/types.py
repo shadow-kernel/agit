@@ -288,6 +288,8 @@ class Lease(Model):
     expires_ms: int | None = None
     note: str | None = None
     workspace: str | None = None
+    #: CLI only: the remote the lease is registered on (shared with the team); None = this machine only.
+    remote: str | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     def is_expired_at(self, now_ms: int) -> bool:
@@ -569,6 +571,8 @@ class Policy(Model):
     max_files_per_commit: int = 0
     #: Commits reaching a protected branch need a valid signature with a key registered for the signer.
     require_signed: bool = False
+    #: Pushes may not bring another agent's commits into paths under an active exclusive lease.
+    enforce_leases: bool = True
     raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -585,6 +589,7 @@ class Policy(Model):
             "allowed_push_agents": list(self.allowed_push_agents),
             "max_files_per_commit": self.max_files_per_commit,
             "require_signed": self.require_signed,
+            "enforce_leases": self.enforce_leases,
         }
 
 

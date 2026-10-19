@@ -10,9 +10,17 @@
 //! exclusive lease unless `--force` is given, but nothing stops a raw file
 //! write. Leases expire automatically so a crashed agent cannot block work
 //! forever.
+//!
+//! This store holds the leases of one repository on one machine (shared by
+//! its workspaces). When the repository has a remote, the protocol layer
+//! registers every claim on the server first and keeps a mirror here
+//! (`Lease::remote`), and plugs a [`RemoteLeases`] check into the
+//! [`crate::Repository`], so commits and merges also respect the leases of
+//! agents on other machines.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use globset::{Glob, GlobMatcher};
@@ -48,6 +56,31 @@ pub struct Lease {
     pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace: Option<String>,
+    /// Name of the remote this lease is registered on (it is visible to and
+    /// enforced for everyone using that server); `None` for a lease that
+    /// exists only in this repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+}
+
+/// Leases kept somewhere else, typically the server shared with agents on
+/// other machines. The protocol layer plugs an implementation into a
+/// [`crate::Repository`]; every lease check of the core (commit, merge,
+/// `agit lease check`) then asks it after the local store.
+pub trait RemoteLeases: Send + Sync {
+    /// `Ok(())` when `holder` may modify `paths`, `Err(LeaseConflict)` when
+    /// another holder's exclusive lease covers one of them.
+    fn check(&self, holder: &str, paths: &[String]) -> Result<()>;
+}
+
+/// Cloneable, debuggable handle to a [`RemoteLeases`] implementation.
+#[derive(Clone)]
+pub struct RemoteLeaseHook(pub Arc<dyn RemoteLeases>);
+
+impl std::fmt::Debug for RemoteLeaseHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RemoteLeaseHook")
+    }
 }
 
 impl Lease {
@@ -285,7 +318,20 @@ impl LeaseStore {
             expires_ms: req.ttl.map(|t| now + t.as_millis() as i64),
             note: req.note,
             workspace: req.workspace,
+            remote: None,
         };
+        fs::create_dir_all(&self.dir).map_err(io_at(&self.dir))?;
+        write_atomic(
+            &self.path_for(&lease.id),
+            &serde_json::to_vec_pretty(&lease)?,
+        )?;
+        Ok(lease)
+    }
+
+    /// Store `lease` as given (same id), replacing a lease with that id.
+    /// Used to mirror a lease the server granted.
+    pub fn adopt(&self, lease: Lease) -> Result<Lease> {
+        let _guard = self.lock()?;
         fs::create_dir_all(&self.dir).map_err(io_at(&self.dir))?;
         write_atomic(
             &self.path_for(&lease.id),

@@ -422,6 +422,8 @@ export interface Lease {
   expires_ms?: number | null;
   note?: string | null;
   workspace?: string | null;
+  /** CLI output only: the remote the lease is registered on; absent = this machine only. */
+  remote?: string | null;
 }
 
 export interface LeaseCreateRequest {
@@ -616,6 +618,8 @@ export interface Policy {
   max_files_per_commit: number;
   /** Every commit reaching a protected branch needs a valid signature with a key registered for its signer. */
   require_signed: boolean;
+  /** Pushes may not bring another agent's commits into paths under an active exclusive lease (default true). */
+  enforce_leases?: boolean;
 }
 
 // ---- Knowledge notes --------------------------------------------------------

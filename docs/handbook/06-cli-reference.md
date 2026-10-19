@@ -90,6 +90,8 @@ Errors raised by the CLI layer itself rather than the core (for example `nothing
 | `AGIT_KEYS_DIR` | key commands, signing | key directory (default `~/.agit/keys`) |
 | `AGIT_FSYNC` | every write | `refs` (default), `full`, `all`, `none` ([5](05-concepts.md#pack-segments-and-durability)) |
 | `AGIT_PACK` | object store | `0|off|false` writes loose objects instead of pack segments |
+| `AGIT_LEASE_SYNC` | lease commands, commit, merge, hooks, MCP | `auto` (default): leases are shared through the server, local fallback while it is unreachable; `required`: an unreachable server is an error; `off`: leases stay on this machine |
+| `AGIT_LEASE_REMOTE` | same | remote the leases are shared through (default `origin`) |
 
 Server-side variables (`AGIT_DATA_DIR`, `AGIT_LISTEN`, `AGIT_SERVER_TOKEN`, `AGIT_WEB_DIR`, `RUST_LOG`) are in [13](13-server-administration.md). The Claude Code hooks additionally read `AGIT_BIN`, `AGIT_HOOKS_DISABLE` and `AGIT_HOOK_LEASE_TTL` ([7](07-mcp-reference.md#claude-code-integration)).
 
@@ -308,7 +310,7 @@ Human mode: `#<seq> <time> <kind> <workspace> <actor> <data>`.
 {"ok":true,"result":{"id":"3bd2ec0d8a15","holder":"coder-1","paths":["src"],"mode":"exclusive","created_ms":1792092751063,"expires_ms":1792094551063,"note":"add config loading (DEMO-7)","workspace":"main"}}
 ```
 
-Literal paths are made repository-relative from the current directory; patterns containing `* ? [ {` are kept verbatim. `--holder` defaults to `AGIT_AGENT` and is required.
+Literal paths are made repository-relative from the current directory; patterns containing `* ? [ {` are kept verbatim. `--holder` defaults to `AGIT_AGENT` and is required. With an HTTP remote the lease is claimed on the server first (team-wide; a conflict with an agent on another machine is `lease_conflict`) and mirrored locally with `"remote":"origin"`; the human output ends with `(shared via origin)` or `(this machine only)`.
 
 ### `agit lease release [ID] [--holder H] [--all]`
 
@@ -320,11 +322,15 @@ Returns the lease with the new `expires_ms`. `lease_not_found` when expired or u
 
 ### `agit lease list`
 
-`[lease]`, active only, sorted by `created_ms`.
+`[lease]`, active only, sorted by `created_ms`: the server's leases (the whole team, `remote` set) merged with this repository's local-only ones. The human output marks each `shared` or `local`.
 
 ### `agit lease check [PATHS]... --holder H`
 
-`{"allowed":true,"holder":"coder-2","paths":["src/main.rs"]}` or the `lease_conflict` error (exit 3). Claims nothing.
+`{"allowed":true,"holder":"coder-2","paths":["src/main.rs"]}` or the `lease_conflict` error (exit 3). Claims nothing. Checks the local store and the server.
+
+### `agit lease sync`
+
+Registers leases claimed while the server was unreachable, reports the ones the server refused because someone else holds the paths (they stay local), and drops local mirrors of leases that were released or expired elsewhere: `{"registered":[lease],"refused":[[lease,"holder"]],"dropped":["id"],"server_leases":n}`.
 
 ### `agit ws new <NAME> [--path DIR] [--from REV] [--agent ID]` (alias `workspace`)
 

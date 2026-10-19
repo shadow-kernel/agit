@@ -82,7 +82,7 @@ $ agit lease claim src --ttl 30m --note "add config loading (DEMO-7)" --json
 
 A literal path covers itself and everything beneath it; globs (`src/**/*.rs`) work too. Another agent's claim on an overlapping path now fails with `lease_conflict` (exit 3), and so does their `agit commit` touching `src/…`. Leases expire by themselves, so a crashed agent never blocks anyone for long; renew with `agit lease renew <id> --ttl 30m` while you keep working, and release early with `agit lease release --all` when you are done. `--shared` creates an informational lease that blocks nobody (useful for "I am reading this").
 
-Leases claimed through the CLI live in the repository you are in (`.agit/leases/`), and all workspaces of that repository see them. Leases on the server (`POST /repos/{repo}/leases`) are for agents that do not share a filesystem; the server's `context` endpoint and the web UI's lease board show those.
+With a remote, the claim lands on the server at once, so agents on other machines see it (`agit lease list`, the web UI's lease board, the `context` endpoint) and their commits into `src/` are refused too; a copy stays in `.agit/leases/` for the workspaces on this machine and for offline work. Without a server the lease lives only in `.agit/leases/`.
 
 ## 4. Work on a branch or in your own workspace
 

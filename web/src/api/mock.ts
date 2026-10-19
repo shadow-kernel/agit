@@ -938,6 +938,7 @@ const shop: RepoState = {
     allowed_push_agents: [],
     max_files_per_commit: 0,
     require_signed: false,
+    enforce_leases: true,
   },
   webhooks: [
     { id: "wh_3f9a1c2b", url: "https://ci.example.com/hooks/agit", kinds: ["commit", "pull.*"], active: true, has_secret: true, created_ms: at(5, 15, 10) },

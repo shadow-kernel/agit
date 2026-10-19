@@ -134,6 +134,9 @@ fn map_err(e: ureq::Error) -> Error {
                         Error::Unauthorized(strip_prefix(&b.error.message, "unauthorized: "))
                     }
                     "not_found" => Error::NotFound(strip_prefix(&b.error.message, "not found: ")),
+                    "lease_not_found" => {
+                        Error::LeaseNotFound(strip_prefix(&b.error.message, "lease not found: "))
+                    }
                     "non_fast_forward" => Error::Invalid(b.error.message),
                     _ => Error::Invalid(format!(
                         "server error {status} [{}]: {}",
@@ -184,6 +187,16 @@ impl Client {
                 ..self
             };
         }
+        self
+    }
+
+    /// Use shorter network timeouts (for calls on the hot path, such as the
+    /// lease check before every commit).
+    pub fn with_timeouts(mut self, connect: Duration, total: Duration) -> Self {
+        self.http = ureq::AgentBuilder::new()
+            .timeout_connect(connect)
+            .timeout(total)
+            .build();
         self
     }
 
@@ -388,6 +401,25 @@ impl Client {
     }
     pub fn claim_lease(&self, repo: &str, req: &LeaseCreate) -> Result<LeaseJson> {
         self.send_json("POST", &format!("/repos/{repo}/leases"), req)
+    }
+    pub fn renew_lease(&self, repo: &str, id: &str, ttl_secs: u64) -> Result<LeaseJson> {
+        self.send_json(
+            "POST",
+            &format!("/repos/{repo}/leases/{id}/renew"),
+            &LeaseRenew { ttl_secs },
+        )
+    }
+    /// `Ok(())` when `holder` may modify `paths` on the server.
+    pub fn check_lease(&self, repo: &str, holder: &str, paths: &[String]) -> Result<()> {
+        let _: serde_json::Value = self.send_json(
+            "POST",
+            &format!("/repos/{repo}/leases/check"),
+            &LeaseCheck {
+                holder: holder.to_string(),
+                paths: paths.to_vec(),
+            },
+        )?;
+        Ok(())
     }
     pub fn release_lease(&self, repo: &str, id: &str) -> Result<serde_json::Value> {
         self.call_json("DELETE", &format!("/repos/{repo}/leases/{id}"))

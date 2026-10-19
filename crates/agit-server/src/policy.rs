@@ -138,6 +138,75 @@ impl<'a> PolicyStore<'a> {
         Ok(())
     }
 
+    /// Refuse commits that change paths under another agent's active
+    /// exclusive lease on this server (`enforce_leases`). Commits already
+    /// reachable from a branch here are not re-checked, merge commits pass
+    /// (they integrate work), and a commit whose agent (or, without one, its
+    /// author) is the lease holder passes.
+    pub fn check_leases(
+        &self,
+        policy: &Policy,
+        old: Option<ObjectId>,
+        new: ObjectId,
+    ) -> Result<()> {
+        if !policy.enforce_leases {
+            return Ok(());
+        }
+        let leases: Vec<agit_core::lease::Lease> = self
+            .repo
+            .leases
+            .list()?
+            .into_iter()
+            .filter(|l| l.mode == agit_core::lease::LeaseMode::Exclusive)
+            .collect();
+        if leases.is_empty() {
+            return Ok(());
+        }
+        let store = &self.repo.store;
+        let mut roots: Vec<ObjectId> = self
+            .repo
+            .refs
+            .list(HEADS_PREFIX)?
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect();
+        roots.extend(old);
+        let have = commit_closure(store, &roots, Some(200_000))?;
+        let mut stack = vec![new];
+        let mut seen = HashSet::new();
+        while let Some(id) = stack.pop() {
+            if have.contains(&id) || !seen.insert(id) {
+                continue;
+            }
+            let c = store.read_commit(&id)?;
+            if c.parents.len() <= 1 {
+                let actor = c
+                    .agent
+                    .as_ref()
+                    .map(|a| a.id.clone())
+                    .unwrap_or_else(|| c.author.name.clone());
+                let parent_tree = match c.parents.first() {
+                    Some(p) => Some(store.read_commit(p)?.tree),
+                    None => None,
+                };
+                for change in diff_trees(store, parent_tree.as_ref(), Some(&c.tree))? {
+                    if let Some(l) = leases
+                        .iter()
+                        .find(|l| l.holder != actor && l.covers(&change.path))
+                    {
+                        return Err(Error::LeaseConflict {
+                            path: change.path,
+                            holder: l.holder.clone(),
+                            lease_id: l.id.clone(),
+                        });
+                    }
+                }
+            }
+            stack.extend(c.parents);
+        }
+        Ok(())
+    }
+
     /// Direct ref update (push) against a possibly protected branch.
     pub fn check_push(
         &self,

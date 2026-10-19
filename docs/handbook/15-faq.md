@@ -36,7 +36,7 @@ Short answers to questions that come up when people and agents start using agit,
 
 **Is there an event when a lease expires?** No; expiry is lazy. Watch `lease.release` or compute from `expires_ms`.
 
-**Local leases or server leases?** Agents sharing a filesystem (workspaces, Claude Code) use local leases in `.agit/leases/`; agents on different machines use `POST /repos/{repo}/leases`. They are separate sets.
+**Are leases shared with my team?** Yes, as soon as the repository has an HTTP remote: claims, releases and renewals go to the server first and every lease check asks it, so a lease taken on one machine blocks commits on all others, and the server refuses pushes into leased paths (`enforce_leases`). Without a remote, leases stay in `.agit/leases/`. Offline, agit falls back to local leases; `agit lease sync` registers them later.
 
 **Can two agents share a working directory?** Do not. Give each a workspace (`agit ws new`) or a clone.
 

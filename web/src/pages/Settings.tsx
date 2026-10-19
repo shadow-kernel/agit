@@ -199,6 +199,7 @@ function PolicySettings() {
           <Toggle checked={draft.require_agent} onChange={(v) => set("require_agent", v)} label="Require agent identity" help="Every new commit must carry an agent id (commits by humans without --agent are rejected)." />
           <Toggle checked={draft.require_signed} onChange={(v) => set("require_signed", v)} label="Require signed commits" help="Every commit reaching a protected branch must carry a valid Ed25519 signature whose key is registered for its signer under Keys (agit key generate, agit commit --sign, agit key register)." />
           {draft.require_signed ? <p className="small muted" style={{ margin: "0 0 0 26px" }}>Manage trusted keys in <NavLink to={`/r/${encodeURIComponent(name)}/settings/keys`}>Settings → Keys</NavLink>. Commits whose key is not registered show as "valid, untrusted key" and are rejected on protected branches.</p> : null}
+          <Toggle checked={draft.enforce_leases ?? true} onChange={(v) => set("enforce_leases", v)} label="Enforce leases on push" help="Refuse any push that brings another agent's commits into a path someone holds an exclusive lease on (all branches). Clients register their leases here automatically, so the whole team sees them on the Leases tab." />
           <label className="field" style={{ maxWidth: 320 }}>
             Max files per commit
             <input className="input" type="number" min={0} value={draft.max_files_per_commit} onChange={(e) => set("max_files_per_commit", Number(e.target.value))} />

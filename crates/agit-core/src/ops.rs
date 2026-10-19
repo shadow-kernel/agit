@@ -106,7 +106,7 @@ pub fn commit(repo: &Repository, opts: CommitOptions) -> Result<CommitResult> {
     let actor = actor_of(opts.agent.as_ref(), &author);
     if !opts.force {
         let paths: Vec<String> = changes.iter().map(|c| c.path.clone()).collect();
-        enforce_leases(repo.leases(), &actor, &paths)?;
+        repo.enforce_leases(&actor, &paths)?;
     }
     let mut parents = Vec::new();
     if let Some(h) = head {
@@ -664,7 +664,7 @@ pub fn merge(repo: &Repository, rev: &str, opts: MergeOptions) -> Result<MergeRe
             .into_iter()
             .map(|c| c.path)
             .collect();
-        enforce_leases(repo.leases(), &actor, &paths)?;
+        repo.enforce_leases(&actor, &paths)?;
     }
 
     // Materialize the merged tree in the working tree + index.

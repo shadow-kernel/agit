@@ -77,7 +77,8 @@ repeated frames `kind:u8 | len:u32 big-endian | payload`. kind 1 blob, 2 tree, 3
 - `GET /repos/{repo}/events/stream?since=<seq>` -> `text/event-stream`; each message is a plain `data:` line with the event JSON (`id:` is the seq; no `event:` name, so `EventSource.onmessage` works). Without `since` only live events are sent; with `since=N` events with `seq > N` are replayed first.
 Event kinds mirror the CLI plus `ref.update`, `pull.open`, `pull.review`, `pull.merge`, `pull.close`, `note.create`, `note.update`, `note.delete`, `note.validate`, `note.draft`, `note.accept`, `knowledge.rules`.
 
-## Leases (server-wide coordination between agents)
+## Leases (team-wide coordination between agents)
+The server's leases are the team's: the CLI, the MCP server and the Claude Code hooks register every claim of a repository with an HTTP remote here first (`POST /leases`), keep a local mirror with the same id, release and renew here, and check here before every commit and merge (`POST /leases/check`), so an agent on one machine cannot commit into a path an agent on another machine holds. Clients fall back to their local leases while the server is unreachable (`AGIT_LEASE_SYNC=auto`, default; `required` fails instead, `off` keeps leases local) and register them later with `agit lease sync`. The policy `enforce_leases` (default on) makes the server refuse pushes that bring another agent's commits into a leased path. In CLI output a lease carries `remote` (the remote it is registered on; absent for a lease that exists on this machine only).
 - `GET /repos/{repo}/leases` -> `[lease]`
 - `POST /repos/{repo}/leases` `{holder, paths:[..], mode:"exclusive"|"shared", ttl_secs, note?}` -> lease (409 `lease_conflict`)
 - `POST /repos/{repo}/leases/{id}/renew` `{ttl_secs}`
@@ -113,11 +114,11 @@ Per-repository rules enforced at `refs/update` (direct pushes) and `pulls/{n}/me
 ```json
 {"protected_branches":["main","release/*"],"require_pull_request":true,"require_approvals":1,
  "require_intent":true,"require_agent":false,"require_checks":false,"block_on_blockers":true,
- "allowed_merge_agents":[],"allowed_push_agents":[],"max_files_per_commit":0,"require_signed":false}
+ "allowed_merge_agents":[],"allowed_push_agents":[],"max_files_per_commit":0,"require_signed":false,"enforce_leases":true}
 ```
 - `GET /repos/{repo}/policy` -> policy (defaults when unset)
 - `PUT /repos/{repo}/policy` -> policy
-Rules: protected branches cannot be deleted; with `require_pull_request` they only move through PR merges; approvals count the latest decision per reviewer and exclude the PR author; any `request_changes` blocks; unresolved `blocker` comments block when `block_on_blockers`; `require_intent`/`require_agent`/`max_files_per_commit` are checked on every new commit the update introduces.
+Rules: protected branches cannot be deleted; with `require_pull_request` they only move through PR merges; approvals count the latest decision per reviewer and exclude the PR author; any `request_changes` blocks; unresolved `blocker` comments block when `block_on_blockers`; `require_intent`/`require_agent`/`max_files_per_commit` are checked on every new commit the update introduces. With `enforce_leases` (default `true`, all branches, not only protected ones) a ref update is refused with `409 lease_conflict` `{path, holder, lease_id}` when one of its new non-merge commits changes a path covered by an active exclusive lease whose holder is not that commit's agent (or, without an agent, its author); commits already reachable from a branch on the server are not re-checked.
 
 ## Signing keys
 Agents sign commits with Ed25519 (`agit key generate`, `agit commit --sign`). The public key travels inside the commit; the registry decides which keys are trusted for which agent. `GET /repos/{repo}/commits/{rev}` returns `signature: {status: unsigned|valid|invalid, key_id?, signer?, public_key?, reason?, trusted}`.

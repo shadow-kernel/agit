@@ -807,6 +807,11 @@ pub struct Policy {
     /// signature whose key is registered for the signer (`/keys`).
     #[serde(default)]
     pub require_signed: bool,
+    /// Refuse pushes whose commits change paths under another agent's active
+    /// exclusive lease on this server (default on). Only non-merge commits
+    /// count, and a commit by the lease holder itself passes.
+    #[serde(default = "default_true")]
+    pub enforce_leases: bool,
 }
 
 fn default_true() -> bool {
@@ -827,6 +832,7 @@ impl Default for Policy {
             allowed_push_agents: vec![],
             max_files_per_commit: 0,
             require_signed: false,
+            enforce_leases: true,
         }
     }
 }

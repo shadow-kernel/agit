@@ -3,6 +3,7 @@
 //! See `docs/API.md` for the HTTP contract this crate implements.
 
 pub mod client;
+pub mod leases;
 pub mod local_knowledge;
 pub mod sshauth;
 pub mod stream;

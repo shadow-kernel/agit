@@ -1539,3 +1539,176 @@ async fn tree_with_last_commits() {
     .await
     .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn leases_are_shared_team_wide_through_the_server() {
+    // Two machines (two clones), two agents, one server.
+    let tmp = tempfile::tempdir().unwrap();
+    let base = start_server(&tmp.path().join("data")).await;
+    let tmp_path = tmp.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        use agit_core::lease::{LeaseMode, LeaseRequest};
+        use agit_protocol::leases;
+        let url = format!("{base}/repos/team");
+        let client = Client::new(&base);
+
+        let seed = Repository::init(&tmp_path.join("seed")).unwrap();
+        write(seed.work_dir(), "src/pay.rs", "fn pay() {}\n");
+        write(seed.work_dir(), "src/cart.rs", "fn cart() {}\n");
+        commit_all(&seed, "seed", "setup");
+        sync::add_remote(&seed, "origin", &url).unwrap();
+        sync::push(&seed, "origin", "main", false, true).unwrap();
+
+        let (mut a, _) = sync::clone(&url, &tmp_path.join("alice")).unwrap();
+        let (mut b, _) = sync::clone(&url, &tmp_path.join("bob")).unwrap();
+        leases::attach(&mut a);
+        leases::attach(&mut b);
+        assert!(a.has_remote_leases() && b.has_remote_leases());
+
+        // Alice claims on her machine: the lease lands on the server at once.
+        let claimed = leases::claim(
+            &a,
+            LeaseRequest {
+                holder: "alice".into(),
+                paths: vec!["src/pay.rs".into()],
+                mode: LeaseMode::Exclusive,
+                ttl: Some(std::time::Duration::from_secs(600)),
+                note: Some("refactor payments".into()),
+                workspace: Some("main".into()),
+            },
+        )
+        .unwrap();
+        assert!(claimed.shared);
+        assert_eq!(claimed.lease.remote.as_deref(), Some("origin"));
+        let on_server = client.leases("team").unwrap();
+        assert_eq!(on_server.len(), 1);
+        assert_eq!(on_server[0].id, claimed.lease.id);
+        assert_eq!(
+            a.leases().get(&claimed.lease.id).unwrap().remote.as_deref(),
+            Some("origin")
+        );
+
+        // Bob, on another machine, sees it ...
+        let seen = leases::list(&b).unwrap();
+        assert!(seen
+            .iter()
+            .any(|l| l.id == claimed.lease.id && l.holder == "alice"));
+        // ... cannot claim it ...
+        let err = leases::claim(
+            &b,
+            LeaseRequest {
+                holder: "bob".into(),
+                paths: vec!["src/pay.rs".into()],
+                mode: LeaseMode::Exclusive,
+                ttl: None,
+                note: None,
+                workspace: None,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, agit_core::Error::LeaseConflict { ref holder, .. } if holder == "alice"),
+            "{err:?}"
+        );
+        // ... and cannot commit into it.
+        assert!(matches!(
+            b.enforce_leases("bob", &["src/pay.rs".to_string()]),
+            Err(agit_core::Error::LeaseConflict { .. })
+        ));
+        write(b.work_dir(), "src/pay.rs", "fn pay() { bob }\n");
+        worktree::add(&b, &[], false).unwrap();
+        let err = ops::commit(
+            &b,
+            CommitOptions {
+                message: "bob edits pay".into(),
+                agent: Some(AgentInfo {
+                    id: "bob".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, agit_core::Error::LeaseConflict { .. }),
+            "{err:?}"
+        );
+        // Other paths stay free for Bob.
+        b.enforce_leases("bob", &["src/cart.rs".to_string()])
+            .unwrap();
+
+        // Forcing past the client check does not get it onto the server.
+        ops::commit(
+            &b,
+            CommitOptions {
+                message: "bob forces".into(),
+                agent: Some(AgentInfo {
+                    id: "bob".into(),
+                    ..Default::default()
+                }),
+                force: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let err = sync::push(&b, "origin", "main", false, false).unwrap_err();
+        assert!(
+            matches!(err, agit_core::Error::LeaseConflict { ref holder, .. } if holder == "alice"),
+            "{err:?}"
+        );
+
+        // Alice's own work into her lease is accepted.
+        write(a.work_dir(), "src/pay.rs", "fn pay() { alice }\n");
+        commit_all(&a, "alice refactors pay", "alice");
+        sync::push(&a, "origin", "main", false, false).unwrap();
+
+        // Releasing on her machine frees it everywhere.
+        leases::release_all(&a, "alice").unwrap();
+        assert!(client.leases("team").unwrap().is_empty());
+        assert!(a.leases().list().unwrap().is_empty());
+        assert!(!leases::list(&b)
+            .unwrap()
+            .iter()
+            .any(|l| l.holder == "alice"));
+        b.enforce_leases("bob", &["src/pay.rs".to_string()])
+            .unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[test]
+fn lease_claim_falls_back_to_local_when_the_server_is_down() {
+    use agit_core::lease::{LeaseMode, LeaseRequest};
+    use agit_protocol::leases;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut repo = Repository::init(&tmp.path().join("r")).unwrap();
+    write(repo.work_dir(), "a.txt", "a\n");
+    commit_all(&repo, "seed", "me");
+    sync::add_remote(&repo, "origin", "http://127.0.0.1:1/api/v1/repos/x").unwrap();
+    leases::attach(&mut repo);
+    let claimed = leases::claim(
+        &repo,
+        LeaseRequest {
+            holder: "me".into(),
+            paths: vec!["a.txt".into()],
+            mode: LeaseMode::Exclusive,
+            ttl: Some(std::time::Duration::from_secs(60)),
+            note: None,
+            workspace: None,
+        },
+    )
+    .unwrap();
+    assert!(!claimed.shared);
+    assert!(claimed.lease.remote.is_none());
+    // Local enforcement still works offline, and the dead server is not
+    // retried on every check.
+    assert!(matches!(
+        repo.enforce_leases("other", &["a.txt".to_string()]),
+        Err(agit_core::Error::LeaseConflict { .. })
+    ));
+    let t0 = std::time::Instant::now();
+    repo.enforce_leases("me", &["a.txt".to_string()]).unwrap();
+    assert!(t0.elapsed() < std::time::Duration::from_millis(500));
+    assert_eq!(leases::list(&repo).unwrap().len(), 1);
+}
