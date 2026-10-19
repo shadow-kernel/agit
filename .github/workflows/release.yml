@@ -230,7 +230,9 @@ jobs:
             placeholder="SHA256_$(echo "$t" | tr 'a-z-' 'A-Z_')"
             sed -i "s/${placeholder}/${sum}/" "$formula"
           done
-          grep -q 'SHA256_' "$formula" && { echo "::error::unfilled placeholder in $formula"; exit 1; }
+          # Only a placeholder in a `sha256 "..."` line is a failure; the
+          # formula's header comment mentions the placeholder syntax too.
+          if grep -Eq 'sha256 "SHA256_' "$formula"; then echo "::error::unfilled sha256 placeholder in $formula"; exit 1; fi
           ls -l
       - name: Release notes header
         run: |
