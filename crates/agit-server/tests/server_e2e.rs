@@ -578,7 +578,7 @@ async fn signed_commits_and_key_registry() {
     let base = start_server(&tmp.path().join("data")).await;
     let tmp_path = tmp.path().to_path_buf();
     tokio::task::spawn_blocking(move || {
-        std::env::set_var("AGIT_KEYS_DIR", tmp_path.join("keys"));
+        agit_core::sign::set_keys_dir(Some(tmp_path.join("keys")));
         let admin = Client::new(&base).with_agent(Some("admin".into()));
         admin.create_repo("s", Some("main")).unwrap();
         let url = format!("{base}/repos/s");
@@ -670,7 +670,7 @@ async fn signed_commits_and_key_registry() {
 
         admin.delete_key("s", &k.key_id).unwrap();
         assert!(admin.keys("s").unwrap().is_empty());
-        std::env::remove_var("AGIT_KEYS_DIR");
+        agit_core::sign::set_keys_dir(None);
     })
     .await
     .unwrap();
@@ -1046,8 +1046,11 @@ async fn scoped_tokens_bind_identity_and_limit_access() {
             200
         );
         let err = ureq::get(&format!("{base}/repos")).call().unwrap_err();
-        assert!(matches!(err, ureq::Error::Status(403, _)));
-        let _ = anon;
+        assert!(matches!(err, ureq::Error::Status(401, _)));
+        assert!(matches!(
+            anon.list_repos().unwrap_err(),
+            agit_core::Error::Unauthorized(_)
+        ));
 
         let root = Client::new(&base).with_token(Some("root-secret".into()));
         assert!(root.whoami().unwrap().root);
@@ -1185,6 +1188,171 @@ async fn scoped_tokens_bind_identity_and_limit_access() {
         let audit = fs::read_to_string(tmp_path.join("data/audit.jsonl")).unwrap();
         assert!(audit.lines().count() >= 5);
         assert!(audit.contains("\"status\":403"));
+        assert!(audit.contains("\"status\":401"));
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ssh_keys_open_sessions_and_scope_access() {
+    use agit_core::sshkey::SshPrivateKey;
+    use agit_protocol::sshauth;
+    let tmp = tempfile::tempdir().unwrap();
+    let tmp_path = tmp.path().to_path_buf();
+    // Keep this test's sessions out of ~/.agit and never probe the developer's
+    // own keys or ssh-agent: every client below names its key explicitly.
+    sshauth::set_sessions_file(Some(tmp_path.join("sessions.json")));
+    let gen = |name: &str| {
+        let k =
+            SshPrivateKey::parse(&agit_core::sign::Keypair::generate(name).secret_hex()).unwrap();
+        let path = tmp_path.join(format!("{name}.key"));
+        fs::write(&path, k.to_openssh().unwrap()).unwrap();
+        (k, path)
+    };
+    let (admin_key, admin_path) = gen("admin");
+    let (coder_key, coder_path) = gen("coder");
+    let (_stranger_key, stranger_path) = gen("stranger");
+    let mut admin_pub = admin_key.public().clone();
+    admin_pub.comment = Some("ops laptop".into());
+    // Closed server: no root token, one admin key.
+    let st = Arc::new(
+        state::AppState::open(tmp_path.join("data"), None)
+            .unwrap()
+            .with_admin_keys(vec![admin_pub]),
+    );
+    assert!(st.closed());
+    let app = api::router(st, None);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let base = format!("http://{addr}/api/v1");
+
+    tokio::task::spawn_blocking(move || {
+        // Nothing works without credentials ...
+        let err = ureq::get(&format!("{base}/repos")).call().unwrap_err();
+        assert!(matches!(err, ureq::Error::Status(401, _)));
+        // ... but a client with an admin key signs in on its own after the 401.
+        let admin = Client::new(&base)
+            .with_auto_login(true)
+            .with_ssh_key(Some(admin_path.clone()));
+        assert!(admin.list_repos().unwrap().is_empty());
+        let me = admin.whoami().unwrap();
+        assert_eq!(me.key.as_deref(), Some("admin"));
+        assert!(me
+            .scopes
+            .iter()
+            .any(|s| s.repo == "*" && s.access == Access::Admin));
+        assert!(!me.root);
+        admin.create_repo("t", Some("main")).unwrap();
+        admin.create_repo("other", Some("main")).unwrap();
+        // Admin sessions can hand out server-wide scopes.
+        admin
+            .create_token(&TokenCreate {
+                name: "ci".into(),
+                agent: None,
+                scopes: vec![Scope {
+                    repo: "*".into(),
+                    access: Access::Read,
+                }],
+                ttl_secs: None,
+            })
+            .unwrap();
+
+        // A stranger's key is refused with a message the client recognises.
+        let stranger = Client::new(&base).with_auto_login(false);
+        let err = sshauth::login_auto(&stranger, Some(&stranger_path), None).unwrap_err();
+        assert!(matches!(err, agit_core::Error::Unauthorized(_)), "{err:?}");
+        assert!(err.to_string().contains("not authorized"), "{err}");
+
+        // Authorize coder-1 on repo t only.
+        let key = admin
+            .add_authorized_key(&AuthorizedKeyCreate {
+                public_key: coder_key.public().to_openssh(),
+                name: Some("coder laptop".into()),
+                agent: Some("coder-1".into()),
+                scopes: vec![Scope {
+                    repo: "t".into(),
+                    access: Access::Write,
+                }],
+            })
+            .unwrap();
+        assert_eq!(key.fingerprint, coder_key.public().fingerprint());
+        assert_eq!(admin.authorized_keys().unwrap().len(), 1);
+        let coder = Client::new(&base).with_auto_login(false);
+        let (created, id) = coder
+            .login_with_ssh_key(Some(&coder_path), Some(600))
+            .unwrap();
+        assert_eq!(id.public.fingerprint(), key.fingerprint);
+        assert_eq!(created.info.key.as_deref(), Some(key.id.as_str()));
+        let me = coder.whoami().unwrap();
+        assert_eq!(me.agent.as_deref(), Some("coder-1"));
+        assert_eq!(me.key.as_deref(), Some(key.id.as_str()));
+        // Scopes limit what the key sees: only repository t.
+        let names: Vec<String> = coder
+            .list_repos()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(names, vec!["t"]);
+        assert!(matches!(
+            coder.repo("other").unwrap_err(),
+            agit_core::Error::Forbidden(_)
+        ));
+        assert!(coder.refs("t", "refs/heads/").is_ok());
+        // Keys cannot be managed by a repository-scoped session.
+        assert!(matches!(
+            coder.authorized_keys().unwrap_err(),
+            agit_core::Error::Forbidden(_)
+        ));
+
+        // The session is cached: a fresh client for the same server reuses it.
+        let again = Client::new(&base).with_auto_login(false);
+        assert_eq!(again.whoami().unwrap().agent.as_deref(), Some("coder-1"));
+
+        // A challenge can be redeemed only once.
+        let ch = coder.auth_challenge().unwrap();
+        let sig = hex::encode(
+            coder_key
+                .sign(&agit_core::sshkey::auth_message(&ch.nonce))
+                .unwrap(),
+        );
+        let req = SessionCreate {
+            public_key: coder_key.public().to_openssh(),
+            nonce: ch.nonce,
+            signature: sig,
+            ttl_secs: None,
+        };
+        coder.auth_session(&req).unwrap();
+        assert!(matches!(
+            coder.auth_session(&req).unwrap_err(),
+            agit_core::Error::Forbidden(_)
+        ));
+
+        // Logout revokes the session token and forgets the cached session.
+        coder.logout().unwrap();
+        assert!(coder.token().is_none());
+        assert!(sshauth::cached_session(&base).is_none());
+        assert!(matches!(
+            again.whoami().unwrap_err(),
+            agit_core::Error::Unauthorized(_)
+        ));
+
+        // Deleting the key revokes every session opened with it.
+        let coder2 = Client::new(&base).with_auto_login(false);
+        coder2.login_with_ssh_key(Some(&coder_path), None).unwrap();
+        assert!(coder2.whoami().is_ok());
+        // Two sessions are still open for the key: the manually redeemed
+        // challenge above and coder2's login.
+        let r = admin.delete_authorized_key(&key.id).unwrap();
+        assert_eq!(r["revoked_sessions"], 2);
+        assert!(matches!(
+            coder2.whoami().unwrap_err(),
+            agit_core::Error::Unauthorized(_)
+        ));
+        assert!(admin.authorized_keys().unwrap().is_empty());
+        sshauth::set_sessions_file(None);
     })
     .await
     .unwrap();

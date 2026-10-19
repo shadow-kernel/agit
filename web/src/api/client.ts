@@ -32,6 +32,15 @@ export interface Api {
   tokens(): Promise<T.TokenInfo[]>;
   createToken(body: T.TokenCreateRequest): Promise<T.TokenCreated>;
   deleteToken(id: string): Promise<unknown>;
+  /** SSH keys allowed to sign in (admin). */
+  authorizedKeys(): Promise<T.AuthorizedKey[]>;
+  addAuthorizedKey(body: T.AuthorizedKeyCreateRequest): Promise<T.AuthorizedKey>;
+  deleteAuthorizedKey(id: string): Promise<{ deleted: string; revoked_sessions: number }>;
+  /** SSH sign-in: a nonce to sign, then a session token (no token needed for either call). */
+  challenge(): Promise<T.Challenge>;
+  createSession(body: T.SessionCreateRequest): Promise<T.TokenCreated>;
+  /** Revoke the token this client is using. */
+  logout(): Promise<{ revoked: string }>;
   // Repositories
   repos(): Promise<T.RepoSummary[]>;
   createRepo(body: { name: string; default_branch?: string }): Promise<T.RepoSummary>;
@@ -198,6 +207,12 @@ export const liveApi: Api = {
   tokens: () => request("GET", "/auth/tokens"),
   createToken: (body) => request("POST", "/auth/tokens", { body }),
   deleteToken: (id) => request("DELETE", `/auth/tokens/${enc(id)}`),
+  authorizedKeys: () => request("GET", "/auth/keys"),
+  addAuthorizedKey: (body) => request("POST", "/auth/keys", { body }),
+  deleteAuthorizedKey: (id) => request("DELETE", `/auth/keys/${enc(id)}`),
+  challenge: () => request("POST", "/auth/challenge"),
+  createSession: (body) => request("POST", "/auth/session", { body }),
+  logout: () => request("POST", "/auth/logout"),
   repos: () => request("GET", "/repos"),
   createRepo: (body) => request("POST", "/repos", { body }),
   repo: (repo) => request("GET", r(repo)),

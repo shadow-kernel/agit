@@ -9,3 +9,4 @@
 - On-disk formats (`AGO1` loose objects, `AGP1`/`AGX1` pack segments and indexes, `AGT1` trees, `AGI2` index, commit JSON, `refs.journal`) are documented in `docs/ARCHITECTURE.md`; changing them requires bumping `FORMAT_VERSION` and a note in `docs/rfcs/0001-object-model.md`.
 - Performance claims go in `docs/BENCHMARKS.md` only when measured. Everything else is a target.
 - Design source of truth: `README.md`, `docs/ARCHITECTURE.md`, `docs/ROADMAP.md`, `docs/rfcs/`.
+- Tests never call `std::env::set_var` (it races with other test threads and has caused flaky transport errors). Use the process-level overrides instead: `agit_core::sign::set_keys_dir`, `agit_core::durability::set`, `agit_protocol::sshauth::set_sessions_file`. Server auth lives in `crates/agit-server/src/auth.rs` (SSH-key sessions, scoped tokens, admin keys); the client side in `crates/agit-protocol/src/sshauth.rs`.

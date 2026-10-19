@@ -679,6 +679,11 @@ pub struct TokenInfo {
     pub created_by: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_used_ms: Option<i64>,
+    /// Set on session tokens: the authorized key (`/auth/keys` id, or
+    /// `admin` for a startup `--admin-key`) that signed in. Deleting the key
+    /// revokes its sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 /// Returned once at creation; the plaintext token is never stored.
@@ -697,6 +702,64 @@ pub struct WhoAmI {
     pub agent: Option<String>,
     pub root: bool,
     pub scopes: Vec<Scope>,
+    /// The authorized key behind this session, when signed in with one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+}
+
+/// An SSH public key allowed to sign in (`GET /auth/keys`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuthorizedKey {
+    /// `key_<hex>`; the principal id of sessions opened with it is the
+    /// session token's id, `TokenInfo.key` points back here.
+    pub id: String,
+    pub name: String,
+    /// `SHA256:<base64>`, as `ssh-keygen -lf` prints it.
+    pub fingerprint: String,
+    /// Short id shared with commit-signing keys (`blake3(public)[..16]`).
+    pub key_id: String,
+    /// `ssh-ed25519 <base64> [comment]`.
+    pub public_key: String,
+    /// Sessions opened with this key always act as this agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    pub scopes: Vec<Scope>,
+    pub created_ms: i64,
+    #[serde(default)]
+    pub created_by: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthorizedKeyCreate {
+    /// `ssh-ed25519 …` line (comment optional) or a 64-hex Ed25519 key.
+    pub public_key: String,
+    /// Defaults to the key's comment, then its fingerprint.
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub agent: Option<String>,
+    pub scopes: Vec<Scope>,
+}
+
+/// `POST /auth/challenge`: a single-use nonce to sign.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Challenge {
+    pub nonce: String,
+    pub expires_ms: i64,
+}
+
+/// `POST /auth/session`: redeem a challenge with an Ed25519 signature over
+/// `agit-auth-v1\n<nonce>` (hex) to receive a session token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionCreate {
+    pub public_key: String,
+    pub nonce: String,
+    pub signature: String,
+    /// Session lifetime; default 8 hours, at most 30 days.
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
 }
 
 /// Repository policy, enforced server-side at ref updates and PR merges.

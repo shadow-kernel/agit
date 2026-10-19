@@ -127,51 +127,46 @@ fn flag(q: &HashMap<String, String>, key: &str) -> bool {
 }
 
 async fn auth(State(state): S, mut req: Request, next: Next) -> Response {
-    use crate::auth::{required_access, Principal};
+    use crate::auth::{is_public, required_access, Principal};
+    let method = req.method().as_str().to_string();
+    let path = req.uri().path().to_string();
     let bearer = req
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::to_string);
-    let principal = match (&state.token, bearer.as_deref()) {
-        (Some(root), Some(b)) if b == root => Principal::root(),
-        (_, Some(b)) => match state.auth.resolve(b) {
-            Ok(Some(p)) => {
-                state.auth.touch(&p.id);
-                p
-            }
-            _ => {
-                let p = Principal {
-                    id: "invalid".into(),
-                    root: false,
-                    agent: None,
-                    scopes: vec![],
-                };
-                state
-                    .auth
-                    .audit(&p, None, req.method().as_str(), req.uri().path(), 403);
-                return ApiErr::Forbidden("invalid or expired bearer token".into()).into_response();
-            }
-        },
-        (Some(_), None) => {
-            let p = Principal {
-                id: "anonymous".into(),
-                root: false,
-                agent: None,
-                scopes: vec![],
-            };
-            state
-                .auth
-                .audit(&p, None, req.method().as_str(), req.uri().path(), 403);
-            return ApiErr::Forbidden("missing bearer token".into()).into_response();
-        }
-        (None, None) => Principal::anonymous_root(),
+    let unauthorized = |id: &str, msg: &str| -> Response {
+        let mut p = Principal::anonymous();
+        p.id = id.into();
+        state.auth.audit(&p, None, &method, &path, 401);
+        ApiErr::Unauthorized(msg.into()).into_response()
     };
-    let method = req.method().as_str().to_string();
-    let path = req.uri().path().to_string();
+    let principal = if is_public(&method, &path) {
+        Principal::anonymous()
+    } else {
+        match (&state.token, bearer.as_deref()) {
+            (Some(root), Some(b)) if b == root => Principal::root(),
+            (_, Some(b)) => match state.auth.resolve(b) {
+                Ok(Some(p)) => {
+                    state.auth.touch(&p.id);
+                    p
+                }
+                _ => return unauthorized("invalid", "invalid, expired or revoked bearer token"),
+            },
+            (_, None) => {
+                if state.closed() {
+                    return unauthorized(
+                        "anonymous",
+                        "missing bearer token: sign in with an SSH key (`agit auth login`) or set AGIT_TOKEN",
+                    );
+                }
+                Principal::anonymous_root()
+            }
+        }
+    };
     let (repo, needed) = required_access(&method, &path);
-    if !principal.allows(repo.as_deref(), needed) {
+    if !is_public(&method, &path) && !principal.allows(repo.as_deref(), needed) {
         state
             .auth
             .audit(&principal, principal.agent.as_deref(), &method, &path, 403);
@@ -210,8 +205,16 @@ pub struct ResolvedAgent(pub Option<String>);
 pub fn router(state: Arc<AppState>, web_dir: Option<&std::path::Path>) -> Router {
     let api = Router::new()
         .route("/auth/whoami", get(whoami))
+        .route("/auth/challenge", post(auth_challenge))
+        .route("/auth/session", post(auth_session))
+        .route("/auth/logout", post(auth_logout))
         .route("/auth/tokens", get(list_tokens).post(create_token))
         .route("/auth/tokens/{id}", delete(delete_token))
+        .route(
+            "/auth/keys",
+            get(list_authorized_keys).post(add_authorized_key),
+        )
+        .route("/auth/keys/{id}", delete(delete_authorized_key))
         .route("/repos", get(list_repos).post(create_repo))
         .route("/repos/{repo}", get(get_repo).delete(delete_repo))
         .route("/repos/{repo}/refs", get(list_refs))
@@ -321,31 +324,87 @@ async fn list_tokens(State(st): S) -> ApiResult<Json<Vec<TokenInfo>>> {
     Ok(Json(st.auth.list()?))
 }
 
+/// A principal may only grant what it holds itself.
+fn check_grants(p: &crate::auth::Principal, scopes: &[Scope]) -> ApiResult<()> {
+    for s in scopes {
+        if !p.can_grant(s) {
+            return Err(ApiErr::Forbidden(format!(
+                "cannot grant {:?} on {}{}",
+                s.access,
+                s.repo,
+                if s.repo == "*" {
+                    " (server-wide scopes need root or a server-wide admin)"
+                } else {
+                    ""
+                }
+            )));
+        }
+    }
+    Ok(())
+}
+
 async fn create_token(
     State(st): S,
     Auth(p): Auth,
     AJson(req): AJson<TokenCreate>,
 ) -> ApiResult<(StatusCode, Json<TokenCreated>)> {
-    // A principal may only grant what it holds itself.
-    for s in &req.scopes {
-        let repo = if s.repo == "*" {
-            None
-        } else {
-            Some(s.repo.as_str())
-        };
-        if (s.repo == "*" && !p.root) || !p.allows(repo, Access::Admin) {
-            return Err(ApiErr::Forbidden(format!(
-                "cannot grant {:?} on {}",
-                s.access, s.repo
-            )));
-        }
-    }
+    check_grants(&p, &req.scopes)?;
     Ok((StatusCode::CREATED, Json(st.auth.create(req, &p.id)?)))
 }
 
 async fn delete_token(State(st): S, Path(id): Path<String>) -> ApiResult<Json<serde_json::Value>> {
     st.auth.delete(&id)?;
     Ok(Json(serde_json::json!({ "deleted": id })))
+}
+
+/// The optional body is accepted (and drained, so the connection can be
+/// reused) but ignored.
+async fn auth_challenge(
+    State(st): S,
+    _body: Option<AJson<serde_json::Value>>,
+) -> ApiResult<Json<Challenge>> {
+    Ok(Json(st.auth.issue_challenge()?))
+}
+
+async fn auth_session(
+    State(st): S,
+    AJson(req): AJson<SessionCreate>,
+) -> ApiResult<(StatusCode, Json<TokenCreated>)> {
+    Ok((StatusCode::CREATED, Json(st.auth.redeem(&req)?)))
+}
+
+/// Revoke the token the caller presented.
+async fn auth_logout(State(st): S, Auth(p): Auth) -> ApiResult<Json<serde_json::Value>> {
+    if p.root || p.id == "anonymous" {
+        return Err(ApiErr::BadRequest(
+            "no revocable token: the root token is configured on the server and open-mode callers hold none".into(),
+        ));
+    }
+    st.auth.delete(&p.id)?;
+    Ok(Json(serde_json::json!({ "revoked": p.id })))
+}
+
+async fn list_authorized_keys(State(st): S) -> ApiResult<Json<Vec<AuthorizedKey>>> {
+    Ok(Json(st.auth.list_keys()?))
+}
+
+async fn add_authorized_key(
+    State(st): S,
+    Auth(p): Auth,
+    AJson(req): AJson<AuthorizedKeyCreate>,
+) -> ApiResult<(StatusCode, Json<AuthorizedKey>)> {
+    check_grants(&p, &req.scopes)?;
+    Ok((StatusCode::CREATED, Json(st.auth.add_key(req, &p.id)?)))
+}
+
+async fn delete_authorized_key(
+    State(st): S,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let sessions = st.auth.delete_key(&id)?;
+    Ok(Json(
+        serde_json::json!({ "deleted": id, "revoked_sessions": sessions }),
+    ))
 }
 
 // ---------------------------------------------------------------------------

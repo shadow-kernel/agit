@@ -1331,6 +1331,13 @@ const tokenStore: { info: T.TokenInfo; secret: string }[] = [
   { secret: hashId("tok:expired").slice(0, 40), info: { id: "tok_" + hashId("tok:old").slice(0, 12), name: "old-laptop", agent: "coder-1", scopes: [{ repo: "acme/shop", access: "admin" }, { repo: "agit/docs-site", access: "read" }], created_ms: at(8, 12), expires_ms: NOW - 2 * DAY, created_by: "root", last_used_ms: at(3, 12) } },
 ];
 
+/** Mock authorized SSH keys (`/auth/keys`). The mock cannot verify signatures, so `createSession` always refuses. */
+const authorizedKeyStore: T.AuthorizedKey[] = [
+  { id: "key_" + hashId("key:ops").slice(0, 10), name: "ops laptop", fingerprint: "SHA256:NeEsyNdzgZA8xAHH2Nw7ehNrSS7b6gYEjQl2qlIHrqM", key_id: hashId("kid:ops").slice(0, 16), public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGkmTwaq4yTAX4vyc3zq/dMzitl+O9gXb9V8+ZxCfNQD ops@laptop", scopes: [{ repo: "*", access: "admin" }], created_ms: at(9, 11), created_by: "admin", last_used_ms: NOW - 3 * HOUR },
+  { id: "key_" + hashId("key:coder").slice(0, 10), name: "coder-1 workstation", fingerprint: "SHA256:XpLT8qchEb1bfYCxfcKpTPAIkCK2gnB8E+zn9jxQEEA", key_id: hashId("kid:coder").slice(0, 16), public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJgdKg9iEsjdS21HXsqGMDlXPMY3vwwkyCb8o8gnfUhe coder-1@agents", agent: "coder-1", scopes: [{ repo: "acme/shop", access: "write" }, { repo: "agit/docs-site", access: "read" }], created_ms: at(6, 10), created_by: "key_" + hashId("key:ops").slice(0, 10), last_used_ms: NOW - 25 * 60_000 },
+];
+const challenges = new Set<string>();
+
 function principal(): T.WhoAmI {
   const token = loadSettings().token;
   if (!token) return { principal: "anonymous", root: true, scopes: [{ repo: "*", access: "admin" }] }; // open mode
@@ -1378,7 +1385,7 @@ export const mockApi: Api = {
     const who = require("*", "admin");
     if (!body.name?.trim()) throw new ApiError(400, "invalid", "name is required", false);
     if (!body.scopes?.length) throw new ApiError(400, "invalid", "at least one scope is required", false);
-    for (const s of body.scopes) if (!holds(who, s.repo, s.access) || (s.repo === "*" && !who.root)) throw new ApiError(403, "forbidden", `cannot grant ${s.access} on ${s.repo}: you do not hold it`, false);
+    for (const s of body.scopes) if (!holds(who, s.repo, s.access) || (s.repo === "*" && !holds(who, "*", "admin"))) throw new ApiError(403, "forbidden", `cannot grant ${s.access} on ${s.repo}: you do not hold it`, false);
     const now = Date.now();
     const secret = "agit_" + hashId(`secret:${now}:${body.name}`).slice(0, 40);
     const info: T.TokenInfo = { id: "tok_" + hashId(`tok:${now}:${body.name}`).slice(0, 12), name: body.name.trim(), agent: body.agent?.trim() || undefined, scopes: body.scopes, created_ms: now, expires_ms: body.ttl_secs ? now + body.ttl_secs * 1000 : null, created_by: who.agent ?? who.principal, last_used_ms: null };
@@ -1392,6 +1399,55 @@ export const mockApi: Api = {
     if (idx < 0) notFound(`token ${id}`);
     tokenStore.splice(idx, 1);
     return { deleted: id };
+  },
+  async authorizedKeys() {
+    await latency();
+    require("*", "admin");
+    return structuredClone(authorizedKeyStore);
+  },
+  async addAuthorizedKey(body) {
+    await latency();
+    const who = require("*", "admin");
+    const pk = body.public_key?.trim() ?? "";
+    const m = /^ssh-ed25519\s+([A-Za-z0-9+/=]+)(?:\s+(.*))?$/.exec(pk);
+    if (!m && !/^[0-9a-f]{64}$/i.test(pk)) throw new ApiError(400, "invalid", "public key must be an `ssh-ed25519 …` line or a 64-character hex key", false);
+    if (!body.scopes?.length) throw new ApiError(400, "invalid", "at least one scope is required", false);
+    for (const s of body.scopes) if (!holds(who, s.repo, s.access) || (s.repo === "*" && !holds(who, "*", "admin"))) throw new ApiError(403, "forbidden", `cannot grant ${s.access} on ${s.repo}: you do not hold it`, false);
+    const fingerprint = "SHA256:" + hashId(`fp:${m ? m[1] : pk}`).slice(0, 43);
+    const existing = authorizedKeyStore.find((k) => k.fingerprint === fingerprint);
+    if (existing) throw new ApiError(409, "already_exists", `key ${fingerprint} is already authorized as ${existing.id}`, false);
+    const k: T.AuthorizedKey = { id: "key_" + hashId(`key:${Date.now()}:${pk}`).slice(0, 10), name: body.name?.trim() || m?.[2]?.trim() || fingerprint, fingerprint, key_id: hashId(`kid:${pk}`).slice(0, 16), public_key: m ? `ssh-ed25519 ${m[1]}${m[2] ? " " + m[2].trim() : ""}` : pk.toLowerCase(), agent: body.agent?.trim() || undefined, scopes: body.scopes, created_ms: Date.now(), created_by: who.agent ?? who.principal, last_used_ms: null };
+    authorizedKeyStore.push(k);
+    return structuredClone(k);
+  },
+  async deleteAuthorizedKey(id) {
+    await latency();
+    require("*", "admin");
+    const idx = authorizedKeyStore.findIndex((k) => k.id === id);
+    if (idx < 0) notFound(`authorized key ${id}`);
+    authorizedKeyStore.splice(idx, 1);
+    let revoked = 0;
+    for (let i = tokenStore.length - 1; i >= 0; i--) if (tokenStore[i].info.key === id) { tokenStore.splice(i, 1); revoked++; }
+    return { deleted: id, revoked_sessions: revoked };
+  },
+  async challenge() {
+    await sleep(40);
+    const nonce = hashId(`nonce:${Date.now()}:${Math.random()}`);
+    challenges.add(nonce);
+    return { nonce, expires_ms: Date.now() + 120_000 };
+  },
+  async createSession(body) {
+    await latency();
+    if (!challenges.delete(body.nonce)) throw new ApiError(403, "forbidden", "challenge is unknown, already used or expired; request a new one", false);
+    throw new ApiError(403, "forbidden", "mock mode cannot verify SSH signatures; sign in with `agit auth login --print-token` against a real server", false);
+  },
+  async logout() {
+    await latency();
+    const who = principal();
+    if (who.root) throw new ApiError(400, "invalid", "no revocable token: the root token is configured on the server and open-mode callers hold none", false);
+    const idx = tokenStore.findIndex((t) => t.info.id === who.principal);
+    if (idx >= 0) tokenStore.splice(idx, 1);
+    return { revoked: who.principal };
   },
 
   async repos() {

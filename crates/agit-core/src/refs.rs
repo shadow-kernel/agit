@@ -123,7 +123,7 @@ impl Journal {
                     .map_err(io_at(&self.path))?;
                 use std::io::Write;
                 f.write_all(&batch).map_err(io_at(&self.path))?;
-                f.sync_data().map_err(io_at(&self.path))?;
+                crate::durability::sync_file(&f).map_err(io_at(&self.path))?;
                 Ok(())
             })();
             st = self.state.lock().unwrap();
@@ -198,7 +198,7 @@ impl Journal {
                     if p.is_dir() {
                         stack.push(p);
                     } else if let Ok(f) = fs::File::open(&p) {
-                        let _ = f.sync_data();
+                        let _ = crate::durability::sync_file(&f);
                     }
                 }
             }
@@ -494,7 +494,7 @@ fn write_atomic_with(path: &Path, data: &[u8], sync: bool) -> Result<()> {
     use std::io::Write;
     tmp.write_all(data).map_err(io_at(path))?;
     if sync {
-        tmp.as_file().sync_data().map_err(io_at(path))?;
+        crate::durability::sync_file(tmp.as_file()).map_err(io_at(path))?;
     }
     tmp.persist(path).map_err(|e| Error::IoAt {
         path: path.to_path_buf(),

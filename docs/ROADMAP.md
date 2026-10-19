@@ -1,4 +1,4 @@
-> Status update 2026-10-15: Phase 0 is complete. Parts of Phases 2, 3 and 4 shipped early as a single-node server (`crates/agit-server`): clone/push/pull with CAS refs, pull requests with reviews and server-side merge, repository policies, server-wide leases, SSE event stream, a file-backed knowledge base with typed tags, tag rules and a `context` endpoint, submodules, an MCP server (`agit mcp`) and the first web UI (`web/`). Raft replication, pack segments and the journal, blob tiers, webhooks, the git bridge and SDKs remain open.
+> Status update 2026-10-19: Phase 0 is complete. Phase 1 is partly built (pack segments, the ref journal with group commit, the tree cache, measured benchmarks; the mmap ref table, million-file `status` and token-efficient views remain). Phases 3 and 4 shipped as a single-node server (`crates/agit-server`): clone/push/pull with CAS refs, pull requests with reviews and server-side merge, policies, webhooks, server-wide leases, SSE event stream, the knowledge base with BM25 search, staleness, drafts and context packs, submodules, the MCP server and Claude Code hooks, both SDKs, the web UI and the git bridge. Phase 2 has clone/push/pull and SSH-key plus scoped-token authentication with per-repository scopes; Raft replication, blob tiers and sharding remain open.
 
 # agit roadmap
 
@@ -10,11 +10,11 @@ Legend: ✅ built, 🚧 in progress, 📋 planned.
 
 | Phase | Theme | Status |
 | --- | --- | --- |
-| 0 | Local core | 🚧 (core ✅, tests and CLI polish in progress) |
-| 1 | Performance | 📋 |
-| 2 | Protocol and server | 📋 |
-| 3 | Platform | 📋 |
-| 4 | Knowledge base and AI integration | 📋 |
+| 0 | Local core | ✅ |
+| 1 | Performance | 🚧 (packs, journal, tree cache, benchmarks ✅) |
+| 2 | Protocol and server | 🚧 (single node with auth ✅; replication 📋) |
+| 3 | Platform | ✅ |
+| 4 | Knowledge base and AI integration | ✅ |
 | 5 | Self-hosting and 1.0 | 📋 |
 
 ---
@@ -95,7 +95,7 @@ Clone, push, pull, authentication, replication.
 ### Deliverables
 
 - `crates/agit-protocol`: versioned message schemas, `have`/`want` negotiation, streaming pack transfer over HTTP/2 and gRPC, resumable uploads, idempotency keys.
-- `crates/agit-server` v0: repositories, organisations, users and agents, scoped short-lived tokens, per-repository Raft-replicated commit log, ref CAS at the log head, local pack tier plus S3-compatible blob tier with cross-repository dedup, sharding by repository.
+- ✅ `crates/agit-server` v0 (single node): repositories, SSH-key sign-in with authorized keys and per-repository scopes, scoped short-lived tokens bound to agent identities, ref CAS. 📋 organisations, per-repository Raft-replicated commit log with ref CAS at the log head, local pack tier plus S3-compatible blob tier with cross-repository dedup, sharding by repository.
 - CLI: `agit clone`, `agit push`, `agit pull`, `agit fetch`, `agit remote`.
 - Server event log exposed over SSE and WebSocket with `seq` resume.
 - First draft of `spec/` for the object formats and wire protocol.

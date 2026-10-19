@@ -84,7 +84,7 @@ class AgitError(Exception):
             parsed = None
         if isinstance(parsed, Mapping) and parsed.get("ok") is False:
             return cls.from_envelope(parsed, status=status)
-        code = {404: "not_found", 403: "forbidden", 401: "forbidden", 400: "invalid"}.get(status, "http_error")
+        code = {404: "not_found", 403: "forbidden", 401: "unauthorized", 400: "invalid"}.get(status, "http_error")
         message = text.strip() or reason or f"HTTP {status}"
         return error_class_for(code, status)(
             f"server error {status}: {message}",
@@ -164,8 +164,14 @@ class AlreadyExists(AgitError):
     codes = ("already_exists", "workspace_exists")
 
 
+class Unauthorized(AgitError):
+    """401: no credentials, or an invalid, expired or revoked token. Sign in (``agit auth login``) or set ``AGIT_TOKEN``."""
+
+    codes = ("unauthorized",)
+
+
 class Forbidden(AgitError):
-    """Missing or wrong bearer token."""
+    """403: the credentials are valid but lack the scope the request needs (or the SSH key is not authorized)."""
 
     codes = ("forbidden",)
 
@@ -189,8 +195,8 @@ class TransportError(AgitError):
 
 
 _BY_CODE: dict[str, type[AgitError]] = {}
-for _klass in (RefConflict, LeaseConflict, MergeConflicts, NotFound, AlreadyExists, Forbidden, PolicyViolation, Invalid,
-               TransportError):
+for _klass in (RefConflict, LeaseConflict, MergeConflicts, NotFound, AlreadyExists, Unauthorized, Forbidden, PolicyViolation,
+               Invalid, TransportError):
     for _code in _klass.codes:
         _BY_CODE[_code] = _klass
 
@@ -204,7 +210,9 @@ def error_class_for(code: str, status: int | None = None) -> type[AgitError]:
         return NotFound
     if status == 404:
         return NotFound
-    if status in (401, 403):
+    if status == 401:
+        return Unauthorized
+    if status == 403:
         return Forbidden
     return AgitError
 

@@ -215,6 +215,20 @@ event: 3 commit anonymous
 
 `encodeObjectStream`/`decodeObjectStream` implement the frame format for `uploadObjects`, `fetchObjects` and `POST /fetch`. Object ids come from the server (BLAKE3 is not bundled).
 
+## Authentication from an SDK
+
+Both SDKs speak the same auth surface as the CLI ([chapter 13](13-server-administration.md#authentication)): `whoami`, `challenge` + `createSession` / `create_session`, the convenience `loginWithKey` / `login_with_key` that takes a signing callback, `logout`, and the admin calls for tokens and authorized keys. Neither bundles an Ed25519 implementation: pass a signing function from `node:crypto` or `cryptography`, or take the token from `agit auth login --print-token`. A missing or invalid token is `401 unauthorized` (Python `Unauthorized`; TypeScript `code: "unauthorized"`), a scope problem is `403 forbidden`.
+
+```python
+created = client.login_with_key(pub_line, key.sign)        # cryptography's Ed25519PrivateKey.sign
+client.add_authorized_key(pub_line, [Scope("demo", "write")], agent="coder-2")
+```
+
+```ts
+await client.loginWithKey({ publicKey: pubLine, sign: (m) => sign(null, m, key) });   // node:crypto
+await client.auth.tokens.create({ name: "ci", scopes: [{ repo: "demo", access: "read" }] });
+```
+
 ## Choosing between CLI, MCP and SDK
 
 | Need | Use |

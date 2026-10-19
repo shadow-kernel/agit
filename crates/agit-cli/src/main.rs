@@ -5,6 +5,7 @@
 //! "message","retryable"}}`. Exit codes: 0 ok, 1 error, 3 conflict
 //! (merge/lease/dirty worktree), 75 retryable (lock timeout, ref conflict).
 
+mod auth;
 mod cli;
 mod knowledge;
 mod mcp;

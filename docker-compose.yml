@@ -2,7 +2,8 @@
 #
 #   docker compose up -d                 # pulls ghcr.io/shadow-kernel/agit:latest
 #   docker compose up -d --build         # or build from this checkout
-#   AGIT_SERVER_TOKEN=$(openssl rand -hex 32) docker compose up -d   # with auth
+#   AGIT_ADMIN_KEYS="$(cat ~/.ssh/id_ed25519.pub)" docker compose up -d   # you are admin; sign in with `agit auth login`
+#   AGIT_SERVER_TOKEN=$(openssl rand -hex 32) docker compose up -d        # or a root token
 #
 # Data lives in the named volume `agit-data` (/data in the container). See
 # docs/DEPLOYMENT.md for backups, upgrades and reverse proxies with TLS.
@@ -26,10 +27,15 @@ services:
       - AGIT_WEB_DIR=/opt/agit/web
       - RUST_LOG=${RUST_LOG:-info,tower_http=info}
       - AGIT_FSYNC=${AGIT_FSYNC:-refs}
-      # Optional bearer token. Passed through from the host environment (or a
-      # .env file next to this compose file) only when it is set; an unset
-      # token means an open server, so keep such a server on a private network.
+      # Authentication. Passed through from the host environment (or a .env
+      # file next to this compose file) only when set. AGIT_ADMIN_KEYS holds
+      # ssh-ed25519 public key lines (comma-separated) or a path mounted into
+      # the container; AGIT_SERVER_TOKEN is an optional root token. The
+      # container listens on 0.0.0.0, so without either the server refuses to
+      # start unless AGIT_ALLOW_OPEN=1 (private networks only).
+      - AGIT_ADMIN_KEYS
       - AGIT_SERVER_TOKEN
+      - AGIT_ALLOW_OPEN
     volumes:
       - agit-data:/data
       # Alternative: keep repositories in a host directory instead of a named
@@ -41,8 +47,8 @@ services:
       # <dir>/<repo>/meta.json, objects/, refs/ ...):
       # - /srv/agit/repos:/data/repos
     healthcheck:
-      # Mirrors the image HEALTHCHECK; the token is required on /health too.
-      test: ["CMD", "sh", "-c", "curl -fsS -H \"Authorization: Bearer $${AGIT_SERVER_TOKEN:-none}\" http://127.0.0.1:7878/api/v1/health >/dev/null"]
+      # Mirrors the image HEALTHCHECK; /api/v1/health is public.
+      test: ["CMD", "sh", "-c", "curl -fsS http://127.0.0.1:7878/api/v1/health >/dev/null"]
       interval: 30s
       timeout: 5s
       retries: 3

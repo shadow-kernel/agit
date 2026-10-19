@@ -7,15 +7,28 @@ with the same codes as the CLI (`ref_conflict`, `object_not_found`,
 plain JSON objects (no envelope) unless noted.
 
 Headers:
-- `Authorization: Bearer <token>`: the root token (`AGIT_SERVER_TOKEN`) or a scoped token from `POST /auth/tokens`. Required whenever a root token is configured; without one the server runs in open mode (every request acts as an anonymous root) for local development.
-- `X-Agit-Agent: <agent id>` identifies the acting agent for events, leases and PRs. A token bound to an agent overrides this header, so bound identities cannot be spoofed.
+- `Authorization: Bearer <token>`: a session token from an SSH-key sign-in (`POST /auth/session`), a scoped token from `POST /auth/tokens`, or the root token (`AGIT_SERVER_TOKEN`). Required on every request as soon as the server is *closed*, which it is whenever a root token or an admin key (`--admin-key`) is configured. Without either the server runs in open mode (every request acts as an anonymous root) for local development; `agit-server` refuses to start open on a non-loopback address unless `--allow-open` is given.
+- `X-Agit-Agent: <agent id>` identifies the acting agent for events, leases and PRs. A token or key bound to an agent overrides this header, so bound identities cannot be spoofed.
+
+Two error codes: `401 unauthorized` means no usable credentials (missing, invalid, expired or revoked token; the response carries `WWW-Authenticate: Bearer realm="agit"`), `403 forbidden` means the credentials are valid but lack the scope the request needs. Clients should sign in on 401 and give up on 403.
 
 ## Auth
-- `GET /auth/whoami` -> `{principal, agent?, root, scopes}`
-- `POST /auth/tokens` (admin) `{name, agent?, scopes:[{repo:"*"|name, access:"read"|"write"|"admin"}], ttl_secs?}` -> `{token, id, name, agent, scopes, created_ms, expires_ms, created_by}`; the plaintext token is returned once. A principal can only grant scopes it holds; `*` scopes require the root token.
-- `GET /auth/tokens` (admin) -> `[token info]` (hashes only)
+
+Scopes are `{repo: "*" | <name>, access: "read" | "write" | "admin"}`. Access needed per request: `GET` read; other methods write; repository create/delete, `policy`, `keys`, `webhooks`, `knowledge/rules`, `/auth/tokens` and `/auth/keys` admin. Repository listings are filtered to the repositories a principal can read. A principal can only grant scopes it holds: a repository scope needs admin on that repository, a `*` scope needs root or a `*:admin` scope. Denied requests and every mutation are appended to `<data-dir>/audit.jsonl`.
+
+SSH keys (the way people sign in; `agit auth login` does all of this):
+- `POST /auth/challenge` (public, no body) -> `{nonce, expires_ms}`. The nonce is single-use and valid for two minutes.
+- `POST /auth/session` (public) `{public_key, nonce, signature, ttl_secs?}` -> `201` `{token, id, name, agent?, scopes, created_ms, expires_ms, created_by, key}`. `public_key` is the `ssh-ed25519 …` line (comment optional) or a 64-hex Ed25519 key; `signature` is the hex Ed25519 signature over the bytes `agit-auth-v1\n<nonce>`. The key must be an authorized key (`/auth/keys`) or a startup admin key (`--admin-key`, which grants `*:admin` and reports `key: "admin"`); otherwise `403 forbidden` with a message containing `not authorized`. A reused or expired nonce and a wrong signature are also `403`. The session token carries the key's scopes and bound agent; `ttl_secs` defaults to 8 hours and is capped at 30 days.
+- `POST /auth/logout` (any authenticated token) -> `{revoked: <token id>}`: revokes the token the caller presented.
+- `GET /auth/keys` (admin) -> `[{id, name, fingerprint, key_id, public_key, agent?, scopes, created_ms, created_by, last_used_ms?}]`. `fingerprint` is `SHA256:<base64>` as `ssh-keygen -lf` prints it; `key_id` is the short id also used for commit-signing keys. Startup admin keys are not listed.
+- `POST /auth/keys` (admin) `{public_key, name?, agent?, scopes}` -> `201` key. `name` defaults to the key's comment, then its fingerprint. Only `ssh-ed25519` keys are accepted (`ssh-keygen -t ed25519`); the same key twice is `409 already_exists`.
+- `DELETE /auth/keys/{id}` (admin) -> `{deleted, revoked_sessions}`: removes the key and every session it opened.
+
+Tokens (for agents, CI and the browser):
+- `GET /auth/whoami` -> `{principal, agent?, root, scopes, key?}`; `key` is set for sessions opened with an SSH key.
+- `POST /auth/tokens` (admin) `{name, agent?, scopes, ttl_secs?}` -> `201` `{token, id, name, agent?, scopes, created_ms, expires_ms?, created_by, key?}`; the plaintext token is returned once.
+- `GET /auth/tokens` (admin) -> `[token info]` (hashes only; `key` names the authorized key for session tokens)
 - `DELETE /auth/tokens/{id}` (admin)
-Access needed per request: `GET` read; other methods write; repository create/delete, `policy`, `keys`, `webhooks`, `knowledge/rules` and `/auth/*` admin. Denied requests and every mutation are appended to `<data-dir>/audit.jsonl`.
 
 ## Health
 - `GET /health` -> `{"status":"ok","version":"0.1.0"}`

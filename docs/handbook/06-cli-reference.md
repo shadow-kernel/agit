@@ -80,11 +80,15 @@ Errors raised by the CLI layer itself rather than the core (for example `nothing
 | `AGIT_AGENT` | commit, checkpoint, merge, pull, revert, cherry-pick, lease (holder), ws new, pr, know, key, mcp | agent id recorded in commits and used as lease holder and `X-Agit-Agent` |
 | `AGIT_MODEL`, `AGIT_RUN_ID`, `AGIT_ON_BEHALF_OF` | same | the other `agent` fields (`model`, `run_id`, `on_behalf_of`) |
 | `AGIT_AUTHOR_NAME`, `AGIT_AUTHOR_EMAIL` | commit author, reflog actor | fallback when `user.name`/`user.email` are not configured |
-| `AGIT_TOKEN` | clone, fetch, push, pull, pr, know, key register, mcp | bearer token for the server |
+| `AGIT_TOKEN` | clone, fetch, push, pull, pr, know, key register, mcp, auth | bearer token for the server; without it the session cached by `agit auth login` is used, and a `401` triggers an automatic SSH sign-in |
+| `AGIT_SSH_KEY` | auth login, automatic sign-in | private key to sign in with (default `~/.ssh/id_ed25519`, then ssh-agent, then `~/.agit/keys`) |
+| `AGIT_AUTO_LOGIN` | remote commands | `0` disables the automatic SSH sign-in on `401` |
+| `AGIT_SESSIONS_FILE` | auth | session cache (default `~/.agit/sessions.json`) |
+| `AGIT_SERVER_URL` | auth | server for `agit auth` outside a repository |
 | `AGIT_SIGN` | commit, merge | `auto` (default): sign when a key named after the agent exists; `1|on|true|yes`: always; `0|off|false|no`: never |
 | `AGIT_KEY` | commit `--sign`, key commands | default key name (else `AGIT_AGENT`, else `default`) |
 | `AGIT_KEYS_DIR` | key commands, signing | key directory (default `~/.agit/keys`) |
-| `AGIT_FSYNC` | every write | `refs` (default), `all`, `none` ([5](05-concepts.md#pack-segments-and-durability)) |
+| `AGIT_FSYNC` | every write | `refs` (default), `full`, `all`, `none` ([5](05-concepts.md#pack-segments-and-durability)) |
 | `AGIT_PACK` | object store | `0|off|false` writes loose objects instead of pack segments |
 
 Server-side variables (`AGIT_DATA_DIR`, `AGIT_LISTEN`, `AGIT_SERVER_TOKEN`, `AGIT_WEB_DIR`, `RUST_LOG`) are in [13](13-server-administration.md). The Claude Code hooks additionally read `AGIT_BIN`, `AGIT_HOOKS_DISABLE` and `AGIT_HOOK_LEASE_TTL` ([7](07-mcp-reference.md#claude-code-integration)).
@@ -361,6 +365,15 @@ Creates `DEST` (default: repository name), sets `origin`, checks out the default
 ### `agit pull [REMOTE] [--no-ff]`
 
 Fetch the current branch and merge it: `{"fetch": {...}, "merge": <merge result>}`; conflicts exit 3. Refuses with `dirty_worktree` when the merge would overwrite local changes.
+
+### `agit auth [--url BASE] [--remote origin] <login|logout|whoami|show-token|key|token>`
+
+The server is `--url` (an `…/api/v1` base or any repository URL on it), else the remote of the repository in the current directory, else `AGIT_SERVER_URL`.
+
+- `login [--key PATH] [--ttl 8h] [--print-token]`: signs a server challenge with an SSH key (`--key`, `AGIT_SSH_KEY`, `~/.ssh/id_ed25519`, ssh-agent, or an agit key) and caches the session. Result: `{server, principal, agent, scopes, key, fingerprint, source, expires_ms, token?}`. An unknown key fails with `unauthorized` and the message `… is not authorized on <server>`.
+- `logout`: revokes the cached session (`{revoked}`). `whoami`: `{principal, agent, root, scopes, key}`. `show-token`: `{server, token, expires_ms, agent}` for the web UI or an SDK.
+- `key add <PUBKEY|FILE> [--name S] [--agent ID] [--scope repo:access]... [--admin]`, `key list`, `key remove <ID>` (admin). `--scope` takes `repo:read|write|admin` or `*:…`; `--admin` is `*:admin`. A file adds every key in it. Results are the authorized-key objects of `GET /auth/keys`; `remove` returns `{deleted, revoked_sessions}`.
+- `token create --name S [--agent ID] [--scope …]... [--admin] [--ttl 30d]`, `token list`, `token revoke <ID>` (admin): the token objects of `/auth/tokens`; `create` includes the plaintext `token` once.
 
 ## Platform commands (pull requests)
 

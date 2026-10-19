@@ -19,7 +19,7 @@ AGIT_DATA_DIR=/var/lib/agit AGIT_LISTEN=127.0.0.1:7878 agit-server
 | `AGIT_SERVER_TOKEN` | `--token` | unset (open mode) | root bearer token; an empty value is a (bad) token, not "off" |
 | `AGIT_WEB_DIR` | `--web-dir` | unset | built web UI, served at `/` with SPA fallback, without token check |
 | `RUST_LOG` | | `info,tower_http=info` | log filter; `tower_http=debug` logs each request |
-| `AGIT_FSYNC` | | `refs` | durability: `refs`, `all`, `none` |
+| `AGIT_FSYNC` | | `refs` | durability: `refs` (git's fsync), `full` (flush the drive cache too, power-loss safe on macOS), `all`, `none` |
 
 Flags win over the environment. On start the server logs one line (`agit-server listening`, with `addr`, `data_dir`, `auth=true|false`, `web`). Logs go to stdout/stderr (journald under systemd, `docker logs` in containers).
 
@@ -89,15 +89,42 @@ For Docker: `docker run --rm -v agit-data:/data:ro -v "$PWD":/out alpine tar -C 
 
 ## Authentication
 
+### SSH keys: how people get in
+
+The server is closed as soon as it knows one admin key or a root token. Start it with your own public key and sign in from the command line; the private key never leaves your machine, and passphrase-protected keys work through ssh-agent:
+
+```sh
+$ agit-server --admin-key ~/.ssh/id_ed25519.pub --listen 0.0.0.0:7878
+$ agit auth login --url http://agit.internal:7878/api/v1
+signed in to http://agit.internal:7878/api/v1 as admin key SHA256:NeEs… (/Users/dana/.ssh/id_ed25519)
+scopes: *:admin
+session expires 2026-10-20T03:12:40Z
+```
+
+`agit auth login` requests a single-use challenge (`POST /auth/challenge`), signs `agit-auth-v1\n<nonce>` with the Ed25519 key and redeems it (`POST /auth/session`) for a session token that lives 8 hours by default (`--ttl 30d` at most). The session is cached in `~/.agit/sessions.json` per server, so later commands reuse it; `agit push`, `agit pull`, `agit pr` and the rest sign in by themselves when a server answers `401`. Keys are looked for in this order: `--key` / `AGIT_SSH_KEY`, `~/.ssh/id_ed25519`, the identities loaded in ssh-agent, `~/.agit/keys/*.key`. Only `ssh-ed25519` keys are accepted (`ssh-keygen -t ed25519`).
+
+Authorize everyone else with exactly the scopes they need. A key sees only the repositories it has a scope on; `--agent` binds its sessions to an identity that the `X-Agit-Agent` header cannot override:
+
+```sh
+$ agit auth key add ~/Downloads/dana.pub --name "dana laptop" --scope shop:write --scope docs:read
+$ agit auth key add reviewer.pub --agent reviewer-1 --scope shop:write
+$ agit auth key add ops.pub --admin                         # *:admin, may add keys and mint tokens
+$ agit auth key list
+key_4c2a9e01f3  dana laptop          SHA256:XpLT…  agent=-  scopes=shop:write, docs:read  last used 2026-10-19T14:02:11Z
+$ agit auth key remove key_4c2a9e01f3                       # also revokes every session it opened
+```
+
+`agit auth whoami` shows what the server makes of you, `agit auth logout` revokes your session, `agit auth show-token` prints the session token for the web UI (settings popover) or an SDK. `--admin-key` accepts a key line or a file with one key per line (`AGIT_ADMIN_KEYS`, comma-separated); admin keys are not persisted and not listed.
+
 ### The root token
 
-`AGIT_SERVER_TOKEN` grants every permission and bootstraps everything else. Generate it with `openssl rand -hex 32`, keep it out of shell history (env file, Docker secret), rotate by restarting with a new value (no overlap window; update clients first or accept a few seconds of `403`). Without a token the server is **open**: every request acts as an anonymous root. Acceptable on `127.0.0.1` for development, nowhere else.
+`AGIT_SERVER_TOKEN` is an alternative bootstrap for automation: full access, compared as a plain string. Generate it with `openssl rand -hex 32`, keep it out of shell history (env file, Docker secret), rotate by restarting with a new value (no overlap window). Without admin keys and without a token the server is **open**: every request acts as an anonymous root, and `agit-server` refuses to start that way on a non-loopback address unless `--allow-open` is passed. Acceptable on `127.0.0.1` for development, nowhere else.
 
-Clients: `AGIT_TOKEN` for the CLI, the `token` option in the SDKs, the settings popover in the web UI.
+Clients: `AGIT_TOKEN` for the CLI (otherwise the cached SSH session), the `token` option in the SDKs, the settings popover in the web UI. A missing or invalid token is `401 unauthorized`; a valid one without the needed scope is `403 forbidden`.
 
 ### Scoped tokens
 
-Create per-agent or per-job tokens with the root token (or any admin-capable token, which can only grant scopes it holds; `*` scopes require root):
+Tokens are for agents and CI. Create them with `agit auth token create --name ci-deploy --agent ci-bot --scope shop:write --ttl 30d` or over HTTP (any admin may grant what it holds; `*` scopes need root or a `*:admin` principal):
 
 ```sh
 $ curl -s -X POST -H "Authorization: Bearer $ROOT" -H 'content-type: application/json' $U/auth/tokens \
@@ -108,8 +135,8 @@ $ curl -s -X POST -H "Authorization: Bearer $ROOT" -H 'content-type: application
 - `scopes`: `{repo: "<name>" | "*", access: "read" | "write" | "admin"}`. `GET` needs read; other methods write; repository create/delete, `policy`, `keys`, `webhooks`, `knowledge/rules` and `/auth/*` need admin.
 - `agent`: binds the token to an identity. Requests made with it act as that agent regardless of `X-Agit-Agent`, so events, leases, PR authorship and policy checks cannot be spoofed by header. (Request bodies that carry a holder, such as `POST /leases`, are not rewritten yet.)
 - `ttl_secs`: optional expiry. The plaintext token is returned once; `GET /auth/tokens` shows metadata only.
-- `DELETE /auth/tokens/{id}` revokes immediately (`403` on the next request).
-- `GET /auth/whoami` lets a client confirm what it is: `{"principal":"tok_…","agent":"coder-1","root":false,"scopes":[…]}`.
+- `DELETE /auth/tokens/{id}` (`agit auth token revoke`) revokes immediately (`401` on the next request). `GET /auth/tokens` shows session tokens too, with `key` naming the authorized key behind them.
+- `GET /auth/whoami` lets a client confirm what it is: `{"principal":"tok_…","agent":"coder-1","root":false,"scopes":[…],"key":"key_…"}`.
 
 Recommended: one token per agent *and* machine, write scope on the repositories it works in, bound to its id, with a TTL matching the job; admin tokens only for operators and the deployment pipeline; root only to mint tokens.
 
@@ -170,7 +197,8 @@ Clients and server should run the same minor version while the API is `v1` and p
 
 ## Hardening checklist (short form)
 
-- Root token of at least 32 random bytes; never an open server on a reachable interface.
+- An admin key (`--admin-key ~/.ssh/id_ed25519.pub`) or a root token of at least 32 random bytes; never `--allow-open` on a reachable interface.
+- Authorize people by SSH key with per-repository scopes and `--agent`; remove keys when they leave.
 - Bind to `127.0.0.1`, TLS in a reverse proxy, HSTS once TLS works.
 - Dedicated unprivileged user, data directory mode `0750`, the shipped systemd hardening or equivalent container flags.
 - Body size and connection rate limits at the proxy; restrict outbound traffic to known webhook receivers.
@@ -185,7 +213,9 @@ The full list, the threat model and the disclosure process are in [docs/SECURITY
 
 | Symptom | Cause and fix |
 | --- | --- |
-| `403 forbidden` on every call | token set on the server but missing or different on the client; check for an empty `AGIT_SERVER_TOKEN=` |
+| `401 unauthorized` on every call | the server is closed and the client has no usable credentials: run `agit auth login`, set `AGIT_TOKEN`, or check for an empty `AGIT_SERVER_TOKEN=` |
+| `403 … is not authorized on this server` during login | the SSH key is not in `/auth/keys` and not an admin key; an admin adds it with `agit auth key add` |
+| `refusing to start an open server` | neither `--admin-key` nor `AGIT_SERVER_TOKEN` is set and the listen address is not loopback; configure one or pass `--allow-open` on a private network |
 | `403 … token lacks Admin access` | a scoped token hitting an admin endpoint (policy, keys, webhooks, rules, repo create/delete); use an admin or root token |
 | container exits with a permission error on `/data` | bind mount not writable by uid 10001 |
 | SSE arrives in bursts or drops behind a proxy | response buffering or read timeout on the proxy |

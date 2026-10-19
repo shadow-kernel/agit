@@ -7,9 +7,16 @@ import pytest
 import agit
 from agit import (
     AgitError,
+    AuthorizedKey,
     CommitDetail,
     AlreadyExists,
     Client,
+    Forbidden,
+    Scope,
+    TokenCreated,
+    Unauthorized,
+    WhoAmI,
+    auth_message,
     ContextFile,
     ContextResponse,
     Event,
@@ -33,7 +40,7 @@ from agit import (
     expect_is,
 )
 
-from conftest import ID_A, ID_B, ID_C
+from conftest import ID_A, ID_B, ID_C, NONCE, SSH_PUB
 
 
 # -- construction, headers, env --------------------------------------------
@@ -79,10 +86,70 @@ def test_no_optional_headers_when_unset(server, monkeypatch):
 
 def test_bearer_token_enforced_by_server(server, client):
     server.state.token = "right"
-    with pytest.raises(AgitError) as ei:
+    with pytest.raises(Unauthorized) as ei:
         client.list_repos()
-    assert ei.value.code == "forbidden" and ei.value.status == 403
+    assert ei.value.code == "unauthorized" and ei.value.status == 401
     assert client.with_token("right").list_repos()[0].name == "demo"
+
+
+# -- auth -------------------------------------------------------------------
+
+
+def test_whoami_and_scopes(server, client):
+    me = client.whoami()
+    assert isinstance(me, WhoAmI) and me.principal == "tok_sess" and me.agent == "coder-1"
+    assert me.key == "key_1" and not me.root
+    assert me.holds("demo", "write") and me.holds("demo", "read")
+    assert not me.holds("demo", "admin") and not me.holds("other", "read")
+
+
+def test_login_with_key_signs_the_challenge_and_keeps_the_token(server, client):
+    seen: list[bytes] = []
+
+    def sign(message: bytes) -> bytes:
+        seen.append(message)
+        return bytes.fromhex("ab" * 64)
+
+    created = client.login_with_key(SSH_PUB, sign, ttl_secs=600)
+    assert seen == [auth_message(NONCE)] and seen[0].startswith(b"agit-auth-v1\n")
+    assert isinstance(created, TokenCreated) and created.token == "agit_session" and created.key == "key_1"
+    assert created.scopes == [Scope(repo="demo", access="write")]
+    assert client.token == "agit_session"
+    sess = server.requests[-1]
+    assert sess.method == "POST" and sess.path == "/api/v1/auth/session"
+    assert sess.json == {"public_key": SSH_PUB, "nonce": NONCE, "signature": "ab" * 64, "ttl_secs": 600}
+    # The session token is sent from now on; logout revokes and forgets it.
+    client.whoami()
+    assert server.last.headers.get("authorization") == "Bearer agit_session"
+    assert client.logout() == {"revoked": "tok_sess"}
+    assert client.token is None
+
+
+def test_unknown_key_is_forbidden(server, client):
+    with pytest.raises(Forbidden) as ei:
+        client.login_with_key("ssh-ed25519 AAAA other@host", lambda m: b"\0" * 64)
+    assert "not authorized" in ei.value.message
+    with pytest.raises(Forbidden):
+        client.create_session(SSH_PUB, "stale-nonce", "ab" * 64)
+
+
+def test_tokens_and_authorized_keys(server, client):
+    tokens = client.tokens()
+    assert [t.id for t in tokens] == ["tok_sess"] and tokens[0].key == "key_1"
+    created = client.create_token("ci", [{"repo": "demo", "access": "read"}, Scope("*", "read")], agent="ci-bot", ttl_secs=60)
+    assert created.token == "agit_new" and created.agent == "ci-bot"
+    assert server.last.json == {"name": "ci", "agent": "ci-bot", "scopes": [{"repo": "demo", "access": "read"}, {"repo": "*", "access": "read"}], "ttl_secs": 60}
+    assert client.delete_token("tok_new") == {"deleted": "tok_new"}
+
+    keys = client.authorized_keys()
+    assert len(keys) == 1 and isinstance(keys[0], AuthorizedKey)
+    assert keys[0].fingerprint.startswith("SHA256:") and keys[0].scopes[0].repo == "demo"
+    with pytest.raises(AlreadyExists):
+        client.add_authorized_key(SSH_PUB, [Scope("demo", "write")])
+    k = client.add_authorized_key("ssh-ed25519 AAAA new@host", [Scope("demo", "read")], name="new laptop", agent="reviewer-1")
+    assert k.id == "key_2" and k.name == "new laptop" and k.agent == "reviewer-1"
+    assert server.last.json == {"public_key": "ssh-ed25519 AAAA new@host", "name": "new laptop", "agent": "reviewer-1", "scopes": [{"repo": "demo", "access": "read"}]}
+    assert client.delete_authorized_key("key_2") == {"deleted": "key_2", "revoked_sessions": 1}
 
 
 def test_transport_error_is_retryable():

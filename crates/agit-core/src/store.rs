@@ -391,7 +391,7 @@ impl ObjectStore {
             enc.write_all(payload)?;
             let f = enc.finish()?;
             if crate::durability::sync_data() {
-                f.sync_data()?;
+                crate::durability::sync_file(f)?;
             }
         }
         match tmp.persist_noclobber(&path) {
@@ -430,7 +430,7 @@ impl ObjectStore {
             return Ok(());
         }
         if crate::durability::sync_data() {
-            w.file.sync_data()?;
+            crate::durability::sync_file(&w.file)?;
         }
         let body = Self::encode_index(&w.entries);
         crate::refs::write_atomic_bulk(&pack_dir.join(format!("{}.idx", w.name)), &body)?;

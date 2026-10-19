@@ -170,6 +170,18 @@ impl AppState {
         })
     }
 
+    /// SSH public keys with full admin rights (from `--admin-key`). A server
+    /// with admin keys is closed even without a root token.
+    pub fn with_admin_keys(mut self, keys: Vec<agit_core::sshkey::SshPublicKey>) -> Self {
+        self.auth.set_admin_keys(keys);
+        self
+    }
+
+    /// Does every request need credentials?
+    pub fn closed(&self) -> bool {
+        self.token.is_some() || self.auth.has_admin_keys()
+    }
+
     pub fn repos_dir(&self) -> PathBuf {
         self.data_dir.join("repos")
     }

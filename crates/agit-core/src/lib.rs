@@ -23,6 +23,7 @@ pub mod reflog;
 pub mod refs;
 pub mod repo;
 pub mod sign;
+pub mod sshkey;
 pub mod store;
 pub mod submodule;
 pub mod worktree;

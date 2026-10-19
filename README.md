@@ -4,7 +4,7 @@
 
 agit is an open-source version control system and platform that keeps the git mental model (init, add, commit, branch, merge, push, pull) and rebuilds everything underneath for a world where the committers are AI agents making thousands of tiny changes in parallel. Every command speaks JSON, every error has a stable code, every commit carries intent and agent identity, and agents coordinate through leases, workspaces, checkpoints and a live event stream instead of discovering conflicts after the fact. The throughput target is 100,000 micro-commits per second platform-wide.
 
-> **Status: Phase 0 local core complete, Phase 2/3 server in progress.** Implemented in Rust: object model, index, commit, status, diff, branch, merge, leases, events, workspaces, checkpoints, JSON output, and a hosting server (`agit-server`) with clone/push/pull, compare-and-swap ref updates, pull requests with reviews and server-side merge, server-wide leases, an event stream (SSE), and a first file-backed knowledge base with typed tags and tag rules. The web UI lives in `web/`. First local measurements against git are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). See [Roadmap](#roadmap).
+> **Status (2026-10-19): the local core, the single-node server and the platform are built; replication and the 1.0 format freeze are not.** In Rust: object model with pack segments and a group-commit journal, index with tree cache, commit, status, diff, blame, merge, stash, revert, reflog, gc, leases, events, workspaces, checkpoints, Ed25519 signatures, `--json` everywhere; a hosting server (`agit-server`) with clone/push/pull, compare-and-swap refs, pull requests with reviews and server-side merge, policies, webhooks, server-wide leases, an SSE event stream, a knowledge base with BM25 search and context packs, and **SSH-key authentication with per-repository scopes**; an MCP server and Claude Code hooks; Python and TypeScript SDKs; a web UI; a git bridge. Measured numbers are in [docs/BENCHMARKS.md](docs/BENCHMARKS.md). Open: Raft replication, blob tiers, sharding, the spec and 1.0. See [Roadmap](#roadmap).
 
 **Documentation:** the complete [handbook](docs/handbook/README.md) (installation, quickstarts for developers and agents, concepts, CLI/MCP/HTTP/SDK references, knowledge base, multi-agent workflows, administration, internals, FAQ) and a German overview, [Überblick auf Deutsch](docs/handbook/de/UEBERBLICK.md). Published at https://shadow-kernel.github.io/agit/ once GitHub Pages is enabled for the repository.
 
@@ -50,8 +50,9 @@ git is the best developer tool of the last twenty years. It was designed for hum
 - **No event stream.** Agents poll `git status` and `git log` in loops to notice each other's work.
 - **No cheap checkpoints.** Agents want to snapshot every few seconds so they can roll back a failed attempt. In git that pollutes history or requires stash gymnastics.
 - **Knowledge lives outside the repo.** Design decisions, gotchas and specs sit in wikis and chat logs. The agent editing the code never sees them.
+- **No identity for machines.** git records a name and an email, both free text. Which agent, which model, which run, on whose behalf, and whether the caller is allowed to touch this repository at all: none of that exists. Hosting platforms bolt it on per vendor.
 
-agit addresses each of these directly rather than wrapping git.
+agit addresses each of these directly rather than wrapping git: structured JSON and error codes, no lock files, leases, a fast `status`, BLAKE3, one workspace per agent, intent and agent metadata in the commit itself, an event stream, checkpoints, a knowledge base next to the code, and SSH-key or token identities with per-repository scopes.
 
 ## What agit is
 
@@ -70,10 +71,13 @@ agit addresses each of these directly rather than wrapping git.
 | Checkpoints | Cheap disposable snapshots on `refs/checkpoints/<workspace>` for rollback, outside branch history | ✅ |
 | Event log | Append-only `events.jsonl` with sequence numbers; `agit events --follow` | ✅ |
 | BLAKE3 ids, zstd objects, verify-on-read | Fast and safe content addressing | ✅ |
-| Pack segments, journal, group commit | Throughput path for micro-commits | 📋 Phase 1 |
-| Server, protocol, Raft log, blob tiers | Hosting and replication | 📋 Phase 2 |
-| Structured PRs and reviews, policies, web UI, git bridge | The platform | 📋 Phase 3 |
-| Knowledge base, context packs, MCP server, SDKs | AI integration | 📋 Phase 4 |
+| Pack segments, journal, group commit | Throughput path for micro-commits | ✅ |
+| Signed commits, reflog, gc | Ed25519 signatures with a trusted-key registry; undo trail; garbage collection | ✅ |
+| Server and protocol: clone/push/pull, CAS refs, leases, SSE | Hosting | ✅ (single node) |
+| SSH-key sign-in, scoped tokens, per-repository read/write/admin | Who may see and change what | ✅ |
+| Structured PRs and reviews, policies, webhooks, web UI, git bridge | The platform | ✅ |
+| Knowledge base, context packs, MCP server, Claude Code hooks, SDKs | AI integration | ✅ |
+| Raft log, blob tiers, sharding | Replication and scale-out | 📋 Phase 2 |
 | Self-hosting, 1.0 format freeze, spec | Stability | 📋 Phase 5 |
 
 ## Quick start
@@ -210,7 +214,25 @@ agit know context x.txt                  # notes, recent commits, leases, open P
 curl -N http://127.0.0.1:7878/api/v1/repos/demo/events/stream?since=0   # live events (SSE)
 ```
 
-Set `AGIT_SERVER_TOKEN` on the server and `AGIT_TOKEN` on clients for bearer authentication.
+The server above is open (anyone who can reach the port is root), which is fine on `127.0.0.1`. For anything reachable, see [Security](#security-ssh-keys-scopes-closed-by-default): one flag makes it closed, and your SSH key gets you in.
+
+### Security: SSH keys, scopes, closed by default ✅
+
+Not everyone should see or push to a repository. agit's server authenticates people with the SSH keys they already have, gives every key or token per-repository `read`, `write` or `admin` scopes, and is closed the moment it knows one admin key:
+
+```sh
+agit-server --data-dir ./agit-data --listen 0.0.0.0:7878 --admin-key ~/.ssh/id_ed25519.pub
+```
+
+```sh
+agit auth login --url http://agit.internal:7878/api/v1      # signs a challenge with ~/.ssh/id_ed25519 (or via ssh-agent)
+agit auth key add ~/dana.pub --name "dana laptop" --scope shop:write --scope docs:read
+agit auth key add reviewer.pub --agent reviewer-1 --scope shop:write   # sessions always act as reviewer-1
+agit auth token create --name ci-deploy --agent ci-bot --scope shop:write --ttl 30d   # for agents and CI
+agit auth whoami
+```
+
+`agit push`, `agit pull` and friends sign in by themselves when the server answers `401`, and cache the session (8 hours by default). A key sees only the repositories it has a scope on; removing a key revokes its sessions; every denial and mutation lands in `audit.jsonl`. A server without an admin key or root token refuses to start on a non-loopback address unless you pass `--allow-open`. Details: [docs/SECURITY.md](docs/SECURITY.md), [docs/API.md](docs/API.md).
 
 ### Web UI quick start ✅
 
@@ -361,6 +383,10 @@ Branch on `code`, never on `message`. Current codes:
 | `workspace_exists` | workspace name taken | no |
 | `workspace_not_found` | no such workspace | no |
 | `lock_timeout` | could not acquire an internal lock in time | **yes** |
+| `non_fast_forward` | push would lose remote commits; pull first or `--force` | no |
+| `policy_violation` | server policy refused the change (protected branch, missing intent or approvals) | no |
+| `unauthorized` | server: no usable credentials (sign in with `agit auth login` or set `AGIT_TOKEN`) | no |
+| `forbidden` | server: credentials lack the scope the request needs | no |
 | `invalid` | invalid argument or state | no |
 | `io` | filesystem error (path in message) | no |
 | `serde` | serialization error | no |
@@ -371,11 +397,11 @@ Branch on `code`, never on `message`. Current codes:
 
 Agents pay per token. Planned views trim output to what a model needs: `agit diff --compact` (hunks without context, paths grouped), `agit status --short-json` (counts and paths only), `agit log --limit N --fields id,intent,agent`.
 
-### Context packs 📋
+### Context packs ✅
 
-`agit context <path|task>` returns, in one call, the files relevant to a path or task, their recent history, open leases on them, related PRs, and the knowledge notes whose tags match. One request instead of eight.
+`agit know context <path>` (and `GET /repos/{repo}/context?path=…&include=files&budget=6000`) returns, in one call, the notes covering a path, the tags to use, its recent history, open leases on it, related PRs, the agents active there and, within a token budget, the file and its siblings. One request instead of eight.
 
-### MCP server ✅ and SDKs 📋
+### MCP server ✅ and SDKs ✅
 
 `agit mcp` runs a Model Context Protocol server over stdio with 33 tools: status, log, show, diff, read_file, ls, add, commit (with intent/task/agent), checkpoint, restore, branches, switch, merge, leases (claim/release/list/check), events, workspaces, push, pull, pull requests (create/list/view/review/comment/merge), context, and knowledge (search/get/add). Tool results carry the same JSON as the CLI; failures come back as `isError` with the same error codes.
 
@@ -402,6 +428,23 @@ with AgentSession(client, "demo", "coder-1") as s:
 
 **TypeScript SDK ✅** (`sdk/typescript`, `@agit/sdk`, zero dependencies, ESM + CJS, Node 18+/Deno/Bun/browsers): the same surface as the Python SDK, SSE streaming over `fetch` with reconnect, typed errors, `AgentSession` with `withLeases(paths, fn)`. The step-by-step agent workflow is in [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md).
 
+### agit with Claude Code ✅
+
+Claude Code can use git today, through the shell. What it cannot do with git is coordinate with other agents, remember what the team knows about a path, or be stopped from editing a file someone else is working on. With agit it can, and most of it needs no cooperation from the model because Claude Code hooks enforce it:
+
+| What happens | git with Claude | agit with Claude Code |
+| --- | --- | --- |
+| Before Claude edits a file | nothing | the `PreToolUse` hook calls `agit know context <path>`: notes (gotchas, decisions), suggested tags, open PRs touching the path, other agents' leases appear in Claude's context |
+| Another agent owns the file | both edit, conflict at merge time | the hook **blocks the edit** (`lease_conflict`, who holds it, when it expires) before the write happens |
+| After an edit | nothing | the `PostToolUse` hook claims a 30-minute exclusive lease on the path, so the next agent sees it |
+| Claude stops or hands over | uncommitted mess | the `Stop` hook records a checkpoint of the whole tree, untracked files included, outside branch history |
+| `git commit -m "fix"` | accepted | `agit commit` without `--intent` is refused; the commit carries intent, task, agent id, model and run id, signed with the agent's key if one exists |
+| Reviewing and merging | prose in a PR UI | `agit pr create|review|merge` with structured comments (`blocker`, `suggestion`, `question`) and server-enforced policies (approvals, required checks, who may merge) |
+| What Claude learned | lost with the transcript | `agit know add` stores it as a note with typed tags next to the code; the next session reads it before touching the path |
+| Identity and access | a shared token or none | the agent signs in with its own key or a scoped token bound to its id; the server knows which agent did what and refuses what it may not |
+
+Two halves, usable separately: the MCP server (`agit mcp`, 33 tools with the same JSON and error codes as the CLI) and five hook scripts installed with `integrations/claude-code/install.sh`. Setup, the session transcript and troubleshooting: [docs/CLAUDE-CODE.md](docs/CLAUDE-CODE.md). The same loop works for any agent framework through the CLI, the HTTP API or the SDKs: [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md).
+
 ### Idempotency 📋
 
 Mutating server operations will accept an idempotency key so a retried push after a dropped connection applies once. Locally, object writes are already idempotent (same content, same id, no-op) and ref updates are CAS, which together make retry-after-crash safe today.
@@ -410,13 +453,13 @@ Mutating server operations will accept an idempotency key so a retried push afte
 
 Status per item is marked. The first server exists today (`crates/agit-server`, single node, file-backed); the distributed design is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the RFCs.
 
-**Server (`crates/agit-server`).** ✅ today: repositories, compare-and-swap ref updates (atomic multi-ref), object upload/fetch with want/have negotiation, browsing endpoints (tree, commits, diff, blame), server-wide leases, event log with SSE stream, root token plus scoped tokens (read/write/admin per repository, optional expiry) bound to agent identities so `X-Agit-Agent` cannot be spoofed, audit log, signing-key registry, static hosting of the web UI. 📋 next: organisations and users, per-repository append-only commit log replicated with Raft, ref CAS decided at the log head; content-addressed blob store with a local disk tier and an S3-compatible tier, deduplicated across repositories; horizontal sharding by repository. Streaming pack protocol over HTTP/2 and gRPC (`crates/agit-protocol`).
+**Server (`crates/agit-server`).** ✅ today: repositories, compare-and-swap ref updates (atomic multi-ref), object upload/fetch with want/have negotiation, browsing endpoints (tree, commits, diff, blame), server-wide leases, event log with SSE stream, SSH-key sign-in (challenge/response with Ed25519, authorized keys with scopes, admin keys from the command line) plus root and scoped tokens (read/write/admin per repository, optional expiry) bound to agent identities so `X-Agit-Agent` cannot be spoofed, closed by default off loopback, audit log, signing-key registry, static hosting of the web UI. 📋 next: organisations and users, per-repository append-only commit log replicated with Raft, ref CAS decided at the log head; content-addressed blob store with a local disk tier and an S3-compatible tier, deduplicated across repositories; horizontal sharding by repository. Streaming pack protocol over HTTP/2 and gRPC (`crates/agit-protocol`).
 
 **Pull requests and reviews.** ✅ today: structured PRs (title, intent, task, author agent), structured comments (path, line, kind, resolution), reviews (approve / request changes / comment), checks, mergeability with conflict preview, server-side merge (three-way or fast-forward) with CAS on the target branch, `agit pr create|list|view|review|comment|merge|close`. 📋 next: policies and required checks. A PR is a structured object: title, intent, task, agent, reviewers, checks, decision log. Review comments are structured too: path, range, kind (`question`, `suggestion`, `blocker`), resolution. Agents open, review and merge PRs through the same API humans use; policies decide which agents may merge what. [RFC 0005](docs/rfcs/0005-pull-requests-and-reviews.md).
 
 **Policies.** ✅ per-repository policy (`GET/PUT /repos/{repo}/policy`): protected branches (names or globs), pull-request-only, minimum approvals (latest decision per reviewer, author excluded), block on `request_changes` and unresolved `blocker` comments, required checks, allowed merge/push agents, `require_intent`, `require_agent`, `max_files_per_commit`. Enforced at ref update and PR merge; violations are `403 policy_violation`.
 
-**Web UI (`web/`).** ✅ first version: Vite + React + TypeScript, no UI kit, light and dark. Code browsing with syntax highlighting and a file finder, commits with agent/intent/task filters, commit diffs, pull requests with conversation, reviews, inline comments and merge, live agent activity from the SSE stream, a lease board with expiry countdowns, and the knowledge browser with tag filters and the per-path context panel. Runs against the server or in mock mode (`VITE_AGIT_MOCK=1`); `agit-server --web-dir web/dist` serves it from the same process. 📋 next: blame, symbol navigation, server-side rendering. Clean, GitHub-like, fast. Code browsing with syntax highlighting and symbol navigation, history and blame, diffs, PRs and reviews, branches and workspaces, live agent activity from the event stream, a lease board showing who is working where, and a knowledge browser. TypeScript and React with server-side rendering. The UI uses only the public API that agents use; there are no private endpoints. [RFC 0006](docs/rfcs/0006-web-ui.md).
+**Web UI (`web/`).** ✅ Vite + React + TypeScript, no UI kit, light and dark. Code browsing with syntax highlighting, a file finder, search and blame; commits with agent/intent/task filters and signature status; diffs and compare; pull requests with conversation, reviews, inline comments, checks and merge; live agent activity from the SSE stream; a lease board with expiry countdowns; the knowledge browser with tag filters, staleness and the per-path context panel; settings for policy, webhooks, tag rules and signing keys; admin pages for SSH keys and tokens; notifications. Runs against the server or in mock mode (`VITE_AGIT_MOCK=1`); `agit-server --web-dir web/dist` serves it from the same process. The UI uses only the public API that agents use; there are no private endpoints. 📋 next: symbol navigation, server-side rendering. [RFC 0006](docs/rfcs/0006-web-ui.md).
 
 **Webhooks and event streaming.** ✅ SSE stream (`/events/stream?since=`), polling (`/events?since=`), and webhooks (`/repos/{repo}/webhooks`) with kind filters, retries and BLAKE3-keyed signatures. 📋 WebSocket.
 
@@ -428,29 +471,30 @@ Status per item is marked. The first server exists today (`crates/agit-server`, 
 
 The headline target is **100,000 micro-commits per second platform-wide**, with 10k to 20k per second per shard for a hot repository and more than 10k per second on one laptop core for small local commits.
 
-**These are targets, not measurements.** Phase 0 still writes loose objects and one ref file per commit. The first measurements below are from a single laptop and exist to keep us honest, not to make a claim.
+**These are targets, not measurements.** The measurements below are from a single laptop and exist to keep us honest, not to make a claim.
 
-First measurements (Phase 0, macOS, Apple Silicon, APFS, 2,000-file tree, CLI against CLI, median of 200 runs):
+Measured (macOS, Apple Silicon, APFS, 2,000-file tree; CLI against CLI is the median of 200 runs, in-process numbers are 3,000 commits in one process):
 
 | Operation | git 2.x | agit 0.1 |
 | --- | ---: | ---: |
-| `add` + `commit` of one changed file | 34.6 ms | 12.5 ms |
-| `status` on a clean tree | 15.3 ms | 11.1 ms |
-| `log -n 20` | 12.7 ms | 3.4 ms |
-| in-process `add` + `commit` (library, default durability) | n/a | ~7.5 ms (~134/s) |
-| in-process `add` + `commit` (library, `AGIT_FSYNC=none`) | n/a | ~2.7 ms (~370/s) |
+| `add` + `commit` of one changed file (CLI) | 34.6 ms | 12.5 ms |
+| `status` on a clean tree (CLI) | 15.3 ms | 11.1 ms |
+| `log -n 20` (CLI) | 12.7 ms | 3.4 ms |
+| in-process `add` + `commit`, default durability (`AGIT_FSYNC=refs`, one `fsync` per commit) | n/a | 3.6 ms (277/s) |
+| in-process `add` + `commit`, `AGIT_FSYNC=full` (drive cache flushed per commit) | n/a | 8.3 ms (120/s) |
+| in-process `add` + `commit`, `AGIT_FSYNC=none` | n/a | 3.6 ms (278/s) |
 
-The gap between the last two rows is one `fsync` of the ref file. That single syscall is what the Phase 1 journal with group commit amortizes over a whole batch. Method and raw numbers: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
+Objects go into append-only pack segments and ref updates into a journal with group commit, so one commit is one append and one `fsync`. On macOS the standard library's sync flushes the drive cache (`F_FULLFSYNC`); git does not do that, and since 2026-10-19 neither does agit at the default level, which is where the 2.1x in the table comes from. Method, dates and raw numbers: [docs/BENCHMARKS.md](docs/BENCHMARKS.md).
 
-Durability policy ✅: like git, agit does not fsync every loose object by default. Objects are written atomically (temp file + rename) so a crash never leaves a torn object, and the ref update that makes them reachable is always synced. `AGIT_FSYNC=all` syncs everything, `AGIT_FSYNC=none` syncs nothing (throwaway CI repositories).
+Durability policy ✅: like git, agit does not fsync every object. Objects are written atomically (an append that is only referenced after its index is published, or temp file + rename) so a crash never leaves a torn object, and the journal record that makes them reachable is synced with `fsync(2)`. `AGIT_FSYNC=full` adds a full flush to stable storage (power-loss safe on Apple hardware), `all` flushes every write, `none` nothing (throwaway CI repositories).
 
 How the design gets there:
 
 - **BLAKE3.** Several times faster than SHA-1 and SHA-256 on one core, and parallel over large inputs (agit already switches to multi-threaded hashing above 128 KiB). Hashing stops being the bottleneck.
 - **Sizes in trees, stat cache in the index.** `status` compares mtime, inode and size before hashing anything, and never opens blobs to answer questions a tree already answers. ✅
 - **zstd objects.** Level 3, a good speed/ratio trade-off for source text. ✅
-- **No per-object fsync in bulk paths.** 📋 Objects go into append-only pack segments (`packs/*.seg`) with an in-memory and on-disk index; loose objects remain only for tiny repositories.
-- **Journal with group commit.** 📋 Micro-commits append to `journal/` and one fsync covers a whole batch. At a 5 ms batching window and 10k commits per second, that is 50 commits per fsync and 200 fsyncs per second, well inside what a single NVMe device sustains.
+- **No per-object fsync in bulk paths.** ✅ Objects go into append-only pack segments (`objects/pack/*.agp`) with an on-disk index that is published on flush; loose objects are only read for compatibility.
+- **Journal with group commit.** ✅ Ref updates append to `refs.journal` and concurrent writers share one fsync; a lone writer never waits. The remaining per-commit costs are index load/save and the segment index rewrite, both on the list.
 - **Memory-mapped ref table with CAS.** 📋 Ref updates stop being file renames.
 - **Parallel tree walking.** `status` at one million files is a Phase 1 benchmark target.
 - **Server: Raft log per repository, batched fsync, blob tiers, sharding by repository.** 📋 Throughput scales with the number of shards; the per-shard figure is bounded by log replication, not by object writes.
@@ -467,24 +511,29 @@ agit/
   crates/
     agit-core/        ✅     object model, store, index, refs, diff, merge,
                              leases, events, workspaces, revisions (library)
-    agit-cli/         ✅     the `agit` binary (clap), human + --json output
-    agit-protocol/    📋     wire protocol, pack streaming, auth
-    agit-server/      📋     hosting server: repos, refs, PRs, knowledge, API
-    agit-knowledge/   📋     knowledge base: tagged notes linked to code
-    agit-git-bridge/  📋     import/export/sync with git repositories
-  web/                📋     web UI (GitHub-like, clean): code browsing,
-                             history, PRs/reviews, agent activity, knowledge
+    agit-cli/         ✅     the `agit` binary (clap), human + --json output,
+                             `agit mcp`, `agit auth`
+    agit-protocol/    ✅     wire types, object streams, HTTP client, push/
+                             fetch/clone, SSH-key sign-in, local knowledge
+    agit-server/      ✅     hosting server: repos, refs, PRs, policies,
+                             leases, webhooks, knowledge, auth, events
+    agit-git-bridge/  ✅     import/export with git repositories
+  web/                ✅     web UI: code browsing, history, PRs/reviews,
+                             agent activity, leases, knowledge, admin
   sdk/
-    python/           📋     agent SDK
-    typescript/       📋     agent SDK
+    python/           ✅     agent SDK (zero dependencies)
+    typescript/       ✅     agent SDK (zero dependencies)
+  integrations/
+    claude-code/      ✅     hooks, MCP config, installer, self-test
   docs/
     ARCHITECTURE.md          deep dive
     ROADMAP.md               phases
+    handbook/                the complete handbook (mdBook)
     rfcs/                    design documents, one per subsystem
   spec/               📋     on-disk + wire format spec (versioned)
 ```
 
-Planned sub-repositories: `agit-server`, `agit-protocol`, `agit-knowledge`, `agit-git-bridge`, `web`, `sdk/python`, `sdk/typescript`, `spec`. The core and CLI stay in the main repository. The 📋 directories currently contain only a README describing the component.
+Planned sub-repositories: `agit-server`, `agit-protocol`, `agit-git-bridge`, `web`, `sdk/python`, `sdk/typescript`, `spec`. The core and CLI stay in the main repository.
 
 ## Comparison with git
 
@@ -503,20 +552,21 @@ Planned sub-repositories: `agit-server`, `agit-protocol`, `agit-knowledge`, `agi
 | Change notification | poll | `events.jsonl`, `agit events --follow` |
 | Commit metadata | message, author, committer | plus intent, task, agent{id, model, run_id, on_behalf_of}, meta |
 | Tree entries | mode, id, name | plus size (status without opening blobs) |
-| Knowledge | outside the repo | 📋 versioned note objects with typed tags |
-| Throughput design | one process, per-object writes | 📋 pack segments, journal + group commit, Raft log, sharding |
-| Hosting | GitHub, GitLab, and others | 📋 agit-server with structured PRs, policies, event streaming |
-| Maturity | 20 years | Phase 0 |
+| Knowledge | outside the repo | notes with typed tags, staleness, drafts from merges, context packs |
+| Access control | per hosting platform | SSH-key sign-in and scoped tokens per repository, on the server itself |
+| Throughput design | one process, per-object writes | pack segments, journal + group commit ✅; Raft log, sharding 📋 |
+| Hosting | GitHub, GitLab, and others | agit-server with structured PRs, policies, webhooks, event streaming, knowledge |
+| Maturity | 20 years | pre-1.0, single-node server |
 
 ## Roadmap
 
 | Phase | Theme | Status |
 | --- | --- | --- |
-| 0 | Local core: objects, index, commit, status, diff, branch, merge, leases, events, workspaces, checkpoints, JSON output, tests | ✅ / 🚧 |
-| 1 | Performance: pack segments, journal + group commit, mmap ref table, parallel status at 1M files, published benchmarks vs git | 📋 |
-| 2 | Protocol + server: clone/push/pull, auth, Raft log, blob tiers | 🚧 (clone/push/pull, CAS refs, token auth ✅; Raft, blob tiers 📋) |
-| 3 | Platform: PRs, reviews, policies, webhooks, event streaming, web UI (code browsing first, then PRs), git bridge | 🚧 (PRs, reviews, SSE, policies, webhooks, web UI v1, git import/export ✅; git protocol serving 📋) |
-| 4 | Knowledge base + AI integration: notes, tags, query API, context packs, MCP server, SDKs | 🚧 (notes, typed tags, tag rules, query API, `context` endpoint, MCP server ✅; SDKs 📋) |
+| 0 | Local core: objects, index, commit, status, diff, branch, merge, leases, events, workspaces, checkpoints, JSON output, tests | ✅ |
+| 1 | Performance: pack segments, journal + group commit, mmap ref table, parallel status at 1M files, published benchmarks vs git | 🚧 (pack segments, journal + group commit, tree cache, benchmarks ✅; mmap ref table, 1M-file status, token-efficient views 📋) |
+| 2 | Protocol + server: clone/push/pull, auth, Raft log, blob tiers | 🚧 (clone/push/pull, CAS refs, SSH-key and token auth with scopes ✅; Raft, blob tiers, sharding 📋) |
+| 3 | Platform: PRs, reviews, policies, webhooks, event streaming, web UI, git bridge | ✅ (git protocol serving 📋) |
+| 4 | Knowledge base + AI integration: notes, tags, query API, context packs, MCP server, SDKs | ✅ (in-repo note objects and embeddings 📋) |
 | 5 | Self-hosting: agit repo managed by agit, 1.0 format freeze, spec | 📋 |
 
 Deliverables, acceptance criteria and benchmark targets per phase are in [docs/ROADMAP.md](docs/ROADMAP.md).

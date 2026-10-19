@@ -8,16 +8,32 @@ Base path: `/api/v1`. All ids are 64-hex BLAKE3. Success bodies are plain JSON (
 
 Two headers matter:
 
-- `Authorization: Bearer <token>`: the root token (`AGIT_SERVER_TOKEN`) or a scoped token from `POST /auth/tokens`. Required on every request under `/api/v1` when a root token is configured. Without a root token the server runs in *open mode* (every request is an anonymous root) for local development.
+- `Authorization: Bearer <token>`: a session token from an SSH-key sign-in (`POST /auth/session`), a scoped token from `POST /auth/tokens`, or the root token (`AGIT_SERVER_TOKEN`). Required on every request under `/api/v1` once the server is closed (a root token or an admin key is configured). Without either the server runs in *open mode* (every request is an anonymous root) for local development.
 - `X-Agit-Agent: <id>`: the acting agent, recorded in events, leases, PRs, reviews and notes. A token bound to an agent overrides this header. (The CLI sends `AGIT_AGENT`; `X-Agit-Model` is also read into PR authorship.)
 
 ```sh
 $ curl -s -i $U/repos | head -1
-HTTP/1.1 403 Forbidden
-{"ok":false,"error":{"code":"forbidden","message":"missing or invalid bearer token","retryable":false}}
+HTTP/1.1 401 Unauthorized
+{"ok":false,"error":{"code":"unauthorized","message":"missing bearer token: sign in with an SSH key (`agit auth login`) or set AGIT_TOKEN","retryable":false}}
 $ curl -s -H "$H" $U/auth/whoami
 {"principal":"root","root":true,"scopes":[]}
 ```
+
+`401 unauthorized` means no usable credentials; `403 forbidden` means the credentials lack the scope the request needs.
+
+SSH-key sign-in is two public calls. `agit auth login` does them for you; by hand, with `ssh-keygen` for the signature:
+
+```sh
+$ curl -s -X POST $U/auth/challenge
+{"nonce":"5f1c…","expires_ms":1792093333000}
+$ printf 'agit-auth-v1\n5f1c…' > msg && ssh-keygen -Y sign -n agit -f ~/.ssh/id_ed25519 msg   # produces msg.sig (SSH signature format)
+# the API wants the raw 64-byte Ed25519 signature as hex; the CLI and SDKs (`loginWithKey`, `login_with_key`) do this directly
+$ curl -s -X POST -H 'content-type: application/json' $U/auth/session \
+    -d '{"public_key":"'"$(cat ~/.ssh/id_ed25519.pub)"'","nonce":"5f1c…","signature":"<hex>","ttl_secs":28800}'
+{"token":"agit_2b7e…","id":"tok_9a01…","name":"session: dana laptop","agent":null,"scopes":[{"repo":"shop","access":"write"}],"created_ms":…,"expires_ms":…,"created_by":"key_4c2a…","key":"key_4c2a…"}
+```
+
+Keys are managed under `/auth/keys` (admin): `GET` lists `{id, name, fingerprint, key_id, public_key, agent, scopes, created_ms, created_by, last_used_ms}`, `POST {public_key, name?, agent?, scopes}` authorizes one, `DELETE /auth/keys/{id}` removes it and revokes its sessions. `POST /auth/logout` revokes the caller's own token.
 
 `GET /health` is served **without** a token (`{"status":"ok","version":"0.1.0"}`), which is convenient for load balancers; DEPLOYMENT.md still describes it as protected.
 
@@ -39,7 +55,7 @@ Access needed per request: `GET` is read, other methods are write, and repositor
 {"time_ms":1792093214018,"principal":"tok_803401c4e6","agent":"coder-1","method":"PUT","path":"/repos/demo/policy","status":403}
 ```
 
-`GET /auth/tokens` lists tokens (hashes only), `DELETE /auth/tokens/{id}` revokes; a revoked token gets `403` immediately. One caveat observed: the bound agent replaces the `X-Agit-Agent` header, but a `holder` field inside a request body (`POST /leases`) is taken as given, so bound identity is not yet enforced on lease holders.
+`GET /auth/tokens` lists tokens (hashes only; session tokens carry `key`), `DELETE /auth/tokens/{id}` revokes; a revoked token gets `401` immediately. One caveat observed: the bound agent replaces the `X-Agit-Agent` header, but a `holder` field inside a request body (`POST /leases`) is taken as given, so bound identity is not yet enforced on lease holders.
 
 ## The error envelope
 

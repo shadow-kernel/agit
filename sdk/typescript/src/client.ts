@@ -136,7 +136,8 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 
 export class AgitClient {
   readonly baseUrl: string;
-  readonly token: string | undefined;
+  /** Bearer token sent on every request; `loginWithKey` sets it, `logout` clears it. */
+  token: string | undefined;
   readonly agent: string | undefined;
   readonly model: string | undefined;
   readonly timeoutMs: number;
@@ -616,6 +617,89 @@ export class AgitClient {
     delete: (repo: string, keyId: string, opts?: RequestOptions) => this.deleteKey(repo, keyId, opts),
   };
 
+  // ---- auth: identity, SSH-key sessions, tokens, authorized keys -------------
+
+  /** What the server makes of this client's credentials (`GET /auth/whoami`). */
+  whoami(opts?: RequestOptions): Promise<T.WhoAmI> {
+    return this.request("GET", "/auth/whoami", opts);
+  }
+  /** A single-use nonce to sign with an SSH key; needs no token. */
+  challenge(opts?: RequestOptions): Promise<T.Challenge> {
+    return this.request("POST", "/auth/challenge", opts);
+  }
+  /**
+   * Redeem a signed challenge for a session token (`POST /auth/session`; needs no token). The
+   * signature is the 64-byte Ed25519 signature over `authMessage(nonce)`, raw bytes or hex. The
+   * token carries the scopes registered for the key under `/auth/keys`; it is not stored on this
+   * client (see `loginWithKey`).
+   */
+  createSession(session: Omit<T.SessionCreate, "signature"> & { signature: string | Uint8Array }, opts?: RequestOptions): Promise<T.TokenCreated> {
+    const signature = typeof session.signature === "string" ? session.signature : toHex(session.signature);
+    return this.request("POST", "/auth/session", { ...opts, body: { ...session, signature } });
+  }
+  /**
+   * Sign in with an SSH key and use the session token from now on. `publicKey` is the
+   * `ssh-ed25519 …` line (or 64-hex key) registered on the server; `sign` receives the challenge
+   * bytes and returns the 64-byte Ed25519 signature (for example `crypto.sign(null, data, key)` in
+   * Node). No signing code is bundled: `agit auth login --print-token` on the command line gives
+   * the same token without any.
+   */
+  async loginWithKey(args: { publicKey: string; sign: (message: Uint8Array) => Uint8Array | Promise<Uint8Array>; ttlSecs?: number }, opts?: RequestOptions): Promise<T.TokenCreated> {
+    const ch = await this.challenge(opts);
+    const signature = await args.sign(authMessage(ch.nonce));
+    const created = await this.createSession({ public_key: args.publicKey, nonce: ch.nonce, signature, ttl_secs: args.ttlSecs }, opts);
+    this.token = created.token;
+    return created;
+  }
+  /** Revoke the token this client uses (`POST /auth/logout`) and forget it. */
+  async logout(opts?: RequestOptions): Promise<T.LogoutResponse> {
+    const out = await this.request<T.LogoutResponse>("POST", "/auth/logout", opts);
+    this.token = undefined;
+    return out;
+  }
+  /** Every token (admin; metadata only). */
+  listTokens(opts?: RequestOptions): Promise<T.TokenInfo[]> {
+    return this.request("GET", "/auth/tokens", opts);
+  }
+  /** Mint a scoped token (admin). The plaintext is in `.token` exactly once; a caller can only grant what it holds. */
+  createToken(token: T.TokenCreate, opts?: RequestOptions): Promise<T.TokenCreated> {
+    return this.request("POST", "/auth/tokens", { ...opts, body: token });
+  }
+  deleteToken(id: string, opts?: RequestOptions): Promise<T.DeleteTokenResponse> {
+    return this.request("DELETE", `/auth/tokens/${enc(id)}`, opts);
+  }
+  /** SSH keys allowed to sign in (admin). Startup `--admin-key` keys are not listed. */
+  listAuthorizedKeys(opts?: RequestOptions): Promise<T.AuthorizedKey[]> {
+    return this.request("GET", "/auth/keys", opts);
+  }
+  /** Authorize an `ssh-ed25519 …` public key with scopes (admin); `agent` binds its sessions to that identity. The same key twice is a 409 `already_exists`. */
+  addAuthorizedKey(key: T.AuthorizedKeyCreate, opts?: RequestOptions): Promise<T.AuthorizedKey> {
+    return this.request("POST", "/auth/keys", { ...opts, body: key });
+  }
+  /** Remove a key and revoke every session it opened. */
+  deleteAuthorizedKey(id: string, opts?: RequestOptions): Promise<T.DeleteAuthorizedKeyResponse> {
+    return this.request("DELETE", `/auth/keys/${enc(id)}`, opts);
+  }
+
+  /** Auth operations grouped by resource (same calls as the flat methods). */
+  readonly auth = {
+    whoami: (opts?: RequestOptions) => this.whoami(opts),
+    challenge: (opts?: RequestOptions) => this.challenge(opts),
+    createSession: (session: Parameters<AgitClient["createSession"]>[0], opts?: RequestOptions) => this.createSession(session, opts),
+    loginWithKey: (args: Parameters<AgitClient["loginWithKey"]>[0], opts?: RequestOptions) => this.loginWithKey(args, opts),
+    logout: (opts?: RequestOptions) => this.logout(opts),
+    tokens: {
+      list: (opts?: RequestOptions) => this.listTokens(opts),
+      create: (token: T.TokenCreate, opts?: RequestOptions) => this.createToken(token, opts),
+      delete: (id: string, opts?: RequestOptions) => this.deleteToken(id, opts),
+    },
+    keys: {
+      list: (opts?: RequestOptions) => this.listAuthorizedKeys(opts),
+      add: (key: T.AuthorizedKeyCreate, opts?: RequestOptions) => this.addAuthorizedKey(key, opts),
+      delete: (id: string, opts?: RequestOptions) => this.deleteAuthorizedKey(id, opts),
+    },
+  };
+
   // ---- context & activity ---------------------------------------------------
 
   /**
@@ -637,4 +721,15 @@ export class AgitClient {
   listAgents(repo: string, opts?: RequestOptions): Promise<T.AgentActivity[]> {
     return this.request("GET", `${repoPath(repo)}/agents`, opts);
   }
+}
+
+/** The exact bytes a client signs to redeem a challenge: `agit-auth-v1\n<nonce>`. */
+export function authMessage(nonce: string): Uint8Array {
+  return new TextEncoder().encode(`agit-auth-v1\n${nonce}`);
+}
+
+function toHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
 }

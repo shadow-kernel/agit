@@ -18,12 +18,14 @@ import socket
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence, Callable
 
 from .errors import AgitError, TransportError
 from .types import (
     AgentActivity,
+    AuthorizedKey,
     BranchEntry,
+    Challenge,
     Comment,
     CommitDetail,
     CommitEntry,
@@ -43,10 +45,15 @@ from .types import (
     RefUpdate,
     RefUpdateResponse,
     RepoSummary,
+    Scope,
     StaleNote,
     TagCount,
     TagRule,
+    TokenCreated,
+    TokenInfo,
+    WhoAmI,
     as_list,
+    auth_message,
     expect_absent,
     expect_any,
     expect_is,
@@ -65,6 +72,12 @@ _UNSET: Any = object()
 def _seg(value: Any) -> str:
     """Percent-encode one path segment (``/`` included, so ``refs/heads/x`` stays one segment)."""
     return urllib.parse.quote(str(value), safe="")
+
+
+def _scope_dict(s: "Scope | Mapping[str, str]") -> dict[str, str]:
+    if isinstance(s, Scope):
+        return s.to_dict()
+    return {"repo": str(s["repo"]), "access": str(s["access"])}
 
 
 def _query(params: Mapping[str, Any] | None) -> str:
@@ -550,6 +563,106 @@ class Client:
     def delete_key(self, repo: str, key_id: str) -> dict[str, Any]:
         """Revoke a key by its ``key_id``. Returns ``{"deleted": key_id}``."""
         return self.request("DELETE", f"/repos/{_seg(repo)}/keys/{_seg(key_id)}") or {}
+
+    # -- auth: identity, SSH-key sessions, tokens, authorized keys -----------
+
+    def whoami(self) -> WhoAmI:
+        """What the server makes of this client's credentials (``GET /auth/whoami``)."""
+        return WhoAmI.from_dict(self._get("/auth/whoami"))
+
+    def challenge(self) -> Challenge:
+        """A single-use nonce to sign with an SSH key; needs no token."""
+        return Challenge.from_dict(self.request("POST", "/auth/challenge"))
+
+    def create_session(
+        self,
+        public_key: str,
+        nonce: str,
+        signature: bytes | str,
+        ttl_secs: int | None = None,
+    ) -> TokenCreated:
+        """Redeem a signed challenge (``POST /auth/session``) for a session token.
+
+        ``signature`` is the 64-byte Ed25519 signature over :func:`auth_message` (raw
+        bytes or hex). The token carries the scopes registered for the key under
+        ``/auth/keys``; it is *not* stored on this client (see :meth:`login_with_key`).
+        """
+        sig_hex = signature.hex() if isinstance(signature, (bytes, bytearray)) else str(signature)
+        body = _drop_none({"public_key": public_key, "nonce": nonce, "signature": sig_hex, "ttl_secs": ttl_secs})
+        return TokenCreated.from_dict(self._post("/auth/session", body))
+
+    def login_with_key(
+        self,
+        public_key: str,
+        sign: Callable[[bytes], bytes],
+        ttl_secs: int | None = None,
+    ) -> TokenCreated:
+        """Sign in with an SSH key and use the session token from now on.
+
+        ``public_key`` is the ``ssh-ed25519 …`` line (or 64-hex key) registered on the
+        server; ``sign`` receives the challenge bytes and returns the 64-byte Ed25519
+        signature (for example ``cryptography``'s ``Ed25519PrivateKey.sign``). No
+        signing library is bundled: ``agit auth login --print-token`` on the command
+        line gives the same token without one.
+        """
+        ch = self.challenge()
+        created = self.create_session(public_key, ch.nonce, sign(auth_message(ch.nonce)), ttl_secs)
+        self.token = created.token
+        return created
+
+    def logout(self) -> dict[str, Any]:
+        """Revoke the token this client uses (``POST /auth/logout``) and forget it."""
+        out = self.request("POST", "/auth/logout") or {}
+        self.token = None
+        return out
+
+    def tokens(self) -> list[TokenInfo]:
+        """Every token (admin; metadata only)."""
+        return TokenInfo.list_from(self._get("/auth/tokens"))
+
+    def create_token(
+        self,
+        name: str,
+        scopes: Sequence[Scope | Mapping[str, str]],
+        *,
+        agent: str | None = None,
+        ttl_secs: int | None = None,
+    ) -> TokenCreated:
+        """Mint a scoped token (admin). The plaintext is in ``.token`` exactly once.
+
+        ``scopes`` are ``Scope`` objects or ``{"repo": "demo", "access": "write"}``
+        mappings; ``repo`` may be ``*``. A caller can only grant what it holds.
+        """
+        body = _drop_none({"name": name, "agent": agent, "scopes": [_scope_dict(s) for s in scopes], "ttl_secs": ttl_secs})
+        return TokenCreated.from_dict(self._post("/auth/tokens", body))
+
+    def delete_token(self, token_id: str) -> dict[str, Any]:
+        """Revoke a token by id (admin). Returns ``{"deleted": id}``."""
+        return self.request("DELETE", f"/auth/tokens/{_seg(token_id)}") or {}
+
+    def authorized_keys(self) -> list[AuthorizedKey]:
+        """SSH keys allowed to sign in (admin). Startup ``--admin-key`` keys are not listed."""
+        return AuthorizedKey.list_from(self._get("/auth/keys"))
+
+    def add_authorized_key(
+        self,
+        public_key: str,
+        scopes: Sequence[Scope | Mapping[str, str]],
+        *,
+        name: str | None = None,
+        agent: str | None = None,
+    ) -> AuthorizedKey:
+        """Authorize an ``ssh-ed25519 …`` public key with ``scopes`` (admin).
+
+        ``agent`` binds every session opened with the key to that identity. The same
+        key twice raises :class:`~agit.errors.AlreadyExists` (409).
+        """
+        body = _drop_none({"public_key": public_key, "name": name, "agent": agent, "scopes": [_scope_dict(s) for s in scopes]})
+        return AuthorizedKey.from_dict(self._post("/auth/keys", body))
+
+    def delete_authorized_key(self, key_id: str) -> dict[str, Any]:
+        """Remove a key and revoke its sessions. Returns ``{"deleted": id, "revoked_sessions": n}``."""
+        return self.request("DELETE", f"/auth/keys/{_seg(key_id)}") or {}
 
     # -- webhooks -----------------------------------------------------------
 

@@ -1,5 +1,12 @@
 //! Blocking HTTP client for the agit server API (used by the CLI and tests).
 
+// `ureq::Error` is large by design; the request closures hand it straight to
+// `map_err`, so boxing it would only add noise.
+#![allow(clippy::result_large_err)]
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use agit_core::{Error, ObjectId, Result};
@@ -12,9 +19,16 @@ use crate::types::*;
 pub struct Client {
     /// e.g. `http://localhost:7878/api/v1`
     base: String,
-    token: Option<String>,
+    /// Shared between clones so an automatic sign-in benefits all of them.
+    token: Arc<Mutex<Option<String>>>,
     agent: Option<String>,
     http: ureq::Agent,
+    /// Sign in with an SSH key once when the server answers 401. On unless
+    /// a token was given explicitly (`AGIT_TOKEN`, `with_token`) or
+    /// `AGIT_AUTO_LOGIN=0`.
+    auto_login: bool,
+    login_tried: Arc<AtomicBool>,
+    ssh_key: Option<PathBuf>,
 }
 
 /// Parsed form of a repository URL `http(s)://host[:port]/api/v1/repos/<name>`.
@@ -116,6 +130,9 @@ fn map_err(e: ureq::Error) -> Error {
                         Error::PolicyViolation(strip_prefix(&b.error.message, "policy violation: "))
                     }
                     "forbidden" => Error::Forbidden(strip_prefix(&b.error.message, "forbidden: ")),
+                    "unauthorized" => {
+                        Error::Unauthorized(strip_prefix(&b.error.message, "unauthorized: "))
+                    }
                     "not_found" => Error::NotFound(strip_prefix(&b.error.message, "not found: ")),
                     "non_fast_forward" => Error::Invalid(b.error.message),
                     _ => Error::Invalid(format!(
@@ -131,23 +148,127 @@ fn map_err(e: ureq::Error) -> Error {
 }
 
 impl Client {
+    /// A client for `base`. The bearer token comes from `AGIT_TOKEN`, else
+    /// from the session cached by an earlier `agit auth login` (or automatic
+    /// sign-in) for this server.
     pub fn new(base: impl Into<String>) -> Self {
+        let base = base.into().trim_end_matches('/').to_string();
+        let env_token = std::env::var("AGIT_TOKEN").ok().filter(|t| !t.is_empty());
+        let explicit = env_token.is_some();
+        let token = env_token.or_else(|| crate::sshauth::cached_session(&base).map(|s| s.token));
+        let auto_login = !explicit
+            && !matches!(
+                std::env::var("AGIT_AUTO_LOGIN").as_deref(),
+                Ok("0") | Ok("off") | Ok("false") | Ok("no")
+            );
         Client {
-            base: base.into().trim_end_matches('/').to_string(),
-            token: std::env::var("AGIT_TOKEN").ok(),
+            base,
+            token: Arc::new(Mutex::new(token)),
             agent: std::env::var("AGIT_AGENT").ok(),
             http: ureq::AgentBuilder::new()
                 .timeout_connect(Duration::from_secs(10))
                 .timeout(Duration::from_secs(600))
                 .build(),
+            auto_login,
+            login_tried: Arc::new(AtomicBool::new(false)),
+            ssh_key: std::env::var_os("AGIT_SSH_KEY").map(PathBuf::from),
         }
     }
 
-    pub fn with_token(mut self, token: Option<String>) -> Self {
-        if token.is_some() {
-            self.token = token;
+    /// Use this token (and do not try an SSH sign-in when it is refused).
+    pub fn with_token(self, token: Option<String>) -> Self {
+        if let Some(t) = token {
+            *self.token.lock().unwrap() = Some(t);
+            return Client {
+                auto_login: false,
+                ..self
+            };
         }
         self
+    }
+
+    /// Prefer this SSH private key for automatic sign-in.
+    pub fn with_ssh_key(mut self, path: Option<PathBuf>) -> Self {
+        if path.is_some() {
+            self.ssh_key = path;
+        }
+        self
+    }
+
+    /// Turn the automatic SSH sign-in on 401 on or off.
+    pub fn with_auto_login(mut self, on: bool) -> Self {
+        self.auto_login = on;
+        self
+    }
+
+    pub fn token(&self) -> Option<String> {
+        self.token.lock().unwrap().clone()
+    }
+
+    pub fn set_token(&self, token: Option<String>) {
+        *self.token.lock().unwrap() = token;
+    }
+
+    /// Sign in with an SSH key (explicit path, else the usual candidates),
+    /// keep the session token on this client and cache it for later
+    /// processes. Returns the token and a description of the key used.
+    pub fn login_with_ssh_key(
+        &self,
+        key: Option<&std::path::Path>,
+        ttl_secs: Option<u64>,
+    ) -> Result<(TokenCreated, crate::sshauth::Identity)> {
+        let key = key.or(self.ssh_key.as_deref());
+        let (created, id) = crate::sshauth::login_auto(self, key, ttl_secs)?;
+        self.set_token(Some(created.token.clone()));
+        crate::sshauth::remember_session(&self.base, &created, Some(id.public.fingerprint()));
+        Ok((created, id))
+    }
+
+    /// One automatic sign-in attempt after a 401; `Ok(true)` when a token
+    /// was obtained and the request should be retried.
+    fn try_auto_login(&self) -> std::result::Result<bool, String> {
+        if !self.auto_login || self.login_tried.swap(true, Ordering::SeqCst) {
+            return Ok(false);
+        }
+        match self.login_with_ssh_key(None, None) {
+            Ok((created, id)) => {
+                eprintln!(
+                    "agit: signed in to {} as {} with ssh key {} ({})",
+                    self.base,
+                    created
+                        .info
+                        .agent
+                        .clone()
+                        .unwrap_or_else(|| created.info.name.clone()),
+                    id.public.fingerprint(),
+                    id.source
+                );
+                Ok(true)
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Run a request, signing in with an SSH key and retrying once when the
+    /// server answers 401 without a usable token.
+    fn exec<F>(&self, method: &str, path: &str, f: F) -> Result<ureq::Response>
+    where
+        F: Fn(ureq::Request) -> std::result::Result<ureq::Response, ureq::Error>,
+    {
+        match f(self.req(method, path)) {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                let err = map_err(e);
+                let Error::Unauthorized(msg) = &err else {
+                    return Err(err);
+                };
+                match self.try_auto_login() {
+                    Ok(true) => f(self.req(method, path)).map_err(map_err),
+                    Ok(false) => Err(err),
+                    Err(reason) => Err(Error::Unauthorized(format!("{msg} ({reason})"))),
+                }
+            }
+        }
     }
 
     pub fn with_agent(mut self, agent: Option<String>) -> Self {
@@ -163,7 +284,7 @@ impl Client {
 
     fn req(&self, method: &str, path: &str) -> ureq::Request {
         let mut r = self.http.request(method, &format!("{}{}", self.base, path));
-        if let Some(t) = &self.token {
+        if let Some(t) = self.token.lock().unwrap().as_deref() {
             r = r.set("Authorization", &format!("Bearer {t}"));
         }
         if let Some(a) = &self.agent {
@@ -178,7 +299,7 @@ impl Client {
     }
 
     fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
-        let resp = self.req("GET", path).call().map_err(map_err)?;
+        let resp = self.exec("GET", path, |r| r.call())?;
         resp.into_json()
             .map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
     }
@@ -189,7 +310,14 @@ impl Client {
         path: &str,
         body: &B,
     ) -> Result<T> {
-        let resp = self.req(method, path).send_json(body).map_err(map_err)?;
+        let resp = self.exec(method, path, |r| r.send_json(body))?;
+        resp.into_json()
+            .map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
+    }
+
+    /// A bodiless non-GET request (DELETE, POST without payload) returning JSON.
+    fn call_json<T: DeserializeOwned>(&self, method: &str, path: &str) -> Result<T> {
+        let resp = self.exec(method, path, |r| r.call())?;
         resp.into_json()
             .map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
     }
@@ -233,22 +361,21 @@ impl Client {
         Ok(r.missing)
     }
     pub fn upload(&self, repo: &str, stream: &[u8]) -> Result<StoreResponse> {
-        let resp = self
-            .req("POST", &format!("/repos/{repo}/objects"))
-            .set("Content-Type", crate::stream::CONTENT_TYPE)
-            .send_bytes(stream)
-            .map_err(map_err)?;
+        let resp = self.exec("POST", &format!("/repos/{repo}/objects"), |r| {
+            r.set("Content-Type", crate::stream::CONTENT_TYPE)
+                .send_bytes(stream)
+        })?;
         resp.into_json()
             .map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
     }
     pub fn fetch(&self, repo: &str, wants: &[ObjectId], haves: &[ObjectId]) -> Result<Vec<u8>> {
-        let resp = self
-            .req("POST", &format!("/repos/{repo}/fetch"))
-            .send_json(&FetchRequest {
-                wants: wants.to_vec(),
-                haves: haves.to_vec(),
-            })
-            .map_err(map_err)?;
+        let body = FetchRequest {
+            wants: wants.to_vec(),
+            haves: haves.to_vec(),
+        };
+        let resp = self.exec("POST", &format!("/repos/{repo}/fetch"), |r| {
+            r.send_json(&body)
+        })?;
         let mut out = Vec::new();
         use std::io::Read;
         resp.into_reader().read_to_end(&mut out)?;
@@ -263,12 +390,7 @@ impl Client {
         self.send_json("POST", &format!("/repos/{repo}/leases"), req)
     }
     pub fn release_lease(&self, repo: &str, id: &str) -> Result<serde_json::Value> {
-        let resp = self
-            .req("DELETE", &format!("/repos/{repo}/leases/{id}"))
-            .call()
-            .map_err(map_err)?;
-        resp.into_json()
-            .map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
+        self.call_json("DELETE", &format!("/repos/{repo}/leases/{id}"))
     }
 
     // -- pulls --
@@ -317,12 +439,7 @@ impl Client {
         )
     }
     pub fn delete_note(&self, repo: &str, id: &str) -> Result<serde_json::Value> {
-        let resp = self
-            .req("DELETE", &format!("/repos/{repo}/knowledge/notes/{id}"))
-            .call()
-            .map_err(map_err)?;
-        resp.into_json()
-            .map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
+        self.call_json("DELETE", &format!("/repos/{repo}/knowledge/notes/{id}"))
     }
     /// Notes whose covered paths changed since their `valid_at` (against `rev`, default HEAD).
     pub fn stale_notes(&self, repo: &str, rev: Option<&str>) -> Result<Vec<StaleNote>> {
@@ -360,15 +477,34 @@ impl Client {
         self.send_json("POST", &format!("/repos/{repo}/webhooks"), req)
     }
     pub fn delete_webhook(&self, repo: &str, id: &str) -> Result<serde_json::Value> {
-        let resp = self
-            .req("DELETE", &format!("/repos/{repo}/webhooks/{id}"))
-            .call()
-            .map_err(map_err)?;
-        resp.into_json()
-            .map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
+        self.call_json("DELETE", &format!("/repos/{repo}/webhooks/{id}"))
     }
     pub fn whoami(&self) -> Result<WhoAmI> {
         self.get_json("/auth/whoami")
+    }
+    /// A single-use nonce to sign with an SSH key (no token needed).
+    pub fn auth_challenge(&self) -> Result<Challenge> {
+        self.call_json("POST", "/auth/challenge")
+    }
+    /// Redeem a signed challenge for a session token (no token needed).
+    pub fn auth_session(&self, req: &SessionCreate) -> Result<TokenCreated> {
+        self.send_json("POST", "/auth/session", req)
+    }
+    /// Revoke the token this client is using and drop it.
+    pub fn logout(&self) -> Result<serde_json::Value> {
+        let r: serde_json::Value = self.call_json("POST", "/auth/logout")?;
+        self.set_token(None);
+        crate::sshauth::forget_session(&self.base);
+        Ok(r)
+    }
+    pub fn authorized_keys(&self) -> Result<Vec<AuthorizedKey>> {
+        self.get_json("/auth/keys")
+    }
+    pub fn add_authorized_key(&self, req: &AuthorizedKeyCreate) -> Result<AuthorizedKey> {
+        self.send_json("POST", "/auth/keys", req)
+    }
+    pub fn delete_authorized_key(&self, id: &str) -> Result<serde_json::Value> {
+        self.call_json("DELETE", &format!("/auth/keys/{id}"))
     }
     pub fn create_token(&self, req: &TokenCreate) -> Result<TokenCreated> {
         self.send_json("POST", "/auth/tokens", req)
@@ -377,12 +513,7 @@ impl Client {
         self.get_json("/auth/tokens")
     }
     pub fn delete_token(&self, id: &str) -> Result<serde_json::Value> {
-        let resp = self
-            .req("DELETE", &format!("/auth/tokens/{id}"))
-            .call()
-            .map_err(map_err)?;
-        resp.into_json()
-            .map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
+        self.call_json("DELETE", &format!("/auth/tokens/{id}"))
     }
     pub fn keys(&self, repo: &str) -> Result<Vec<KeyEntry>> {
         self.get_json(&format!("/repos/{repo}/keys"))
@@ -398,12 +529,7 @@ impl Client {
         )
     }
     pub fn delete_key(&self, repo: &str, key_id: &str) -> Result<serde_json::Value> {
-        let resp = self
-            .req("DELETE", &format!("/repos/{repo}/keys/{key_id}"))
-            .call()
-            .map_err(map_err)?;
-        resp.into_json()
-            .map_err(|e| Error::Invalid(format!("bad json from server: {e}")))
+        self.call_json("DELETE", &format!("/repos/{repo}/keys/{key_id}"))
     }
     pub fn commit_detail(&self, repo: &str, rev: &str) -> Result<CommitDetail> {
         self.get_json(&format!("/repos/{repo}/commits/{rev}"))

@@ -232,6 +232,107 @@ export interface DeleteKeyResponse {
   deleted: string;
 }
 
+// ---- auth -------------------------------------------------------------------
+
+export type Access = "read" | "write" | "admin";
+
+/** `{repo, access}`: `repo` is a repository name or `*` for every repository. */
+export interface Scope {
+  repo: string;
+  access: Access;
+}
+
+/** A scoped bearer token (`GET /auth/tokens`); metadata only, never the plaintext. */
+export interface TokenInfo {
+  id: string;
+  name: string;
+  agent?: string | null;
+  scopes: Scope[];
+  created_ms: number;
+  expires_ms?: number | null;
+  created_by: string;
+  last_used_ms?: number | null;
+  /** Session tokens: the authorized key (`/auth/keys` id, or `admin` for a startup admin key) that signed in. */
+  key?: string | null;
+}
+
+/** `POST /auth/tokens` and `POST /auth/session`: the plaintext `token` is returned exactly once. */
+export interface TokenCreated extends TokenInfo {
+  token: string;
+}
+
+export interface TokenCreate {
+  name: string;
+  /** Bind the token to an agent identity; requests made with it always act as this agent. */
+  agent?: string;
+  scopes: Scope[];
+  ttl_secs?: number;
+}
+
+/** `GET /auth/whoami`. */
+export interface WhoAmI {
+  /** `root`, `anonymous`, or the token id. */
+  principal: string;
+  agent?: string | null;
+  root: boolean;
+  scopes: Scope[];
+  /** The authorized key behind this session, when signed in with one. */
+  key?: string | null;
+}
+
+/** An SSH public key allowed to sign in (`GET /auth/keys`). */
+export interface AuthorizedKey {
+  id: string;
+  name: string;
+  /** `SHA256:…`, as `ssh-keygen -lf` prints it. */
+  fingerprint: string;
+  key_id: string;
+  /** `ssh-ed25519 <base64> [comment]`. */
+  public_key: string;
+  /** Sessions opened with this key always act as this agent. */
+  agent?: string | null;
+  scopes: Scope[];
+  created_ms: number;
+  created_by: string;
+  last_used_ms?: number | null;
+}
+
+export interface AuthorizedKeyCreate {
+  /** `ssh-ed25519 …` line or a 64-hex Ed25519 key. */
+  public_key: string;
+  name?: string;
+  agent?: string;
+  scopes: Scope[];
+}
+
+/** `POST /auth/challenge`: a single-use nonce to sign with an SSH key. */
+export interface Challenge {
+  nonce: string;
+  expires_ms: number;
+}
+
+/** `POST /auth/session`: hex Ed25519 signature over `agit-auth-v1\n<nonce>`. */
+export interface SessionCreate {
+  public_key: string;
+  nonce: string;
+  signature: string;
+  /** Session lifetime; default 8 hours, at most 30 days. */
+  ttl_secs?: number;
+}
+
+export interface DeleteTokenResponse {
+  deleted: string;
+}
+
+export interface DeleteAuthorizedKeyResponse {
+  deleted: string;
+  revoked_sessions: number;
+}
+
+export interface LogoutResponse {
+  revoked: string;
+}
+
 export interface FileStat {
   path: string;
   added: number;

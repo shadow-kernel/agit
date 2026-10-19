@@ -70,6 +70,47 @@ entries, twice per commit); an append-only index is the next step. The
 remaining 4 to 5 ms at default durability is the single `fsync` of the ref
 file, which only a journal with group commit can amortize.
 
+## 2026-10-19: one fsync per commit, and which fsync
+
+Same laptop, same `bench_commits` workload (3,000 micro-commits on a
+2,000-file tree, `cargo run --release -p agit-core --example bench_commits
+-- 3000`), measured back to back on the same afternoon. Another session was
+building a web site on the machine during these runs, so absolute numbers
+are a little below the 2026-10-15 figures; the `AGIT_FSYNC=none` row is the
+control and did not move between the two builds.
+
+What the standard library's `File::sync_data` costs on this Mac, 200
+appends to one file (`scratchpad/fsync/bench.rs`, plain `rustc -O`):
+
+| Primitive | per call |
+| --- | ---: |
+| `File::sync_data` (std issues `F_FULLFSYNC` on macOS) | 1.82 ms |
+| `fsync(2)` | 0.027 ms |
+| `fcntl(F_FULLFSYNC)` | 2.44 ms |
+| `File::sync_all` | 3.05 ms |
+
+git syncs with `fsync(2)`; agit was flushing the drive cache on every
+commit. `durability::sync_file` now picks the primitive per level: `refs`
+(default) uses `fsync(2)` like git, the new `full` level keeps the full
+flush, `all` flushes everything.
+
+| Durability | before (one `F_FULLFSYNC` per commit) | after | per `add`+`commit` after |
+| --- | ---: | ---: | ---: |
+| `refs` (default) | 130 commits/s | **277 commits/s** (a repeat run: 295/s) | 3.6 ms |
+| `full` (new; the old default behaviour) | n/a | 120 commits/s | 8.3 ms |
+| `none` | 258 commits/s | 278 commits/s | 3.6 ms |
+
+At the default level the commit path is now CPU-bound (it matches `none`
+within noise); on Linux, where `fdatasync` already was a plain fsync, nothing
+changes. The trade-off is documented in the handbook: `refs` survives a
+process or kernel crash, `full` also survives a power loss on Apple hardware.
+
+Per-step breakdown with `AGIT_FSYNC=none` on the same run (`profile_commit`):
+`add` 1.20 ms (`load_index` 0.37), `commit` 2.14 ms (`write_tree` 0.52,
+`diff_trees` 0.08, event 0.06). The index load and save and the segment
+index rewrite on flush are the next targets; `status` on 2,000 files sits at
+7.3 to 8.4 ms across these runs.
+
 ## 2026-10-15: server load test (single node)
 
 `cargo run --release -p agit-server --example load -- <agents> <commits>`
@@ -93,9 +134,11 @@ and nodes plus a leaner per-update path; both are tracked in RFC 0004.
 
 ## What the numbers say
 
-- The single ref fsync is the dominant cost at default durability. This is
-  the exact cost that the Phase 1 journal with group commit amortizes: one
-  fsync per batch instead of per commit.
+- The single journal fsync was the dominant cost at default durability, and
+  on macOS most of it was the drive-cache flush that git does not do either.
+  With `fsync(2)` the default level is CPU-bound; the journal's group commit
+  still amortizes the remaining sync across concurrent writers, and `full`
+  is there for power-loss safety.
 - `write_tree` re-encodes every directory on every commit. A cached-tree
   extension in the index (only re-encode directories whose contents changed)
   removes most of that millisecond.

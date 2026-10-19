@@ -9,6 +9,8 @@ pub enum ApiErr {
     Core(CoreError),
     NotFound(String),
     Forbidden(String),
+    /// Missing, invalid or expired credentials (401).
+    Unauthorized(String),
     BadRequest(String),
 }
 
@@ -45,6 +47,13 @@ impl ApiErr {
             ApiErr::Forbidden(m) => (
                 StatusCode::FORBIDDEN,
                 "forbidden".into(),
+                m.clone(),
+                false,
+                None,
+            ),
+            ApiErr::Unauthorized(m) => (
+                StatusCode::UNAUTHORIZED,
+                "unauthorized".into(),
                 m.clone(),
                 false,
                 None,
@@ -99,6 +108,7 @@ impl ApiErr {
                     CoreError::PolicyViolation(_) | CoreError::Forbidden(_) => {
                         StatusCode::FORBIDDEN
                     }
+                    CoreError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
                     _ => StatusCode::INTERNAL_SERVER_ERROR,
                 };
                 (status, code, e.to_string(), e.is_retryable(), details)
@@ -122,6 +132,13 @@ impl IntoResponse for ApiErr {
                 details,
             },
         };
-        (status, Json(body)).into_response()
+        let mut resp = (status, Json(body)).into_response();
+        if status == StatusCode::UNAUTHORIZED {
+            resp.headers_mut().insert(
+                axum::http::header::WWW_AUTHENTICATE,
+                axum::http::HeaderValue::from_static("Bearer realm=\"agit\""),
+            );
+        }
+        resp
     }
 }

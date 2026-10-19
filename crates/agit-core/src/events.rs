@@ -122,7 +122,7 @@ impl EventLog {
         f.write_all(&line).map_err(io_at(&self.path))?;
         *self.cache.lock().unwrap() = Some((seq, len_now + line.len() as u64));
         if crate::durability::sync_data() {
-            f.sync_data().map_err(io_at(&self.path))?;
+            crate::durability::sync_file(&f).map_err(io_at(&self.path))?;
         }
         Ok(ev)
     }

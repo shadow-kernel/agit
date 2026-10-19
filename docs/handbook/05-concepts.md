@@ -182,8 +182,9 @@ Durability is a process-wide policy, `AGIT_FSYNC`:
 
 | Value | Behaviour |
 | --- | --- |
-| `refs` (default) | fsync ref updates, index saves and log appends; object writes are atomic (temp + rename or append + published index) but not individually synced, like git |
-| `all` | additionally fsync every object write (about 7 fsyncs per commit) |
+| `refs` (default) | the ref journal and metadata writes are synced with `fsync(2)`, exactly what git does; object, index and log writes are atomic (append + published index, or temp + rename) but not individually synced. On Linux `fsync(2)` reaches stable storage; on macOS it hands the data to the drive without flushing its cache (git's default there too), so a kernel crash is survived and a power loss may lose the last commits |
+| `full` | like `refs`, with a full flush to stable storage for the journal and metadata (`F_FULLFSYNC` on macOS, `fdatasync` elsewhere); power-loss safe, several times slower per commit on Apple hardware |
+| `all` | `full`, plus a full flush of every object, index and log write |
 | `none` | never fsync; for throwaway repositories and CI |
 
-A crash before a flush leaves garbage at the tail of a segment that nothing references; the next flush rewrites the index from what the writer knows and the bytes are ignored. Multi-ref transactions can be partially applied on disk if the process dies between two renames; the journal that closes this gap is 📋 (RFC 0004).
+A crash before a flush leaves garbage at the tail of a segment that nothing references; the next flush rewrites the index from what the writer knows and the bytes are ignored. Ref updates and multi-ref transactions are single records in `refs.journal`, which is synced with group commit (one fsync per batch of concurrent writers) and replayed over the ref files on open, so a crash between the journal sync and a ref-file rename loses nothing.

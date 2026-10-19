@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
   AgitClient,
   AgitError,
+  authMessage,
   LeaseConflictError,
   MergeConflictsError,
   NotFoundError,
@@ -442,10 +443,10 @@ describe("error mapping", () => {
     expect((dup as AgitError).status).toBe(409);
   });
 
-  it("maps a 403 from a bad token", async () => {
+  it("maps a 401 from a bad token", async () => {
     const bad = new AgitClient({ baseUrl: server.baseUrl, token: "wrong" });
     const err = await bad.health().catch((e: unknown) => e);
-    expect(err).toMatchObject({ code: "forbidden", status: 403, retryable: false });
+    expect(err).toMatchObject({ code: "unauthorized", status: 401, retryable: false });
   });
 
   it("handles non-JSON error bodies and 200 responses carrying an error envelope", async () => {
@@ -511,5 +512,66 @@ describe("streamEvents", () => {
 
     const gen = client.streamEvents("missing", { retryMs: 10 });
     await expect(gen.next()).rejects.toBeInstanceOf(NotFoundError);
+  });
+});
+
+describe("auth", () => {
+  it("whoami", async () => {
+    const me = await client.whoami();
+    expect(me).toEqual(fixtures.whoami);
+    expect(last().path).toBe("/api/v1/auth/whoami");
+  });
+
+  it("loginWithKey signs the challenge, keeps the token and logout forgets it", async () => {
+    const c = new AgitClient({ baseUrl: server.baseUrl, agent: "coder-1", fetch: globalThis.fetch });
+    const seen: string[] = [];
+    const created = await c.loginWithKey({
+      publicKey: fixtures.sshPublicKey,
+      sign: (m) => {
+        seen.push(new TextDecoder().decode(m));
+        return Uint8Array.from(Buffer.from(fixtures.sshSignatureHex, "hex"));
+      },
+      ttlSecs: 600,
+    });
+    expect(seen).toEqual([`agit-auth-v1\n${fixtures.nonce}`]);
+    expect(authMessage(fixtures.nonce)).toEqual(new TextEncoder().encode(`agit-auth-v1\n${fixtures.nonce}`));
+    expect(created.token).toBe("agit_session");
+    expect(created.key).toBe("key_1");
+    expect(c.token).toBe("agit_session");
+    const sess = server.requests.find((r) => r.path === "/api/v1/auth/session")!;
+    expect(sess.body).toEqual({ public_key: fixtures.sshPublicKey, nonce: fixtures.nonce, signature: fixtures.sshSignatureHex, ttl_secs: 600 });
+    // the challenge request carries no body and no token
+    const ch = server.requests.find((r) => r.path === "/api/v1/auth/challenge")!;
+    expect(ch.rawBody.length).toBe(0);
+    expect(ch.headers.authorization).toBeUndefined();
+    await c.whoami();
+    expect(last().headers.authorization).toBe("Bearer agit_session");
+    expect(await c.logout()).toEqual({ revoked: "tok_sess" });
+    expect(c.token).toBeUndefined();
+  });
+
+  it("refuses unknown keys and stale nonces with 403", async () => {
+    const c = new AgitClient({ baseUrl: server.baseUrl, fetch: globalThis.fetch });
+    const err = await c.loginWithKey({ publicKey: "ssh-ed25519 AAAA other@host", sign: () => new Uint8Array(64) }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: "forbidden", status: 403 });
+    expect((err as AgitError).message).toContain("not authorized");
+    await expect(c.createSession({ public_key: fixtures.sshPublicKey, nonce: "stale", signature: fixtures.sshSignatureHex })).rejects.toMatchObject({ code: "forbidden" });
+  });
+
+  it("tokens and authorized keys", async () => {
+    expect((await client.listTokens()).map((t) => t.id)).toEqual(["tok_sess"]);
+    const created = await client.createToken({ name: "ci", agent: "ci-bot", scopes: [{ repo: "demo", access: "read" }], ttl_secs: 60 });
+    expect(created.token).toBe("agit_new");
+    expect(last().body).toEqual({ name: "ci", agent: "ci-bot", scopes: [{ repo: "demo", access: "read" }], ttl_secs: 60 });
+    expect(await client.auth.tokens.delete("tok_new")).toEqual({ deleted: "tok_new" });
+
+    const keys = await client.listAuthorizedKeys();
+    expect(keys).toEqual([fixtures.authorizedKey]);
+    await expect(client.addAuthorizedKey({ public_key: fixtures.sshPublicKey, scopes: [{ repo: "demo", access: "write" }] })).rejects.toMatchObject({ code: "already_exists", status: 409 });
+    const k = await client.auth.keys.add({ public_key: "ssh-ed25519 AAAA new@host", name: "new laptop", agent: "reviewer-1", scopes: [{ repo: "demo", access: "read" }] });
+    expect(k.id).toBe("key_2");
+    expect(k.agent).toBe("reviewer-1");
+    expect(last().body).toEqual({ public_key: "ssh-ed25519 AAAA new@host", name: "new laptop", agent: "reviewer-1", scopes: [{ repo: "demo", access: "read" }] });
+    expect(await client.deleteAuthorizedKey("key_2")).toEqual({ deleted: "key_2", revoked_sessions: 1 });
   });
 });

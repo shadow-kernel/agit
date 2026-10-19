@@ -29,6 +29,7 @@ uuid.workspace = true
 globset.workspace = true
 ureq.workspace = true
 blake3.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

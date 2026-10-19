@@ -67,12 +67,36 @@ Added later on 2026-10-15 (still unreleased):
 - Handbook under `docs/handbook` (20 chapters, German overview) published
   as an mdBook site; load test `examples/load.rs`; benchmarks.
 
+Added on 2026-10-19:
+
+- SSH-key authentication: the server keeps authorized Ed25519 public keys
+  with per-repository scopes (`/auth/keys`), clients sign a single-use
+  challenge (`/auth/challenge`, `/auth/session`) and receive a session
+  token; `--admin-key` / `AGIT_ADMIN_KEYS` make a server closed with your
+  own `~/.ssh/id_ed25519.pub` as the admin. `agit auth login|logout|whoami|
+  show-token|key|token`; remote commands sign in on their own after a
+  `401`, with passphrase-protected keys through ssh-agent; sessions cached
+  in `~/.agit/sessions.json`. `POST /auth/logout`. Web UI admin page for
+  keys; SDK methods (`login_with_key`, `loginWithKey`, tokens, keys).
+- Durability level `AGIT_FSYNC=full` (full flush of the ref journal, power-
+  loss safe on macOS); every fsync goes through `durability::sync_file`.
+
 ### Changed
 
 - Loose objects (`AGO1`) are still read but new objects go into segments.
 - Index files are written as `AGI2`; `AGI1` indexes are still loaded.
 - `GET /health` is public; every other route needs a token when a root
   token is configured.
+- Missing, invalid, expired or revoked credentials are `401 unauthorized`
+  (new error code; `403 forbidden` now only means "valid credentials, wrong
+  scope"). `agit-server` refuses to start without any authentication on a
+  non-loopback address unless `--allow-open` is given. Server-wide (`*`)
+  scopes can be granted by any `*:admin` principal, not only root.
+- `AGIT_FSYNC=refs` (the default) now syncs with `fsync(2)` exactly like
+  git. On Linux nothing changes; on macOS the standard library's
+  `F_FULLFSYNC` is no longer issued per commit, which makes a commit at
+  default durability several times faster (numbers in BENCHMARKS.md) at the
+  cost of power-loss safety, which `AGIT_FSYNC=full` restores.
 
 - `agit mcp`: a Model Context Protocol server exposing the CLI to agents.
 

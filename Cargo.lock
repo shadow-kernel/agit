@@ -26,6 +26,7 @@ dependencies = [
 name = "agit-core"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bincode",
  "blake3",
  "diffy",
@@ -40,6 +41,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "toml",
@@ -63,6 +65,7 @@ name = "agit-protocol"
 version = "0.1.0"
 dependencies = [
  "agit-core",
+ "hex",
  "serde",
  "serde_json",
  "tempfile",
@@ -83,6 +86,7 @@ dependencies = [
  "clap",
  "futures",
  "globset",
+ "hex",
  "serde",
  "serde_json",
  "tempfile",

@@ -25,6 +25,7 @@ const Search = lazy(() => import("./pages/Search"));
 const Compare = lazy(() => import("./pages/Compare"));
 const NotFound = lazy(() => import("./pages/NotFound"));
 const AdminTokens = lazy(() => import("./pages/AdminTokens"));
+const AdminKeys = lazy(() => import("./pages/AdminKeys"));
 
 const fallback = <div className="box" aria-busy><Skeleton lines={6} /></div>;
 const pageFallback = <main className="container">{fallback}</main>;
@@ -48,6 +49,7 @@ export default function App() {
         <Route element={<Layout />}>
           <Route index element={<Suspense fallback={pageFallback}><RepoList /></Suspense>} />
           <Route path="/admin/tokens" element={<Suspense fallback={pageFallback}><AdminTokens /></Suspense>} />
+          <Route path="/admin/keys" element={<Suspense fallback={pageFallback}><AdminKeys /></Suspense>} />
           <Route path="/r/:repo" element={<RepoShell />}>
             <Route index element={<Suspense fallback={fallback}><RepoHome /></Suspense>} />
             <Route path="tree/:rev/*" element={<Suspense fallback={fallback}><Tree /></Suspense>} />

@@ -49,9 +49,9 @@ export default function AdminTokens() {
       <div className="page-head">
         <div>
           <h1>Access tokens</h1>
-          <p className="muted">Scoped bearer tokens for agents and CI (<code>/auth/tokens</code>). A token can only grant scopes its creator holds; <code>*</code> scopes need the root token. Every denial and mutation is appended to <code>audit.jsonl</code>.</p>
+          <p className="muted">Scoped bearer tokens for agents and CI (<code>/auth/tokens</code>). A token can only grant scopes its creator holds; <code>*</code> scopes need root or a server-wide admin. People sign in with <Link to="/admin/keys">SSH keys</Link> instead; tokens are for agents, CI and the browser. Every denial and mutation is appended to <code>audit.jsonl</code>.</p>
         </div>
-        <Link className="btn" to="/">← Repositories</Link>
+        <div className="row"><Link className="btn" to="/admin/keys">SSH keys</Link><Link className="btn" to="/">← Repositories</Link></div>
       </div>
 
       {auth.loading && !auth.who ? (
@@ -162,7 +162,7 @@ function CreateToken({ repos, onCreated }: { repos: string[]; onCreated: (t: Tok
   if (!scopes.length) problems.push("Add at least one scope.");
   scopes.forEach((s, i) => {
     if (!s.repo.trim()) problems.push(`Scope ${i + 1}: repository is empty.`);
-    else if (!canGrant(s)) problems.push(`Scope ${i + 1}: you do not hold ${s.access} on ${s.repo}${s.repo === "*" ? " (wildcard scopes need the root token)" : ""}.`);
+    else if (!canGrant(s)) problems.push(`Scope ${i + 1}: you do not hold ${s.access} on ${s.repo}${s.repo === "*" ? " (wildcard scopes need root or a server-wide admin)" : ""}.`);
   });
   const ttlSecs = ttl === "custom" ? Math.max(1, Math.floor(customTtl)) : ttl === "null" ? undefined : Number(ttl);
 

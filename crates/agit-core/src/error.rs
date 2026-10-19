@@ -89,6 +89,9 @@ pub enum Error {
     #[error("forbidden: {0}")]
     Forbidden(String),
 
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
     #[error("non-fast-forward: remote {remote} is not an ancestor of local {local}; pull first or push with --force")]
     NonFastForward { remote: ObjectId, local: ObjectId },
 
@@ -138,6 +141,7 @@ impl Error {
             PolicyViolation(_) => "policy_violation",
             NotFound(_) => "not_found",
             Forbidden(_) => "forbidden",
+            Unauthorized(_) => "unauthorized",
             NonFastForward { .. } => "non_fast_forward",
             Invalid(_) => "invalid",
             IoAt { .. } | Io(_) => "io",

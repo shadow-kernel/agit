@@ -98,6 +98,12 @@ export const fixtures = {
   },
   lease: { id: "L1", holder: "agent1", paths: ["src/auth"], mode: "exclusive", created_ms: 4, expires_ms: 4000, note: "refactor" },
   ids: { A: ID_A, B: ID_B },
+  nonce: "n-" + "1".repeat(62),
+  sshPublicKey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGkmTwaq4yTAX4vyc3zq/dMzitl+O9gXb9V8+ZxCfNQD test@agit",
+  sshSignatureHex: "ab".repeat(64),
+  sessionToken: { id: "tok_sess", name: "session: laptop", agent: "coder-1", scopes: [{ repo: "demo", access: "write" }], created_ms: 1, expires_ms: 29_000, created_by: "key_1", key: "key_1" },
+  whoami: { principal: "tok_sess", agent: "coder-1", root: false, scopes: [{ repo: "demo", access: "write" }], key: "key_1" },
+  authorizedKey: { id: "key_1", name: "laptop", fingerprint: "SHA256:NeEsyNdzgZA8xAHH2Nw7ehNrSS7b6gYEjQl2qlIHrqM", key_id: "0123456789abcdef", public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGkmTwaq4yTAX4vyc3zq/dMzitl+O9gXb9V8+ZxCfNQD test@agit", agent: "coder-1", scopes: [{ repo: "demo", access: "write" }], created_ms: 1, created_by: "root", last_used_ms: null },
 };
 
 type NoteFixture = Record<string, unknown> & { body: string; draft?: boolean; stale?: boolean };
@@ -153,13 +159,44 @@ export async function startFakeServer(): Promise<FakeServer> {
     requests.push(seen);
     const route = `${seen.method} ${url.pathname}`;
 
+    // SSH sign-in is public: a challenge, then a signed session request.
+    if (route === "POST /api/v1/auth/challenge") return json(res, 200, { nonce: fixtures.nonce, expires_ms: 120_000 });
+    if (route === "POST /api/v1/auth/session") {
+      const b = body as { public_key?: string; nonce?: string; signature?: string; ttl_secs?: number };
+      if (b.nonce !== fixtures.nonce) return error(res, 403, "forbidden", "challenge is unknown, already used or expired");
+      if (b.public_key !== fixtures.sshPublicKey) return error(res, 403, "forbidden", "ssh key SHA256:x is not authorized on this server");
+      if (b.signature !== fixtures.sshSignatureHex) return error(res, 403, "forbidden", "signature does not match the challenge");
+      return json(res, 201, { ...fixtures.sessionToken, token: "agit_session", expires_ms: 1000 + (b.ttl_secs ?? 28_800) * 1000 });
+    }
     // Token check: when a token is sent it must be the right one.
     const auth = req.headers.authorization;
-    if (auth !== undefined && auth !== "Bearer secret") return error(res, 403, "forbidden", "missing or invalid bearer token");
+    if (auth !== undefined && auth !== "Bearer secret" && auth !== "Bearer agit_session") return error(res, 401, "unauthorized", "invalid, expired or revoked bearer token");
 
     switch (true) {
       case route === "GET /api/v1/health":
         return json(res, 200, fixtures.health);
+      case route === "GET /api/v1/auth/whoami":
+        return json(res, 200, fixtures.whoami);
+      case route === "POST /api/v1/auth/logout":
+        return json(res, 200, { revoked: fixtures.whoami.principal });
+      case route === "GET /api/v1/auth/tokens":
+        return json(res, 200, [fixtures.sessionToken]);
+      case route === "POST /api/v1/auth/tokens": {
+        const b = body as { name: string; agent?: string; scopes?: unknown[]; ttl_secs?: number };
+        if (!b.scopes?.length) return error(res, 400, "invalid", "at least one scope is required");
+        return json(res, 201, { id: "tok_new", name: b.name, agent: b.agent ?? null, scopes: b.scopes, created_ms: 2, expires_ms: b.ttl_secs ? 2 + b.ttl_secs * 1000 : null, created_by: "root", token: "agit_new" });
+      }
+      case /^DELETE \/api\/v1\/auth\/tokens\/[^/]+$/.test(route):
+        return json(res, 200, { deleted: decodeURIComponent(url.pathname.split("/").pop()!) });
+      case route === "GET /api/v1/auth/keys":
+        return json(res, 200, [fixtures.authorizedKey]);
+      case route === "POST /api/v1/auth/keys": {
+        const b = body as { public_key: string; name?: string; agent?: string; scopes: unknown[] };
+        if (b.public_key === fixtures.sshPublicKey) return error(res, 409, "already_exists", "key is already authorized as key_1");
+        return json(res, 201, { ...fixtures.authorizedKey, id: "key_2", name: b.name ?? "SHA256:y", agent: b.agent ?? null, scopes: b.scopes, fingerprint: "SHA256:y", public_key: b.public_key });
+      }
+      case /^DELETE \/api\/v1\/auth\/keys\/[^/]+$/.test(route):
+        return json(res, 200, { deleted: decodeURIComponent(url.pathname.split("/").pop()!), revoked_sessions: 1 });
       case route === "GET /api/v1/repos":
         return json(res, 200, fixtures.repos);
       case route === "POST /api/v1/repos": {

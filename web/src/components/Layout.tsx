@@ -205,7 +205,7 @@ function SettingsPopover() {
           <label className="field">
             Bearer token
             <input ref={tokenRef} className="input sm" type="password" value={s.token} onChange={(e) => setS({ ...s, token: e.target.value })} placeholder={who && !s.token ? "open mode: no token needed" : "paste a token"} autoComplete="off" spellCheck={false} />
-            <span className="hint">Sent as <code>Authorization: Bearer …</code> and checked with <code>GET /auth/whoami</code>. With a token set, the live feed polls instead of SSE.</span>
+            <span className="hint">Sent as <code>Authorization: Bearer …</code> and checked with <code>GET /auth/whoami</code>. Signed in with an SSH key on the command line? <code>agit auth login --print-token</code> prints a session token to paste here. With a token set, the live feed polls instead of SSE.</span>
           </label>
           {who ? (
             <div className="who-card">
@@ -219,6 +219,7 @@ function SettingsPopover() {
                 </div>
               </div>
               <div className="row wrap" style={{ gap: 8, marginTop: 8 }}>
+                {isAnyAdmin(who) ? <Link className="btn sm" to="/admin/keys" onClick={() => setOpen(false)}>SSH keys</Link> : null}
                 {isAnyAdmin(who) ? <Link className="btn sm" to="/admin/tokens" onClick={() => setOpen(false)}>Manage tokens</Link> : null}
                 {s.token || loadSettings().token ? <button className="btn sm ghost" onClick={signOut} disabled={busy}>Sign out</button> : null}
               </div>

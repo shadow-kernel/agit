@@ -20,7 +20,7 @@ Terms as agit uses them, with the chapter that explains each.
 | **confidence** | A note's self-assessed certainty, 0 to 1 (default 1; drafts 0.4). | [11](11-knowledge-base.md) |
 | **context pack** | The result of `GET /context?path=` / `agit know context`: notes, suggested tags, recent commits, leases, open PRs, active agents and optionally budgeted file texts. | [11](11-knowledge-base.md#how-context-is-assembled) |
 | **draft note** | A note generated from a merged PR, hidden until accepted or deleted. | [11](11-knowledge-base.md#drafts-from-merges) |
-| **durability level** | `AGIT_FSYNC=refs|all|none`. | [5](05-concepts.md#pack-segments-and-durability) |
+| **durability level** | `AGIT_FSYNC=refs|full|all|none`. | [5](05-concepts.md#pack-segments-and-durability) |
 | **envelope** | `{"ok":true,"result":…}` / `{"ok":false,"error":{code,message,retryable,details}}`, printed by every command with `--json`. | [6](06-cli-reference.md#the-json-contract) |
 | **event** | One JSON line in `events.jsonl` with `seq`, `time_ms`, `kind`, `workspace?`, `actor?`, `data`. | [5](05-concepts.md#events) |
 | **exit codes** | 0 ok, 1 error, 3 conflict, 75 retryable. | [6](06-cli-reference.md#exit-codes-and-error-codes) |

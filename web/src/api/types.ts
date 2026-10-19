@@ -573,6 +573,47 @@ export interface TokenInfo {
   expires_ms?: number | null;
   created_by: string;
   last_used_ms?: number | null;
+  /** Session tokens: the authorized key (`/auth/keys` id, or `admin` for a startup admin key) that signed in. */
+  key?: string | null;
+}
+
+/** An SSH public key allowed to sign in (`GET /auth/keys`). */
+export interface AuthorizedKey {
+  id: string;
+  name: string;
+  /** `SHA256:…`, as `ssh-keygen -lf` prints it. */
+  fingerprint: string;
+  key_id: string;
+  /** `ssh-ed25519 <base64> [comment]`. */
+  public_key: string;
+  /** Sessions opened with this key always act as this agent. */
+  agent?: string | null;
+  scopes: Scope[];
+  created_ms: number;
+  created_by: string;
+  last_used_ms?: number | null;
+}
+
+export interface AuthorizedKeyCreateRequest {
+  /** `ssh-ed25519 …` line or a 64-hex Ed25519 key. */
+  public_key: string;
+  name?: string;
+  agent?: string;
+  scopes: Scope[];
+}
+
+/** `POST /auth/challenge`: a single-use nonce to sign with an SSH key. */
+export interface Challenge {
+  nonce: string;
+  expires_ms: number;
+}
+
+/** `POST /auth/session`: hex Ed25519 signature over `agit-auth-v1\n<nonce>`. */
+export interface SessionCreateRequest {
+  public_key: string;
+  nonce: string;
+  signature: string;
+  ttl_secs?: number;
 }
 
 /** `POST /auth/tokens`: the plaintext `token` is returned exactly once. */
@@ -586,4 +627,6 @@ export interface WhoAmI {
   agent?: string | null;
   root: boolean;
   scopes: Scope[];
+  /** The authorized key behind this session, when signed in with one. */
+  key?: string | null;
 }

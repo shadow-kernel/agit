@@ -127,6 +127,30 @@ Through `AgentSession`: `me.contextPack(path, budget)`, `me.staleNotes(rev)`,
 `me.validateNote(noteOrId, rev)`, `me.acceptNote(draftOrId, patch)` and
 `me.remember({ ..., validAt })`.
 
+### Authentication: SSH keys, sessions and tokens
+
+People sign in with SSH keys, agents use scoped tokens (`docs/SECURITY.md`). The SDK bundles no signing code; the shortest path to a token is `agit auth login --url <server> --print-token`, then `new AgitClient({ token })`. In Node the challenge/response works with `node:crypto`:
+
+```ts
+import { createPrivateKey, sign } from "node:crypto";
+const key = createPrivateKey(await fs.readFile(`${home}/.ssh/id_ed25519`));   // unencrypted OpenSSH key
+const pub = (await fs.readFile(`${home}/.ssh/id_ed25519.pub`, "utf8")).trim();
+const created = await client.loginWithKey({ publicKey: pub, sign: (m) => sign(null, m, key), ttlSecs: 8 * 3600 });
+const me = await client.whoami();         // { principal: "tok_…", agent, scopes: [{ repo: "shop", access: "write" }], key: "key_…" }
+await client.logout();                    // revokes the session, clears client.token
+```
+
+Admins manage keys and mint tokens for agents:
+
+```ts
+await client.auth.keys.add({ public_key: pub, name: "dana laptop", agent: "dana", scopes: [{ repo: "shop", access: "write" }] });
+await client.auth.keys.list();            // [{ fingerprint: "SHA256:…", scopes, … }]
+const tok = await client.auth.tokens.create({ name: "ci-deploy", agent: "ci-bot", scopes: [{ repo: "shop", access: "write" }], ttl_secs: 30 * 86400 });
+tok.token;                                // shown once
+```
+
+A `401` (`code: "unauthorized"`) means no usable credentials; a `403` (`forbidden`) means the credentials lack the needed scope or the key is not authorized. `authMessage(nonce)` returns the exact bytes a signature must cover.
+
 ### Signing keys
 
 Agents sign commits with Ed25519 (`agit key generate`, `agit commit --sign`); the public key

@@ -399,6 +399,16 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: KeyCmd,
     },
+    /// Sign in to a server with an SSH key; manage authorized keys and tokens.
+    Auth {
+        /// Server base URL (default: the remote's server, then AGIT_SERVER_URL).
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long, default_value = "origin")]
+        remote: String,
+        #[command(subcommand)]
+        cmd: crate::auth::AuthCmd,
+    },
     /// Verify a commit's signature.
     Verify {
         #[arg(default_value = "HEAD")]
@@ -1357,6 +1367,9 @@ pub fn run(cli: Cli) -> Result<()> {
         )?,
         Cmd::Mcp { remote } => crate::mcp::serve(cwd(&cli.dir)?, remote)?,
         Cmd::Key { cmd } => run_key(&cli.dir, json, cmd)?,
+        Cmd::Auth { url, remote, cmd } => {
+            crate::auth::run_auth(&cli.dir, json, url.as_deref(), &remote, cmd)?
+        }
         Cmd::Verify { rev } => {
             let repo = open(&cli.dir)?;
             let (id, c) = repo.resolve_commit(&rev)?;

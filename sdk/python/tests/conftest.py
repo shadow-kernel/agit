@@ -143,6 +143,20 @@ POLICY = {
 }
 
 
+NONCE = "n-" + "1" * 62
+SSH_PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGkmTwaq4yTAX4vyc3zq/dMzitl+O9gXb9V8+ZxCfNQD test@agit"
+SSH_SIG_HEX = "ab" * 64
+SESSION_TOKEN = {"id": "tok_sess", "name": "session: laptop", "agent": "coder-1",
+                 "scopes": [{"repo": "demo", "access": "write"}], "created_ms": 1, "expires_ms": 29_000,
+                 "created_by": "key_1", "key": "key_1"}
+WHOAMI = {"principal": "tok_sess", "agent": "coder-1", "root": False,
+          "scopes": [{"repo": "demo", "access": "write"}], "key": "key_1"}
+AUTHORIZED_KEY = {"id": "key_1", "name": "laptop", "fingerprint": "SHA256:NeEsyNdzgZA8xAHH2Nw7ehNrSS7b6gYEjQl2qlIHrqM",
+                  "key_id": "0123456789abcdef", "public_key": SSH_PUB, "agent": "coder-1",
+                  "scopes": [{"repo": "demo", "access": "write"}], "created_ms": 1, "created_by": "root",
+                  "last_used_ms": None}
+
+
 @dataclass
 class FakeState:
     requests: list[Recorded] = field(default_factory=list)
@@ -220,11 +234,57 @@ class Handler(BaseHTTPRequestHandler):
         rec = self._record()
         if not rec.path.startswith("/api/v1/"):
             return self._err(404, "not_found", "no such route")
-        if not self._authorized(rec):
-            return self._err(403, "forbidden", "missing or invalid token")
         parts = [urllib.parse.unquote(p) for p in rec.path[len("/api/v1/"):].split("/")]
         m = rec.method
         st = self.state
+
+        # SSH sign-in is public: a challenge, then a signed session request.
+        if parts == ["auth", "challenge"] and m == "POST":
+            return self._send(200, {"nonce": NONCE, "expires_ms": 120_000})
+        if parts == ["auth", "session"] and m == "POST":
+            body = rec.json
+            if body.get("nonce") != NONCE:
+                return self._err(403, "forbidden", "challenge is unknown, already used or expired")
+            if body.get("public_key") != SSH_PUB:
+                return self._err(403, "forbidden", "ssh key SHA256:x is not authorized on this server")
+            if body.get("signature") != SSH_SIG_HEX:
+                return self._err(403, "forbidden", "signature does not match the challenge")
+            return self._send(201, {**SESSION_TOKEN, "token": "agit_session",
+                                    "expires_ms": 1_000 + int(body.get("ttl_secs") or 28_800) * 1000})
+
+        if not self._authorized(rec):
+            return self._err(401, "unauthorized", "missing bearer token")
+
+        if parts[0] == "auth":
+            if parts == ["auth", "whoami"] and m == "GET":
+                return self._send(200, WHOAMI)
+            if parts == ["auth", "logout"] and m == "POST":
+                return self._send(200, {"revoked": WHOAMI["principal"]})
+            if parts == ["auth", "tokens"]:
+                if m == "GET":
+                    return self._send(200, [SESSION_TOKEN])
+                if m == "POST":
+                    body = rec.json
+                    if not body.get("scopes"):
+                        return self._err(400, "invalid", "at least one scope is required")
+                    return self._send(201, {"id": "tok_new", "name": body["name"], "agent": body.get("agent"),
+                                            "scopes": body["scopes"], "created_ms": 2, "created_by": "root",
+                                            "expires_ms": body.get("ttl_secs") and 2 + body["ttl_secs"] * 1000,
+                                            "token": "agit_new"})
+            if len(parts) == 3 and parts[1] == "tokens" and m == "DELETE":
+                return self._send(200, {"deleted": parts[2]})
+            if parts == ["auth", "keys"]:
+                if m == "GET":
+                    return self._send(200, [AUTHORIZED_KEY])
+                if m == "POST":
+                    body = rec.json
+                    if body.get("public_key") == AUTHORIZED_KEY["public_key"]:
+                        return self._err(409, "already_exists", "key is already authorized as key_1")
+                    return self._send(201, {**AUTHORIZED_KEY, "id": "key_2", "name": body.get("name") or "SHA256:y",
+                                            "agent": body.get("agent"), "scopes": body["scopes"], "fingerprint": "SHA256:y",
+                                            "public_key": body["public_key"]})
+            if len(parts) == 3 and parts[1] == "keys" and m == "DELETE":
+                return self._send(200, {"deleted": parts[2], "revoked_sessions": 1})
 
         if parts == ["health"]:
             return self._send(200, {"status": "ok", "version": "0.1.0"})

@@ -92,11 +92,14 @@ Objects appended to a segment are visible to other processes **only after the se
 
 `AGIT_FSYNC` is read once per process:
 
-| Level | Object writes | Ref/index/log writes | Use |
+| Level | Object/index/log writes | Journal and metadata writes | Use |
 | --- | --- | --- | --- |
-| `refs` (default) | atomic (append + published index, or temp + rename), no fsync | fsync | normal use; same policy as git |
-| `all` | fsync every object write | fsync | paranoid; about 7 fsyncs per commit |
+| `refs` (default) | atomic (append + published index, or temp + rename), no fsync | `fsync(2)`: stable storage on Linux, drive cache not flushed on macOS (git's default) | normal use; same policy as git |
+| `full` | as `refs` | full flush (`F_FULLFSYNC` on macOS, `fdatasync` elsewhere) | power-loss safety on Apple hardware |
+| `all` | full flush of every write | full flush | paranoid; about 7 flushes per commit |
 | `none` | none | none | throwaway repositories, CI |
+
+Every fsync in the code base goes through `durability::sync_file`, which picks the primitive for the current level.
 
 Measured on an Apple Silicon laptop (BENCHMARKS.md): default 5.8 ms per `add`+`commit` (173/s), `none` 3.4 ms (298/s), `all` about 38 ms. The remaining cost at default durability is the single fsync of the ref file, which only a journal with group commit can amortise.
 

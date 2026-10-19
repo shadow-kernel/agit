@@ -226,38 +226,53 @@ the web UI can run on a different origin. Because authentication is a header,
 not a cookie, this does not grant other websites access to an authenticated
 session; see [SECURITY.md](SECURITY.md).
 
-## Authentication token
+## Authentication
 
-Set `AGIT_SERVER_TOKEN` (or `--token`) and every request, including
-`/api/v1/health`, must carry `Authorization: Bearer <token>`. Requests without
-it get `403`. Without a token the server is open to anyone who can reach the
-port, which is acceptable only on a trusted private network or `127.0.0.1`.
+The recommended setup needs no shared secret at all: start the server with
+your own SSH public key as the admin key, sign in once, and authorize
+everyone else with the scopes they need.
 
 ```sh
-openssl rand -hex 32                                  # generate
-AGIT_SERVER_TOKEN=... agit-server ...                 # server
-export AGIT_TOKEN=...                                 # agit CLI (clone, push, pull, pr, know)
-curl -H "Authorization: Bearer $AGIT_TOKEN" https://agit.example.com/api/v1/repos
+agit-server --admin-key ~/.ssh/id_ed25519.pub ...     # or AGIT_ADMIN_KEYS=/etc/agit/admin_keys
+agit auth login --url https://agit.example.com/api/v1  # signs a challenge with ~/.ssh/id_ed25519 (or ssh-agent)
+agit auth key add ~/dana.pub --name "dana laptop" --scope shop:write --scope docs:read
+agit auth key add ci.pub --agent ci-bot --scope '*:read'
+agit auth token create --name ci-deploy --agent ci-bot --scope shop:write --ttl 30d   # for CI and agents
 ```
 
-SDKs take the token in their client constructor; the web UI stores it in the
-browser's localStorage after you enter it in the settings popover (top-right).
-Clients identify the acting agent with `X-Agit-Agent` (set by `AGIT_AGENT` in
-the CLI); that header is informational and is not checked against the token.
+From then on every request under `/api/v1` (except `/health`,
+`/auth/challenge` and `/auth/session`) needs `Authorization: Bearer <token>`:
+a session token from an SSH sign-in, a scoped token, or the root token.
+Requests without one get `401 unauthorized`; valid credentials without the
+needed scope get `403 forbidden`. `agit push`, `agit pull` and the other
+remote commands sign in on their own when they meet a `401`, using
+`AGIT_SSH_KEY`, `~/.ssh/id_ed25519`, the identities in ssh-agent or an agit
+signing key, and cache the session in `~/.agit/sessions.json` (mode 0600).
 
-Rules of thumb:
-
-- **One token, full access.** Everyone holding the token can read and write
-  every repository and change policies and webhooks. Per-agent credentials and
-  permissions are planned (RFC 0004); until then, run one server per trust
-  domain.
-- **Unset, not empty.** `AGIT_SERVER_TOKEN=""` configures an empty token
-  rather than disabling authentication. Leave the variable unset to run open.
-- **Rotation** is a restart with a new value; there is no overlap period, so
-  update clients first or accept a brief window of `403`s.
-- Keep the token out of shell history and process listings where possible:
-  the systemd env file and Docker secrets or `.env` files are better than
-  `--token` on the command line.
+- `--admin-key` / `AGIT_ADMIN_KEYS` takes an `ssh-ed25519 …` line or a path to
+  a file with one key per line (`#` comments allowed; other key types are
+  skipped with a warning), repeatable or comma-separated. Admin keys get
+  `*:admin`, are not persisted and are not listed under `/auth/keys`.
+- `AGIT_SERVER_TOKEN` (`--token`) is the root token: full access, used to
+  bootstrap a server without admin keys or by automation. Generate it with
+  `openssl rand -hex 32`. An empty value is an empty token, not "off".
+- **Closed by default.** With a root token or an admin key configured the
+  server is closed. Without either it is open (every request acts as root)
+  and refuses to start on a non-loopback address unless `--allow-open`
+  (`AGIT_ALLOW_OPEN=1`) is given, which is only reasonable on a private
+  network you trust completely.
+- Scopes are `read`, `write` or `admin` per repository or `*`; a key or token
+  sees only the repositories it has a scope on. `--agent` binds sessions to
+  an identity that `X-Agit-Agent` cannot override.
+- SDKs take a token in their client constructor (`agit auth login
+  --print-token` prints one); the web UI stores the token you paste into the
+  settings popover in the browser's localStorage. Both also work with the
+  CLI's cached session token.
+- **Rotation**: `agit auth key remove <id>` revokes a key and its sessions,
+  `agit auth token revoke <id>` a token, `agit auth logout` your own session.
+  The root token rotates with a restart (no overlap window).
+- Keep tokens out of shell history and process listings: the systemd env
+  file, Docker secrets or `.env` files beat `--token` on the command line.
 
 ## Web UI
 
@@ -278,14 +293,20 @@ environment.
 | --- | --- | --- | --- |
 | `AGIT_DATA_DIR` | `--data-dir` | `./agit-data` | Directory holding all repositories. The only state the server has. |
 | `AGIT_LISTEN` | `--listen` | `127.0.0.1:7878` | Socket address to bind (`0.0.0.0:7878` in containers, `[::]:7878` for IPv6). |
-| `AGIT_SERVER_TOKEN` | `--token` | unset (no auth) | Bearer token required on every request. An empty value is a (bad) token, not "off". |
+| `AGIT_ADMIN_KEYS` | `--admin-key` | unset | SSH public keys with full admin rights: key lines or files with one key per line, comma-separated. Closes the server. |
+| `AGIT_SERVER_TOKEN` | `--token` | unset | Root bearer token with full access. Closes the server. An empty value is a (bad) token, not "off". |
+| `AGIT_ALLOW_OPEN` | `--allow-open` | unset | Allow an open server (no keys, no token) on a non-loopback address. |
 | `AGIT_WEB_DIR` | `--web-dir` | unset | Directory with the built web UI (`index.html` and assets), served at `/` with SPA fallback. |
 | `RUST_LOG` | – | `info,tower_http=info` | Log filter (`tracing-subscriber` EnvFilter). `debug` or `tower_http=debug` logs each request; `warn` for quiet servers. |
-| `AGIT_FSYNC` | – | `refs` | Durability: `refs` fsyncs ref updates and logs (git-like), `all` also fsyncs every object write, `none` never fsyncs (throwaway servers only). |
+| `AGIT_FSYNC` | – | `refs` | Durability: `refs` syncs the ref journal with `fsync(2)` like git (on macOS without flushing the drive cache), `full` adds a full flush (power-loss safe on macOS), `all` also flushes every object write, `none` never fsyncs (throwaway servers only). |
 
-Client-side variables for completeness: `AGIT_TOKEN` (bearer token for `agit`),
+Client-side variables for completeness: `AGIT_TOKEN` (bearer token for `agit`;
+without it the cached SSH session is used), `AGIT_SSH_KEY` (private key for
+sign-in), `AGIT_AUTO_LOGIN=0` (never sign in automatically),
+`AGIT_SESSIONS_FILE` (session cache, default `~/.agit/sessions.json`),
 `AGIT_AGENT`, `AGIT_MODEL`, `AGIT_RUN_ID` (commit and request metadata),
-`AGIT_SERVER_URL` (SDK tests and examples). The SDKs read the same names.
+`AGIT_SERVER_URL` (`agit auth` outside a repository, SDK tests and examples).
+The SDKs read the same names.
 
 ## Data directory and backups
 

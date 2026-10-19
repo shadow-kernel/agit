@@ -3,18 +3,30 @@
 This document describes what agit protects today, what it does not, how to
 harden a deployment, and how to report vulnerabilities. It reflects the
 single-node server in `crates/agit-server` as it stands; the planned
-multi-tenant design (organisations, per-agent scoped tokens, RFC 0004) is
-not built and is not covered here. Deployment mechanics are in
-[DEPLOYMENT.md](DEPLOYMENT.md).
+multi-tenant design (organisations, replication, RFC 0004) is not built and
+is not covered here. Deployment mechanics are in [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Summary
 
-- Authentication is **one shared bearer token** per server
-  (`AGIT_SERVER_TOKEN`). It grants full read/write access to every repository
-  and setting. No token means an open server.
-- The acting agent (`X-Agit-Agent`, `AGIT_AGENT`) is **self-asserted**. It is
-  recorded in commits, events, leases, PRs and reviews and used by policies,
-  but nothing verifies that the caller is that agent.
+- **People sign in with SSH keys.** The server keeps a registry of authorized
+  Ed25519 public keys (`/auth/keys`), each with per-repository `read`,
+  `write` or `admin` scopes and optionally a bound agent identity; the admin
+  keys given at startup (`--admin-key ~/.ssh/id_ed25519.pub`) have every
+  permission. A client proves possession of the private key by signing a
+  single-use challenge and receives a short-lived session token (8 hours by
+  default). The private key never leaves the client; passphrase-protected
+  keys are used through ssh-agent.
+- **Agents and CI use scoped tokens** (`/auth/tokens`), optionally bound to an
+  agent identity. The root token (`AGIT_SERVER_TOKEN`) is only needed to
+  bootstrap a server that has no admin key.
+- **Closed by default.** As soon as a root token or an admin key is
+  configured, every request needs credentials and repositories are visible
+  only to principals with a scope on them. Without either the server is open
+  (every request acts as root); `agit-server` refuses to start that way on a
+  non-loopback address unless `--allow-open` is passed.
+- The acting agent (`X-Agit-Agent`, `AGIT_AGENT`) is **self-asserted** unless
+  the token or key is bound to an agent, in which case the bound identity
+  wins and cannot be spoofed by header.
 - **Webhook deliveries are signed** with keyed BLAKE3 when a secret is set;
   receivers should verify the signature.
 - **Objects are verified on read**: every blob, tree and commit is re-hashed
@@ -33,42 +45,58 @@ not built and is not covered here. Deployment mechanics are in
   decisions, credentials pasted by mistake, or internal URLs.
 - Webhook subscriptions with their secrets (`webhooks.json`, plaintext on
   disk) and the trusted signing-key registry (`keys.json`).
-- The bearer token itself, held by every client, SDK configuration, CI job
-  and browser that uses the web UI.
+- The authorized-key registry and token hashes under `auth/`, the root token
+  held by operators, and the session and scoped tokens held by clients, SDK
+  configurations, CI jobs and browsers (`~/.agit/sessions.json` on clients,
+  mode 0600).
 
 ## Trust boundaries and what holds at each
 
 ### Network client to server
 
-Every request under `/api/v1` passes through one middleware: if the server has
-a token, the request must carry `Authorization: Bearer <token>` exactly;
-otherwise it is rejected with `403`. That is the whole access model:
+Every request under `/api/v1` passes through one middleware that resolves the
+bearer token to a principal (root, a scoped token, or an SSH-key session) and
+checks the scope the route needs. Missing or invalid credentials are `401
+unauthorized`; valid credentials without the needed scope are `403 forbidden`.
+Both are audited.
 
-- There are no roles, no per-repository permissions and no read-only tokens.
-  Anyone with the token can create and delete repositories, move refs
-  (subject to policy), change policies, register webhooks pointing at any
-  URL, and add trusted signing keys.
-- Token comparison is a plain string comparison; tokens should be long and
-  random (`openssl rand -hex 32`). An empty `AGIT_SERVER_TOKEN=` is treated
-  as an empty token, not as "disabled".
-- `/api/v1/health` is behind the same check, so an unauthenticated probe
-  learns nothing but "something answers with 403".
+- **SSH-key sign-in.** `POST /auth/challenge` hands out a random 32-byte nonce
+  that is valid for two minutes and redeemable once. `POST /auth/session`
+  must present the public key and an Ed25519 signature over
+  `agit-auth-v1\n<nonce>`; the domain prefix keeps the signature from being
+  confused with a commit signature over the same key. Only keys in the
+  registry or among the startup admin keys open a session; the session token
+  inherits the key's scopes and bound agent, lives 8 hours by default (30
+  days at most) and is revoked with the key. The server never sees the
+  private key. Only `ssh-ed25519` keys are accepted; RSA and ECDSA keys are
+  refused with a hint to generate an Ed25519 key.
+- **Scopes** are `read`, `write` or `admin` per repository or `*`. Reads need
+  read, mutations write, and repository create/delete, policy, signing keys,
+  webhooks, tag rules, tokens and authorized keys need admin. Repository
+  listings are filtered by scope, so a key with access to one repository
+  cannot see that others exist. A principal can grant only what it holds.
+- The **root token** is compared as a plain string; keep it long and random
+  (`openssl rand -hex 32`). An empty `AGIT_SERVER_TOKEN=` is an empty token,
+  not "disabled". Token hashes (BLAKE3) are stored, never plaintexts.
+- `/api/v1/health` is public so load balancers can probe; everything else
+  under `/api/v1` is protected on a closed server. `/auth/challenge` and
+  `/auth/session` are public by nature and rate-limited only by the cap on
+  outstanding challenges; put a reverse-proxy rate limit in front of them on
+  the open internet.
 - Policies (`protected branches`, `allowed merge/push agents`,
-  `require_agent`, minimum approvals, review decisions) are enforced, but
-  they key on the self-asserted `X-Agit-Agent`. They defend against
-  well-behaved agents making mistakes, not against a caller who lies about
-  who they are. The same applies to "author excluded from approvals" and to
-  lease ownership.
+  `require_agent`, minimum approvals, review decisions) key on the acting
+  agent. With tokens or keys bound to agents that identity is authenticated;
+  with header-only identity they defend against well-behaved agents making
+  mistakes, not against a caller who lies about who they are.
 - Static files under `AGIT_WEB_DIR` are served **without** the token check
   (only `/api/v1` is protected). The UI bundle is public by design; it holds
   no secrets.
 
-Landing on `main` now: Ed25519 commit signing (`agit key generate`,
-`agit commit --sign`) with a per-repository registry of trusted public keys
-per agent. A valid, trusted signature does prove that whoever made the commit
-held the agent's private key, which is the first real agent identity in the
-system. Note that today anyone with the bearer token may add keys to the
-registry, so key trust is only as strong as token custody.
+Commit signing is a separate mechanism: Ed25519 signatures over the commit
+(`agit key generate`, `agit commit --sign`) with a per-repository registry of
+trusted public keys per agent. A valid, trusted signature proves that whoever
+made the commit held the agent's private key. Adding keys to that registry
+needs admin on the repository.
 
 ### Server to webhook receivers
 
@@ -127,17 +155,22 @@ an environment where that matters.
 ## Out of scope today
 
 Denial of service (no rate limits, no body size limits, no per-token
-quotas), multi-tenancy, audit logging beyond the per-repository event log,
-secrets scanning of pushed content, and any protection against a token
-holder. Each of these is addressed at the proxy or network layer for now and
-is tracked for the server in [ROADMAP.md](ROADMAP.md) and the RFCs.
+quotas), multi-tenancy beyond per-repository scopes, secrets scanning of
+pushed content, and any protection against a principal that holds admin on a
+repository. Each of these is addressed at the proxy or network layer for now
+and is tracked for the server in [ROADMAP.md](ROADMAP.md) and the RFCs.
 
 ## Hardening checklist
 
 Server:
 
-- [ ] Set `AGIT_SERVER_TOKEN` to at least 32 random bytes; never run an
-      open server on a reachable interface.
+- [ ] Start with `--admin-key` (your `~/.ssh/id_ed25519.pub`) or
+      `AGIT_SERVER_TOKEN` (at least 32 random bytes); never pass
+      `--allow-open` on a reachable interface.
+- [ ] Authorize people with `agit auth key add <pubkey> --scope <repo>:write`
+      and give nobody more than they need; use `--agent` so their sessions
+      carry an authenticated identity. Remove keys when people leave; that
+      revokes their sessions.
 - [ ] Bind to `127.0.0.1` (or a private interface) and put a TLS-terminating
       reverse proxy in front; enable HSTS once TLS works.
 - [ ] Run as a dedicated unprivileged user (the systemd unit) or the image's
@@ -157,11 +190,15 @@ Server:
 
 Clients and agents:
 
-- [ ] Give agents the token through the environment (`AGIT_TOKEN`) or a
-      secrets manager, not on the command line or in prompts; scrub it from
-      logs and transcripts.
-- [ ] Rotate the token when a client is decommissioned or a transcript
-      containing it leaks (restart the server with a new value).
+- [ ] People sign in with `agit auth login` (SSH key, passphrase-protected
+      keys through ssh-agent) instead of sharing tokens; sessions expire on
+      their own and `agit auth logout` revokes one early.
+- [ ] Give agents scoped tokens bound to their identity through the
+      environment (`AGIT_TOKEN`) or a secrets manager, not on the command
+      line or in prompts; scrub them from logs and transcripts.
+- [ ] Revoke a token (`agit auth token revoke`) when a client is
+      decommissioned or a transcript containing it leaks; rotate the root
+      token by restarting with a new value.
 - [ ] Verify webhook signatures and use `X-Agit-Delivery` for idempotency.
 - [ ] Configure policies (protected branches, PR-only, required approvals,
       `require_intent`) to catch agent mistakes, and remember they are not

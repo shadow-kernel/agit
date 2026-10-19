@@ -658,3 +658,108 @@ __all__ = [
     "expect_any",
     "expect_is",
 ]
+
+
+# -- auth --------------------------------------------------------------------
+
+
+@dataclass
+class Scope(Model):
+    """``{repo, access}``: ``repo`` is a repository name or ``*``; ``access`` is ``read``, ``write`` or ``admin``."""
+
+    repo: str = "*"
+    access: str = "read"
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"repo": self.repo, "access": self.access}
+
+
+@dataclass
+class TokenInfo(Model):
+    """A scoped bearer token (``GET /auth/tokens``); hashes only, never the plaintext."""
+
+    id: str = ""
+    name: str = ""
+    agent: str | None = None
+    scopes: list[Scope] = field(default_factory=list)
+    created_ms: int = 0
+    expires_ms: int | None = None
+    created_by: str = ""
+    last_used_ms: int | None = None
+    #: Session tokens: the authorized key (``/auth/keys`` id, or ``admin``) that signed in.
+    key: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    _parsers: ClassVar[dict[str, Callable[[Any], Any]]] = {"scopes": _list_of(Scope)}
+
+
+@dataclass
+class TokenCreated(TokenInfo):
+    """``POST /auth/tokens`` / ``POST /auth/session``: the plaintext ``token`` is returned once."""
+
+    token: str = ""
+
+
+@dataclass
+class WhoAmI(Model):
+    """``GET /auth/whoami``."""
+
+    #: ``root``, ``anonymous`` or the token id.
+    principal: str = ""
+    agent: str | None = None
+    root: bool = False
+    scopes: list[Scope] = field(default_factory=list)
+    #: The authorized key behind this session, when signed in with one.
+    key: str | None = None
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    _parsers: ClassVar[dict[str, Callable[[Any], Any]]] = {"scopes": _list_of(Scope)}
+
+    def holds(self, repo: str, access: str) -> bool:
+        """Does this principal have ``access`` (``read``/``write``/``admin``) on ``repo`` (``*`` for server-wide)?"""
+        if self.root:
+            return True
+        rank = {"read": 0, "write": 1, "admin": 2}
+        need = rank.get(access, 0)
+        return any((s.repo == "*" or s.repo == repo) and rank.get(s.access, 0) >= need for s in self.scopes)
+
+
+@dataclass
+class AuthorizedKey(Model):
+    """An SSH public key allowed to sign in (``GET /auth/keys``)."""
+
+    id: str = ""
+    name: str = ""
+    #: ``SHA256:…``, as ``ssh-keygen -lf`` prints it.
+    fingerprint: str = ""
+    key_id: str = ""
+    #: ``ssh-ed25519 <base64> [comment]``.
+    public_key: str = ""
+    #: Sessions opened with this key always act as this agent.
+    agent: str | None = None
+    scopes: list[Scope] = field(default_factory=list)
+    created_ms: int = 0
+    created_by: str = ""
+    last_used_ms: int | None = None
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+    _parsers: ClassVar[dict[str, Callable[[Any], Any]]] = {"scopes": _list_of(Scope)}
+
+
+@dataclass
+class Challenge(Model):
+    """``POST /auth/challenge``: a single-use nonce to sign with an SSH key."""
+
+    nonce: str = ""
+    expires_ms: int = 0
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
+
+
+#: Prefix of the bytes a client signs to redeem a challenge: ``agit-auth-v1\n<nonce>``.
+AUTH_MESSAGE_PREFIX = b"agit-auth-v1\n"
+
+
+def auth_message(nonce: str) -> bytes:
+    """The exact bytes to sign for ``POST /auth/session``."""
+    return AUTH_MESSAGE_PREFIX + nonce.encode("utf-8")

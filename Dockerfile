@@ -100,9 +100,8 @@ EXPOSE 7878
 USER agit:agit
 WORKDIR /data
 
-# /api/v1/health sits behind the bearer-token middleware, so send the token
-# when one is configured (an Authorization header is ignored when it is not).
+# /api/v1/health is public, so no credentials are needed here.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -fsS -H "Authorization: Bearer ${AGIT_SERVER_TOKEN:-none}" "http://127.0.0.1:${AGIT_LISTEN##*:}/api/v1/health" >/dev/null || exit 1
+    CMD curl -fsS "http://127.0.0.1:${AGIT_LISTEN##*:}/api/v1/health" >/dev/null || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--", "agit-server"]

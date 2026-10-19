@@ -45,7 +45,7 @@ With `VITE_AGIT_MOCK=1`, or automatically whenever `GET /health` fails at startu
 
 ## Settings
 
-The gear in the header opens a popover with three fields stored in `localStorage` under `agit.settings`: the API base URL (overrides `VITE_AGIT_API`), the bearer token (sent as `Authorization: Bearer …`) and the acting agent id (sent as `X-Agit-Agent`, so reviews and notes made from the browser are attributed). Anyone who can run script on the UI's origin can read the token; the UI uses no cookies, Markdown is rendered through DOMPurify, and there is no CSRF channel ([docs/SECURITY.md](../SECURITY.md)).
+The gear in the header opens a popover with three fields stored in `localStorage` under `agit.settings`: the API base URL (overrides `VITE_AGIT_API`), the bearer token (sent as `Authorization: Bearer …`) and the acting agent id (sent as `X-Agit-Agent`, so reviews and notes made from the browser are attributed). A browser cannot sign with an SSH key, so on a closed server take the token from `agit auth login --print-token` (a session token with your scopes) or from an admin's `agit auth token create`. Server-wide admins get two more pages from the popover: **SSH keys** (`/admin/keys`: who may sign in, with which scopes and agent identity; removing a key revokes its sessions) and **Tokens** (`/admin/tokens`). Anyone who can run script on the UI's origin can read the token; the UI uses no cookies, Markdown is rendered through DOMPurify, and there is no CSRF channel ([docs/SECURITY.md](../SECURITY.md)).
 
 ## Pages
 

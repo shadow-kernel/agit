@@ -32,6 +32,14 @@ pub struct Keypair {
     signing: SigningKey,
 }
 
+static KEYS_DIR_OVERRIDE: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+/// Use `dir` instead of `~/.agit/keys` for the rest of this process
+/// (tests and embedders; `AGIT_KEYS_DIR` does the same from the environment).
+pub fn set_keys_dir(dir: Option<PathBuf>) {
+    *KEYS_DIR_OVERRIDE.lock().unwrap() = dir;
+}
+
 impl Keypair {
     pub fn generate(name: &str) -> Keypair {
         Keypair {
@@ -54,6 +62,11 @@ impl Keypair {
 
     pub fn public_key_hex(&self) -> String {
         hex::encode(self.signing.verifying_key().to_bytes())
+    }
+
+    /// The 32-byte seed as hex, the format of `~/.agit/keys/<name>.key`.
+    pub fn secret_hex(&self) -> String {
+        hex::encode(self.signing.to_bytes())
     }
 
     pub fn key_id(&self) -> String {
@@ -82,6 +95,9 @@ impl Keypair {
     // -- storage -----------------------------------------------------------
 
     pub fn keys_dir() -> PathBuf {
+        if let Some(d) = KEYS_DIR_OVERRIDE.lock().unwrap().clone() {
+            return d;
+        }
         if let Ok(d) = std::env::var("AGIT_KEYS_DIR") {
             return PathBuf::from(d);
         }
@@ -302,7 +318,7 @@ mod tests {
     #[test]
     fn key_storage() {
         let dir = tempfile::tempdir().unwrap();
-        std::env::set_var("AGIT_KEYS_DIR", dir.path());
+        set_keys_dir(Some(dir.path().to_path_buf()));
         let k = Keypair::generate("alpha");
         k.save().unwrap();
         assert!(Keypair::save(&Keypair::generate("alpha")).is_err());
@@ -315,6 +331,6 @@ mod tests {
         );
         Keypair::delete("alpha").unwrap();
         assert!(Keypair::list().unwrap().is_empty());
-        std::env::remove_var("AGIT_KEYS_DIR");
+        set_keys_dir(None);
     }
 }

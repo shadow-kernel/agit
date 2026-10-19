@@ -4,6 +4,7 @@
 
 pub mod client;
 pub mod local_knowledge;
+pub mod sshauth;
 pub mod stream;
 pub mod submodule;
 pub mod sync;

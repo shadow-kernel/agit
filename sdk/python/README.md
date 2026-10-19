@@ -243,6 +243,38 @@ Through `AgentSession`: `s.context_pack(path, budget)`, `s.stale_notes(rev)`,
 `s.validate_note(note_or_id, rev)`, `s.accept_note(draft_or_id, **patch)` and
 `s.remember(..., valid_at=...)`.
 
+## Authentication: SSH keys, sessions and tokens
+
+The server authenticates people with SSH keys and agents with scoped tokens
+(see `docs/SECURITY.md`). The SDK bundles no signing code, so the simplest way
+to a token is the CLI: `agit auth login --url <server> --print-token`, then
+`Client(token=...)` or `AGIT_TOKEN`. With a signing library of your choice the
+SDK can do the challenge/response itself:
+
+```python
+from cryptography.hazmat.primitives.serialization import load_ssh_private_key
+key = load_ssh_private_key(open("/home/me/.ssh/id_ed25519", "rb").read(), password=None)
+pub = open("/home/me/.ssh/id_ed25519.pub").read().strip()
+created = client.login_with_key(pub, key.sign, ttl_secs=8 * 3600)   # signs "agit-auth-v1\n<nonce>"
+me = client.whoami()                      # WhoAmI(principal="tok_…", agent=…, scopes=[Scope("shop", "write")], key="key_…")
+me.holds("shop", "write")                 # True
+client.logout()                           # revokes the session
+```
+
+Admins manage who may sign in and mint tokens for agents:
+
+```python
+client.add_authorized_key(pub, [Scope("shop", "write")], name="dana laptop", agent="dana")
+client.authorized_keys()                  # [AuthorizedKey(fingerprint="SHA256:…", scopes=[…]), …]
+tok = client.create_token("ci-deploy", [{"repo": "shop", "access": "write"}], agent="ci-bot", ttl_secs=30 * 86400)
+tok.token                                 # shown once
+client.delete_token(tok.id); client.delete_authorized_key("key_…")
+```
+
+Errors: `Unauthorized` (401, no usable credentials) versus `Forbidden` (403,
+valid credentials without the needed scope, or an SSH key that is not
+authorized).
+
 ## Signing keys
 
 Agents sign commits with Ed25519 (`agit key generate`, `agit commit --sign`); the
