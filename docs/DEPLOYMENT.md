@@ -296,6 +296,7 @@ environment.
 | `AGIT_ADMIN_KEYS` | `--admin-key` | unset | SSH public keys with full admin rights: key lines or files with one key per line, comma-separated. Closes the server. |
 | `AGIT_SERVER_TOKEN` | `--token` | unset | Root bearer token with full access. Closes the server. An empty value is a (bad) token, not "off". |
 | `AGIT_ALLOW_OPEN` | `--allow-open` | unset | Allow an open server (no keys, no token) on a non-loopback address. |
+| `AGIT_MAX_UPLOAD_MB` | `--max-upload-mb` | `1024` | Largest object upload request in MiB. Pushes travel in batches of about 8 MiB, but a single file larger than that is sent alone, so set this above the largest file in your repositories (and lift the reverse proxy's body limit to match). |
 | `AGIT_WEB_DIR` | `--web-dir` | unset | Directory with the built web UI (`index.html` and assets), served at `/` with SPA fallback. |
 | `RUST_LOG` | – | `info,tower_http=info` | Log filter (`tracing-subscriber` EnvFilter). `debug` or `tower_http=debug` logs each request; `warn` for quiet servers. |
 | `AGIT_FSYNC` | – | `refs` | Durability: `refs` syncs the ref journal with `fsync(2)` like git (on macOS without flushing the drive cache), `full` adds a full flush (power-loss safe on macOS), `all` also flushes every object write, `none` never fsyncs (throwaway servers only). |

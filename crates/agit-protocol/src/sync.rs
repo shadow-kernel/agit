@@ -140,14 +140,39 @@ fn upload_missing(
         stream::encode_frame(&mut buf, kind, &payload);
         sent += 1;
         if buf.len() >= UPLOAD_CHUNK_BYTES {
-            client.upload(remote_repo, &buf)?;
+            upload_batch(client, remote_repo, &buf)?;
             buf.clear();
         }
     }
     if !buf.is_empty() {
-        client.upload(remote_repo, &buf)?;
+        upload_batch(client, remote_repo, &buf)?;
     }
     Ok(sent)
+}
+
+/// Upload one batch. A server that refuses a body as too large closes the
+/// connection while the client is still writing, which surfaces as a broken
+/// pipe or a reset; say what probably happened.
+fn upload_batch(client: &Client, remote_repo: &str, buf: &[u8]) -> Result<()> {
+    match client.upload(remote_repo, buf) {
+        Ok(_) => Ok(()),
+        Err(Error::Invalid(msg)) if msg.starts_with("transport error") => {
+            Err(Error::Invalid(format!(
+                "{msg}: the server closed the connection during an upload of {} MiB; it \
+                 probably refused the request as too large (raise it with \
+                 `agit-server --max-upload-mb <MiB>` or AGIT_MAX_UPLOAD_MB, and the \
+                 request body limit of any reverse proxy in front of it)",
+                buf.len().div_ceil(1024 * 1024)
+            )))
+        }
+        Err(Error::Invalid(msg)) if msg.contains("server error 413") => {
+            Err(Error::Invalid(format!(
+                "{msg}: upload of {} MiB refused as too large; raise `agit-server --max-upload-mb`",
+                buf.len().div_ceil(1024 * 1024)
+            )))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 pub fn push(

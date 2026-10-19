@@ -17,7 +17,7 @@ use agit_protocol::stream;
 use agit_protocol::types::*;
 use agit_protocol::walk;
 use axum::body::Bytes;
-use axum::extract::{FromRequestParts, Path, Query, Request, State};
+use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
@@ -221,7 +221,12 @@ pub fn router(state: Arc<AppState>, web_dir: Option<&std::path::Path>) -> Router
         .route("/repos/{repo}/refs/update", post(update_refs))
         .route("/repos/{repo}/branches", get(list_branches))
         .route("/repos/{repo}/tags", get(list_tags))
-        .route("/repos/{repo}/objects", post(upload_objects))
+        // Object streams carry whole files; every other route keeps axum's
+        // default 2 MiB limit for request bodies.
+        .route(
+            "/repos/{repo}/objects",
+            post(upload_objects).layer(DefaultBodyLimit::max(state.max_upload_bytes)),
+        )
         .route("/repos/{repo}/objects/missing", post(missing_objects))
         .route("/repos/{repo}/objects/{id}", get(get_object))
         .route("/repos/{repo}/objects/{id}/json", get(get_object_json))

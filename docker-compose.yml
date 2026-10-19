@@ -36,6 +36,8 @@ services:
       - AGIT_ADMIN_KEYS
       - AGIT_SERVER_TOKEN
       - AGIT_ALLOW_OPEN
+      # Largest object upload in MiB (default 1024); raise it for big binaries.
+      - AGIT_MAX_UPLOAD_MB
     volumes:
       - agit-data:/data
       # Alternative: keep repositories in a host directory instead of a named

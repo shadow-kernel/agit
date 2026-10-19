@@ -129,10 +129,17 @@ impl RepoHandle {
     }
 }
 
+/// Default limit for one object upload request (`POST /repos/{repo}/objects`).
+/// Clients batch uploads at 8 MiB, but a single object larger than that is
+/// sent on its own, so the limit has to fit the largest file in a repository.
+pub const DEFAULT_MAX_UPLOAD_BYTES: usize = 1024 * 1024 * 1024;
+
 pub struct AppState {
     pub data_dir: PathBuf,
     pub token: Option<String>,
     pub auth: crate::auth::AuthStore,
+    /// Largest accepted object upload body in bytes.
+    pub max_upload_bytes: usize,
     repos: RwLock<HashMap<String, Arc<RepoHandle>>>,
 }
 
@@ -166,6 +173,7 @@ impl AppState {
             auth: crate::auth::AuthStore::open(&data_dir),
             data_dir,
             token,
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
             repos: RwLock::new(repos),
         })
     }
@@ -174,6 +182,12 @@ impl AppState {
     /// with admin keys is closed even without a root token.
     pub fn with_admin_keys(mut self, keys: Vec<agit_core::sshkey::SshPublicKey>) -> Self {
         self.auth.set_admin_keys(keys);
+        self
+    }
+
+    /// Set the largest accepted object upload body (bytes, at least 1 MiB).
+    pub fn with_max_upload_bytes(mut self, bytes: usize) -> Self {
+        self.max_upload_bytes = bytes.max(1024 * 1024);
         self
     }
 

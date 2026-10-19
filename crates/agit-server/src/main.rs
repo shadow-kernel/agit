@@ -40,6 +40,11 @@ struct Args {
     /// Run without any authentication on a non-loopback address.
     #[arg(long, env = "AGIT_ALLOW_OPEN", value_parser = clap::builder::FalseyValueParser::new())]
     allow_open: bool,
+    /// Largest accepted object upload request in MiB. A push sends objects in
+    /// batches of about 8 MiB, but a file larger than that travels on its own,
+    /// so this must exceed the largest file in your repositories.
+    #[arg(long, env = "AGIT_MAX_UPLOAD_MB", default_value_t = 1024)]
+    max_upload_mb: usize,
 }
 
 /// Parse `--admin-key` values: a key line, or a path to a file holding one
@@ -108,14 +113,15 @@ async fn main() -> anyhow::Result<()> {
     }
     let state = Arc::new(
         state::AppState::open(args.data_dir.clone(), args.token.clone())?
-            .with_admin_keys(admin_keys),
+            .with_admin_keys(admin_keys)
+            .with_max_upload_bytes(args.max_upload_mb.saturating_mul(1024 * 1024)),
     );
     if !closed {
         tracing::warn!("no authentication configured: every request acts as root (open mode)");
     }
     let app = api::router(state, args.web_dir.as_deref());
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    tracing::info!(addr = %args.listen, data_dir = %args.data_dir.display(), auth = closed, root_token = args.token.is_some(), admin_keys = args.admin_keys.len(), web = args.web_dir.as_ref().map(|p| p.display().to_string()), "agit-server listening");
+    tracing::info!(addr = %args.listen, data_dir = %args.data_dir.display(), auth = closed, root_token = args.token.is_some(), admin_keys = args.admin_keys.len(), max_upload_mb = args.max_upload_mb, web = args.web_dir.as_ref().map(|p| p.display().to_string()), "agit-server listening");
     axum::serve(listener, app).await?;
     Ok(())
 }

@@ -13,6 +13,15 @@ release will be 0.1.0 (the current workspace version).
 
 ## [Unreleased]
 
+### Fixed
+
+- Pushes larger than 2 MiB failed with `transport error … Broken pipe`: the
+  object upload route inherited axum's default 2 MiB request body limit while
+  clients send batches of 8 MiB. Object uploads now accept up to
+  `--max-upload-mb` (`AGIT_MAX_UPLOAD_MB`, default 1024 MiB); every other route
+  keeps the 2 MiB limit. When a server still refuses an upload, the client says
+  so and names the setting instead of reporting a bare broken pipe.
+
 ## [0.1.2] - 2026-10-19
 
 ### Fixed

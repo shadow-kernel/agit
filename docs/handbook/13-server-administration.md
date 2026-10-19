@@ -18,6 +18,7 @@ AGIT_DATA_DIR=/var/lib/agit AGIT_LISTEN=127.0.0.1:7878 agit-server
 | `AGIT_LISTEN` | `--listen` | `127.0.0.1:7878` | socket address (`0.0.0.0:7878` in containers) |
 | `AGIT_SERVER_TOKEN` | `--token` | unset (open mode) | root bearer token; an empty value is a (bad) token, not "off" |
 | `AGIT_WEB_DIR` | `--web-dir` | unset | built web UI, served at `/` with SPA fallback, without token check |
+| `AGIT_MAX_UPLOAD_MB` | `--max-upload-mb` | `1024` | largest object upload request in MiB; must exceed the largest file in a repository (pushes batch about 8 MiB, bigger files go alone) |
 | `RUST_LOG` | | `info,tower_http=info` | log filter; `tower_http=debug` logs each request |
 | `AGIT_FSYNC` | | `refs` | durability: `refs` (git's fsync), `full` (flush the drive cache too, power-loss safe on macOS), `all`, `none` |
 

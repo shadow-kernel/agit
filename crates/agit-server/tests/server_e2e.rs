@@ -1436,3 +1436,52 @@ async fn local_knowledge_fallback_and_sync() {
     .await
     .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn push_and_clone_larger_than_two_mib() {
+    // Regression: object uploads were capped by axum's default 2 MiB body
+    // limit, so every push of a real repository failed with a broken pipe.
+    let tmp = tempfile::tempdir().unwrap();
+    let base = start_server(&tmp.path().join("data")).await;
+    let tmp_path = tmp.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let url = format!("{base}/repos/big");
+        let a = Repository::init(&tmp_path.join("a")).unwrap();
+        // Pseudo-random, incompressible content: 300 files of 40 KiB (about
+        // 12 MiB, several upload batches) plus one 9 MiB file sent on its own.
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut noise = |n: usize| -> Vec<u8> {
+            (0..n)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    (x >> 24) as u8
+                })
+                .collect()
+        };
+        for i in 0..300 {
+            let p = a.work_dir().join(format!("assets/tex{:03}.bin", i));
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, noise(40 * 1024)).unwrap();
+        }
+        let big = noise(9 * 1024 * 1024);
+        fs::write(a.work_dir().join("level.pak"), &big).unwrap();
+        let c = commit_all(&a, "assets", "agent-a");
+        sync::add_remote(&a, "origin", &url).unwrap();
+        let p = sync::push(&a, "origin", "main", false, true).unwrap();
+        assert_eq!(p.new, c.id);
+        assert!(p.objects_sent >= 302, "sent {}", p.objects_sent);
+
+        let (b, _) = sync::clone(&url, &tmp_path.join("b")).unwrap();
+        assert_eq!(fs::read(b.work_dir().join("level.pak")).unwrap(), big);
+        assert_eq!(
+            fs::read(b.work_dir().join("assets/tex299.bin"))
+                .unwrap()
+                .len(),
+            40 * 1024
+        );
+    })
+    .await
+    .unwrap();
+}

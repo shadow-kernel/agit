@@ -54,7 +54,7 @@ Tokens (for agents, CI and the browser):
 Object stream format (content type `application/x-agit-objects`):
 repeated frames `kind:u8 | len:u32 big-endian | payload`. kind 1 blob, 2 tree, 3 commit.
 - `POST /repos/{repo}/objects/missing` `{"ids":[...]}` -> `{"missing":[...]}`
-- `POST /repos/{repo}/objects` body: object stream -> `{"stored":n,"skipped":n}`
+- `POST /repos/{repo}/objects` body: object stream -> `{"stored":n,"skipped":n}`. Clients send batches of about 8 MiB; an object larger than that goes in a request of its own. The body limit is `agit-server --max-upload-mb` (default 1024 MiB); larger bodies are refused with `413` (the server may close the connection while the client is still sending). Every other route accepts JSON bodies up to 2 MiB.
 - `GET /repos/{repo}/objects/{id}` -> raw payload, header `X-Agit-Kind: blob|tree|commit`
 - `GET /repos/{repo}/objects/{id}/json` -> `{id, kind, size, tree?|commit?|text?}`
 - `POST /repos/{repo}/fetch` `{"wants":[ids],"haves":[ids]}` -> object stream of everything
