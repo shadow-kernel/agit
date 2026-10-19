@@ -71,6 +71,9 @@ try:
     r = json.load(sys.stdin).get("result") or {}
 except Exception:
     sys.exit(0)
+# `agit know context --json` wraps the context: {"context": {...}, "source": "server"|"local"}
+if isinstance(r.get("context"), dict):
+    r = r["context"]
 lines = []
 notes = r.get("notes") or []
 if notes:

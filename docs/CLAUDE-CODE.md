@@ -105,6 +105,7 @@ Hook output that goes to Claude is prefixed `agit ...` so it is easy to spot in 
 - **Context never appears.** `agit know context <path> --json` needs a remote (`agit remote add origin <url>`) and a reachable server; failures are cached for 60 seconds per path. Delete `$TMPDIR/agit-claude-hooks/` to reset the cache.
 - **Too many leases.** The post-edit hook claims one lease per file. Claim a directory yourself before a larger change (`agit lease claim src/cart --ttl 1h`); the hook detects covering leases and stays quiet. `agit lease release --all` at the end of a task.
 - **Checkpoints pile up.** One per turn that changed the tree, by design. `agit checkpoint list -n 5` shows the newest; they are not part of branch history.
+- **What the hooks cost.** About 120 ms per hook call and roughly 250 ms per file edit (pre and post), measured with `integrations/claude-code/bench_hooks.py`; most of it is `python3` start-up for JSON handling. See docs/BENCHMARKS.md.
 - **Hooks time out.** Timeouts in `settings.json` are 10 to 30 seconds. The context call waits up to 10 seconds for a TCP connect; a server that accepts connections but does not answer can hold the hook until the timeout, after which Claude Code continues without the context.
 - **Windows.** The scripts are bash; use WSL or Git Bash with `python3` or `jq` available.
 

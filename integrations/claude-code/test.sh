@@ -149,6 +149,17 @@ assert_empty "dead remote: no output" "$LAST_OUT$LAST_ERR"
 n=$(ls "$TMPDIR/agit-claude-hooks"/ctx-* 2>/dev/null | wc -l | tr -d ' ')
 [ "$n" -ge 1 ] && ok "context result cached in TMPDIR" || fail "context cache file missing"
 
+# a knowledge note about the path reaches Claude before the edit (server
+# unreachable here, so it comes from the local store)
+"$AGIT_BIN" -C "$R" know --local add -t "Totals are in minor units" --tag kind:gotcha --path src/main.rs -b "integer cents" --json >/dev/null
+rm -rf "$TMPDIR/agit-claude-hooks"
+run_hook pre-edit.sh "$(edit_json "$R" Edit "$R/src/main.rs")"
+assert_rc "edit with a note about the path allowed" 0
+assert_contains "note title reaches Claude as context" "$LAST_OUT" "Totals are in minor units"
+assert_contains "note kind tag reaches Claude" "$LAST_OUT" "kind:gotcha"
+assert_contains "context is additionalContext JSON" "$LAST_OUT" "additionalContext"
+rm -rf "$TMPDIR/agit-claude-hooks"
+
 # --- pre-edit: blocked by a foreign lease ------------------------------------
 "$AGIT_BIN" -C "$R" lease claim src --holder other-agent --ttl 10m --note "refactor" --json >/dev/null
 run_hook pre-edit.sh "$(edit_json "$R" Edit "$R/src/main.rs")"
