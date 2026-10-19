@@ -1,6 +1,6 @@
 {
   "name": "@agit/sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeScript client for the agit server HTTP API: repositories, refs, objects, pull requests, leases, knowledge notes and live events for AI agents.",
   "license": "MIT OR Apache-2.0",
   "type": "module",
