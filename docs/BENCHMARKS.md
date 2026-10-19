@@ -111,6 +111,118 @@ Per-step breakdown with `AGIT_FSYNC=none` on the same run (`profile_commit`):
 index rewrite on flush are the next targets; `status` on 2,000 files sits at
 7.3 to 8.4 ms across these runs.
 
+## 2026-10-19: agit against git, side by side
+
+`python3 scripts/compare_git.py --real-repo https://github.com/BurntSushi/ripgrep.git`
+runs the same workloads with both tools in a temporary directory, out of the
+box (default durability, no tuning, one process per command for both). The
+git remote is a local bare repository and the agit remote an agit-server on
+127.0.0.1; nothing goes over the network except the read-only clone of
+ripgrep. Apple M3 Pro, 11 cores, 18 GB, macOS (Darwin 25.4), APFS, agit
+0.1.3, git 2.50.1 (Apple Git-155). Other programs were running on the
+laptop (load average about 3), so treat single-digit differences as noise.
+
+Single agent, synthetic tree of 5,000 files in 100 directories (about 2 KB
+each), medians:
+
+| Operation | git | agit |
+| --- | ---: | ---: |
+| `status`, clean tree | 18.6 ms | 16.8 ms |
+| `add` + `commit` of one changed file (100 iterations) | 37.8 ms (26/s) | **18.2 ms (54/s)** |
+| `log -n 20` | 10.8 ms | 8.1 ms |
+| create a branch, switch to it and back | **29.7 ms** | 43.6 ms |
+| snapshot a dirty tree (200 modified, 20 untracked files): `stash push -u` + `stash apply` vs `checkpoint` | 431.4 ms | **23.1 ms** |
+| roll back to that snapshot: `reset --hard` + `clean -fd` + `stash apply` vs `restore <checkpoint>` | 317.6 ms | **142.4 ms** |
+
+Both rollbacks restored the tree exactly in 10 of 10 rounds and left branch
+history untouched.
+
+Crash: `add -A` of 2,500 changed files killed with SIGKILL after 5 to 80 ms,
+then the agent retries the operation, 20 trials:
+
+| | git | agit |
+| --- | ---: | ---: |
+| killed mid-operation | 20 | 15 (the rest had already finished) |
+| retry failed, manual cleanup needed | **20** (`index.lock: File exists`) | **0** |
+| `fsck` afterwards | clean | clean |
+
+Many agents in one repository, each in its own worktree (git) or workspace
+(agit) on its own branch, 25 commits each, all at once:
+
+| Agents | git commits/s (p95) | agit commits/s (p95) |
+| ---: | ---: | ---: |
+| 1 | 22.7 (40.9 ms) | **63.1 (16.5 ms)** |
+| 4 | 67.9 (60.7 ms) | **144.6 (38.4 ms)** |
+| 8 | 75.4 (106.3 ms) | **122.7 (101.4 ms)** |
+| 16 | 72.2 (235.5 ms) | **91.7** (268.4 ms) |
+
+No errors on either side. agit is faster at every size, but its throughput
+falls after 4 agents and its tail latency at 16 agents is higher than git's:
+the shared journal, event log and lease files serialize concurrent commits.
+That is the next scaling target.
+
+Two pairs of agents among 8 want the same file:
+
+| | git | agit |
+| --- | --- | --- |
+| overlap noticed | at merge time, after both agents finished: 2 merge conflicts | before any edit: 2 lease claims refused, median 6.3 ms |
+| merge conflicts when integrating | 2 | 0 |
+
+Pushing every commit to a local remote (git: bare repository on disk; agit:
+agit-server over HTTP on 127.0.0.1), 25 commits per agent:
+
+| Agents | git commit+push/s (p50) | agit commit+push/s (p50) |
+| ---: | ---: | ---: |
+| 4 | 34.7 (105.8 ms) | **115.3 (34.1 ms)** |
+| 8 | 40.8 (180.2 ms) | **99.4 (74.4 ms)** |
+| 16 | 39.2 (372.6 ms) | **57.5 (261.4 ms)** |
+
+History on a real repository (ripgrep: 2,287 commits, 237 files; `agit git
+import` took 2.0 s):
+
+| Operation | git | agit |
+| --- | ---: | ---: |
+| `status` | 12.7 ms | 13.6 ms |
+| `log -n 20` | 10.6 ms | 8.9 ms |
+| `log -n 20 -- <file>` | 11.2 ms | 11.6 ms |
+| `blame` of the most changed file | **48.1 ms** | 270.9 ms |
+
+Reading: agit is ahead where agents spend their time (commit, snapshot and
+rollback, crash recovery, parallel commits and pushes, overlap detection) and
+on par for status and log. git is clearly faster at `blame` (5.6x; agit's
+blame re-diffs every version of the file along first-parent history) and at
+branch switching on large trees (1.5x). Both are on the performance list.
+
+### The Claude Code integration: cost per tool call
+
+`python3 integrations/claude-code/bench_hooks.py` installs the hooks into a
+throwaway repository, starts an agit-server and feeds each hook the JSON
+Claude Code sends, 30 times:
+
+| Hook | median |
+| --- | ---: |
+| SessionStart briefing | 86.7 ms |
+| PreToolUse on Edit: lease check and context, first touch / cached | 188.9 ms / 129.9 ms |
+| PreToolUse on Edit, blocked by another agent's lease (exit 2) | 125.5 ms |
+| PostToolUse on Edit: claim a lease / lease already held | 119.6 ms / 115.0 ms |
+| Stop: checkpoint of a changed tree | 114.7 ms |
+| PreToolUse on Bash: commit guard | 18.6 ms |
+
+One file edit costs about 245 ms of hook time (310 ms the first time a file is
+touched), against model turns of several seconds; most of it is starting
+`python3` for JSON handling, not agit. Moving the hook logic into the `agit`
+binary would cut it to the cost of one agit process (about 6 ms).
+
+A live run with two headless Claude Code agents in two workspaces of one
+repository, hooks installed, both asked to add a function to the same file
+(coder-2 started once coder-1 held the file): coder-1 read the context,
+followed the `kind:gotcha` note (integer cents, half-up rounding), got its
+lease from the hook, committed with `agit commit --intent` and released the
+lease, 8 turns, 26 s; coder-2 saw coder-1's exclusive lease in its session
+briefing and left the file alone, 2 turns, 8.5 s. No conflicting edit
+happened. coder-2 did not wait for the lease to be released one second later;
+there is no command for that yet.
+
 ## 2026-10-19: server load, in-process and against the Docker image
 
 Same laptop (Apple M3 Pro, 11 cores, 18 GB), release build of commit

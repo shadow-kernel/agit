@@ -13,6 +13,30 @@ release will be 0.1.0 (the current workspace version).
 
 ## [Unreleased]
 
+### Added
+
+- Web UI file browser: folders first, then files, with icons per kind (folder,
+  source, document, configuration, image, archive, executable, submodule),
+  and the last commit and its age for every entry.
+- `GET /repos/{repo}/tree/{rev}?last_commits=1&max_commits=` attaches
+  `last_commit` to every directory entry (first-parent history, skipping
+  commits that leave the directory unchanged); `last_commits_truncated`
+  reports a walk that hit its limit. `agit_core::history::last_commits`,
+  `tree(..., last_commits=True)` in the Python SDK and
+  `getTree(..., { lastCommits: true })` in the TypeScript SDK.
+- `scripts/compare_git.py`: agit and git side by side on identical,
+  local-only workloads (single agent, snapshot and rollback, crash recovery,
+  many agents, overlapping work, pushes, history on a real repository).
+- `integrations/claude-code/bench_hooks.py`: cost of each Claude Code hook
+  per call.
+
+### Fixed
+
+- The Claude Code pre-edit hook never showed knowledge notes: it read them
+  from `result` while `agit know context --json` returns them under
+  `result.context`. Notes, suggested tags and open pull requests for a path
+  now reach Claude before every edit again; the hook self-test covers it.
+
 ## [0.1.3] - 2026-10-19
 
 ### Fixed
