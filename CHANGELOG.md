@@ -13,6 +13,8 @@ release will be 0.1.0 (the current workspace version).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-19
+
 ### Added
 
 Local core (`agit`, `crates/agit-core`, `crates/agit-cli`):
@@ -146,4 +148,5 @@ Operations and distribution:
   systemd unit and reverse-proxy examples in `deploy/`,
   `docs/DEPLOYMENT.md` and `docs/SECURITY.md`.
 
-[Unreleased]: https://github.com/shadow-kernel/agit/commits/main
+[Unreleased]: https://github.com/shadow-kernel/agit/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/shadow-kernel/agit/releases/tag/v0.1.0
