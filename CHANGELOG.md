@@ -13,6 +13,24 @@ release will be 0.1.0 (the current workspace version).
 
 ## [Unreleased]
 
+### Fixed
+
+- Repository discovery no longer mistakes the per-user `~/.agit` directory
+  (signing keys, cached sessions) for a repository. Commands run in a
+  directory below the home directory that is not inside a repository failed
+  with `io error at ~/.agit/HEAD`; they now report `not_a_repository`. A
+  `.agit` directory counts as a repository only when it holds `HEAD` or
+  `config.json`. `agit init` in the home directory explains the clash instead
+  of answering `already_exists`, `agit git import --into <dir>` opens exactly
+  that directory, and the Claude Code hooks apply the same rule.
+
+### Changed
+
+- The handbook is no longer published as a separate site; the website is
+  https://shadow-kernel.github.io/agit-site/ and the Docs workflow only checks
+  that the handbook builds. New README with the website, badges and a short
+  tour.
+
 ## [0.1.0] - 2026-10-19
 
 ### Added
