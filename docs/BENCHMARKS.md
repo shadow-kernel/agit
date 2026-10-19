@@ -111,6 +111,43 @@ Per-step breakdown with `AGIT_FSYNC=none` on the same run (`profile_commit`):
 index rewrite on flush are the next targets; `status` on 2,000 files sits at
 7.3 to 8.4 ms across these runs.
 
+## 2026-10-19: server load, in-process and against the Docker image
+
+Same laptop (Apple M3 Pro, 11 cores, 18 GB), release build of commit
+`293be88` plus `scripts/loadtest.sh`, default durability (`AGIT_FSYNC=refs`,
+now `fsync(2)`), nothing else running.
+
+In-process example, `cargo run --release -p agit-server --example load -- 8
+100` (clients and server in one process, no HTTP client processes):
+
+| Phase | 8 agents |
+| --- | ---: |
+| 1: commit locally + push, per micro-commit | 673 commits/s (was 95/s on 2026-10-15 with `F_FULLFSYNC`) |
+| 2: CAS updates advancing one hot branch (173 `ref_conflict` retries) | 2,089 updates/s |
+| 3: CAS updates on independent branches (group commit) | 3,565 updates/s |
+
+Against the Docker image built from the checkout (`docker build -t agit:dev
+.`, Docker Desktop 29.4, linux/arm64 VM with 11 CPUs and 9 GB, named
+volume), closed with `AGIT_ADMIN_KEYS`, driven by `scripts/loadtest.sh`: N
+agents, each in its own clone on its own branch, one `agit` process per
+`add`, `commit` and `push`, over HTTP on localhost:
+
+| Phase | 8 agents x 50 | 32 agents x 25 |
+| --- | ---: | ---: |
+| 1: `add` + `commit` + `push` per micro-commit | 102 commits/s | 115 commits/s (1 push of 800 failed) |
+| 2: `push` only (commits made first) | 109 pushes/s | 125 pushes/s |
+| 3: no-op `fetch` | 248 fetches/s | 229 fetches/s |
+
+Reading: one `agit` process costs about 5.7 ms on this machine (`agit
+status --json`, warm), and each micro-commit in phase 1 spawns three of
+them plus the server round trips, so the HTTP numbers are bounded by
+process spawn and the container's disk path, not by the server: the same
+server does 673 commits/s when driven in-process. Agents that talk to the
+server through the SDKs or the MCP server (one long-lived process) sit
+between the two. The 32-agent run also showed that the audit log interleaved
+lines from concurrent requests; `audit()` now writes each line with one
+`write(2)`.
+
 ## 2026-10-15: server load test (single node)
 
 `cargo run --release -p agit-server --example load -- <agents> <commits>`

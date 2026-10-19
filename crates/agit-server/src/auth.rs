@@ -492,12 +492,67 @@ impl AuthStore {
             "path": path,
             "status": status,
         });
+        // One `write(2)` per line: `O_APPEND` makes a single write atomic
+        // with respect to other writers, whereas formatting straight into
+        // the file issues many small writes that interleave under load.
+        let mut buf = match serde_json::to_vec(&line) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+        buf.push(b'\n');
         if let Ok(mut f) = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.audit_path)
         {
-            let _ = writeln!(f, "{line}");
+            let _ = f.write_all(&buf);
+        }
+    }
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn concurrent_audit_lines_stay_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(AuthStore::open(dir.path()));
+        let threads: Vec<_> = (0..16)
+            .map(|t| {
+                let store = store.clone();
+                std::thread::spawn(move || {
+                    let p = Principal {
+                        id: format!("tok_{t:02}"),
+                        root: false,
+                        agent: Some(format!("agent-{t}")),
+                        scopes: vec![],
+                        key: None,
+                    };
+                    for i in 0..200 {
+                        store.audit(
+                            &p,
+                            p.agent.as_deref(),
+                            "POST",
+                            &format!("/repos/r{t}/refs/update/{i}"),
+                            200,
+                        );
+                    }
+                })
+            })
+            .collect();
+        for t in threads {
+            t.join().unwrap();
+        }
+        let text = fs::read_to_string(dir.path().join("audit.jsonl")).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 16 * 200);
+        for l in lines {
+            let v: serde_json::Value = serde_json::from_str(l).unwrap_or_else(|e| {
+                panic!("torn audit line {l:?}: {e}");
+            });
+            assert_eq!(v["status"], 200);
         }
     }
 }
