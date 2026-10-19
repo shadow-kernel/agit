@@ -1418,8 +1418,9 @@ pub fn run(cli: Cli) -> Result<()> {
                         } else {
                             base.join(dir)
                         };
-                        if dir.join(agit_core::repo::AGIT_DIR).exists() {
-                            Repository::discover(&dir)?
+                        let marker = dir.join(agit_core::repo::AGIT_DIR);
+                        if marker.is_file() || agit_core::repo::is_repository_dir(&marker) {
+                            Repository::open(&dir)?
                         } else {
                             Repository::init(&dir)?
                         }

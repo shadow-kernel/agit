@@ -35,6 +35,14 @@ use crate::refs::{write_atomic, Expect, RefStore, HEADS_PREFIX, TAGS_PREFIX};
 use crate::store::ObjectStore;
 
 pub const AGIT_DIR: &str = ".agit";
+
+/// Whether `dir` (a `.agit` directory) holds a repository. agit also keeps a
+/// per-user `~/.agit` (signing keys in `keys/`, cached sessions in
+/// `sessions.json`), which is not a repository and must not stop discovery
+/// for directories below the home directory.
+pub fn is_repository_dir(dir: &Path) -> bool {
+    dir.is_dir() && (dir.join("HEAD").is_file() || dir.join("config.json").is_file())
+}
 pub const PRIMARY_WORKSPACE: &str = "main";
 pub const FORMAT_VERSION: u32 = 1;
 
@@ -117,8 +125,15 @@ impl Repository {
     pub fn init(work_dir: &Path) -> Result<Repository> {
         let work_dir = absolutize(work_dir)?;
         let common = work_dir.join(AGIT_DIR);
-        if common.exists() {
+        if common.is_file() || is_repository_dir(&common) {
             return Err(Error::AlreadyExists(common));
+        }
+        if common.exists() {
+            return Err(Error::Invalid(format!(
+                "{} exists but is not a repository (agit keeps signing keys and sessions in \
+                 ~/.agit); create the repository in a subdirectory",
+                common.display()
+            )));
         }
         fs::create_dir_all(&work_dir).map_err(io_at(&work_dir))?;
         fs::create_dir_all(&common).map_err(io_at(&common))?;
@@ -195,7 +210,7 @@ impl Repository {
         let mut cur: Option<&Path> = Some(&start);
         while let Some(dir) = cur {
             let candidate = dir.join(AGIT_DIR);
-            if candidate.is_dir() {
+            if is_repository_dir(&candidate) {
                 return Repository::open_primary(candidate, dir.to_path_buf());
             }
             if candidate.is_file() {

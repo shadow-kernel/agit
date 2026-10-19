@@ -734,3 +734,45 @@ fn concurrent_workspaces_and_leases_stress() {
     assert_eq!(r.objects_removed, 0);
     assert!(ops::fsck(&repo).unwrap().missing.is_empty());
 }
+
+#[test]
+fn user_agit_dir_in_home_is_not_a_repository() {
+    // `~/.agit` holds signing keys and sessions; directories below the home
+    // directory must not be mistaken for a repository rooted there.
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    fs::create_dir_all(home.join(".agit/keys")).unwrap();
+    fs::write(home.join(".agit/sessions.json"), "{}").unwrap();
+    let plain = home.join("work/notes");
+    fs::create_dir_all(&plain).unwrap();
+
+    match Repository::discover(&plain) {
+        Err(Error::NotARepository(_)) => {}
+        other => panic!("expected not_a_repository, got {other:?}"),
+    }
+    match Repository::init(home) {
+        Err(Error::Invalid(msg)) => assert!(msg.contains("not a repository"), "{msg}"),
+        other => panic!(
+            "expected invalid, got {:?}",
+            other.map(|r| r.work_dir().to_path_buf())
+        ),
+    }
+
+    // A real repository below the home directory is found from a subdirectory.
+    let proj = home.join("projekt");
+    Repository::init(&proj).unwrap();
+    fs::create_dir_all(proj.join("src/deep")).unwrap();
+    let found = Repository::discover(&proj.join("src/deep")).unwrap();
+    assert_eq!(
+        found.work_dir(),
+        proj.canonicalize().unwrap_or(proj.clone())
+    );
+
+    // A stray `.agit` directory inside a repository does not shadow it.
+    fs::create_dir_all(proj.join("vendor/.agit/keys")).unwrap();
+    let found = Repository::discover(&proj.join("vendor")).unwrap();
+    assert_eq!(
+        found.work_dir(),
+        proj.canonicalize().unwrap_or(proj.clone())
+    );
+}

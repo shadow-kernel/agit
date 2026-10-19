@@ -84,6 +84,9 @@ echo '# notes' > "$R/docs/notes.md"
 "$AGIT_BIN" -C "$R" commit -m "init" --intent "fixture" --json >/dev/null
 OUTSIDE="$WORK/outside"
 mkdir -p "$OUTSIDE"
+# A per-user ~/.agit (keys, sessions) above the outside directory must not
+# make it look like a repository.
+mkdir -p "$WORK/.agit/keys" && echo '{}' > "$WORK/.agit/sessions.json"
 
 echo "# hooks: $HOOKS"
 echo "# agit:  $AGIT_BIN ($("$AGIT_BIN" --version))"
