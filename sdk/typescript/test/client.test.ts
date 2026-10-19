@@ -182,6 +182,10 @@ describe("query encoding", () => {
     await client.getTree("demo", "main", "src/x").catch(() => undefined);
     expect(last().path).toBe("/api/v1/repos/demo/tree/main");
     expect(last().query.get("path")).toBe("src/x");
+    expect(last().query.has("last_commits")).toBe(false);
+    await client.getTree("demo", "main", "", { lastCommits: true, maxCommits: 50 }).catch(() => undefined);
+    expect(last().query.get("last_commits")).toBe("1");
+    expect(last().query.get("max_commits")).toBe("50");
     const ctx = await client.getContext("demo", "src/auth/login.rs", 3);
     expect(last().query.get("limit")).toBe("3");
     expect(ctx.suggested_tags).toEqual(["area:auth"]);

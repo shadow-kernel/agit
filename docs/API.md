@@ -64,8 +64,9 @@ repeated frames `kind:u8 | len:u32 big-endian | payload`. kind 1 blob, 2 tree, 3
 - `GET /repos/{repo}/commits?rev=main&limit=50&agent=&task=&path=` -> `[{id, ...commit}]`
 - `GET /repos/{repo}/commits/{rev}` -> `{id, commit, changes:[...], patch, notes:[note summary]}`
   `notes` holds up to 10 knowledge notes: those linking the commit in `commits` (drafts included) first, then accepted notes whose `paths` cover a changed path.
-- `GET /repos/{repo}/tree/{rev}?path=src/x` -> directory: `{kind:"tree", path, entries:[{name,mode,id,size}]}`
-  or file: `{kind:"blob", path, id, size, binary, text?}`
+- `GET /repos/{repo}/tree/{rev}?path=src/x&last_commits=1&max_commits=1000` -> directory: `{kind:"tree", path, entries:[{name,mode,id,size,last_commit?}], last_commits_truncated?}`
+  or file: `{kind:"blob", path, id, size, binary, text?}`. Entries come in tree order (bytewise by name); clients that list folders first sort themselves.
+  With `last_commits=1` every directory entry carries `last_commit: {id, author, agent?, time_ms, summary, intent?}`, the most recent commit along first-parent history that changed the entry (for a subdirectory: anything below it). The walk skips commits that leave the directory unchanged and stops after `max_commits` (default 1000) commits; then `last_commits_truncated` is `true` and unresolved entries have no `last_commit`.
 - `GET /repos/{repo}/diff?from=<rev>&to=<rev>` -> `{changes, patch, stats}`
 - `GET /repos/{repo}/blame/{rev}?path=&max_commits=500` -> `{path, rev, lines:[{line, commit, text}], commits:{<id>:{id, author, agent?, time_ms, summary, intent?}}, truncated}`
 - Change objects may carry `kind: "renamed"` with `from` and `similarity` when rename detection is applied (CLI `diff`/`show`).

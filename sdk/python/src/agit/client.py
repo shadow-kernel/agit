@@ -376,9 +376,24 @@ class Client:
     def commit(self, repo: str, rev: str) -> CommitDetail:
         return CommitDetail.from_dict(self._get(f"/repos/{_seg(repo)}/commits/{_seg(rev)}"))
 
-    def tree(self, repo: str, rev: str, path: str | None = None) -> dict[str, Any]:
-        """Directory ``{kind:"tree", path, entries}`` or file ``{kind:"blob", path, id, size, binary, text?}``."""
-        return self._get(f"/repos/{_seg(repo)}/tree/{_seg(rev)}", {"path": path}) or {}
+    def tree(
+        self,
+        repo: str,
+        rev: str,
+        path: str | None = None,
+        *,
+        last_commits: bool = False,
+        max_commits: int | None = None,
+    ) -> dict[str, Any]:
+        """Directory ``{kind:"tree", path, entries}`` or file ``{kind:"blob", path, id, size, binary, text?}``.
+
+        With ``last_commits=True`` every directory entry carries ``last_commit``
+        ``{id, author, agent?, time_ms, summary, intent?}`` (most recent commit
+        that changed it, first-parent history, at most ``max_commits`` walked;
+        ``last_commits_truncated`` says whether the walk stopped early).
+        """
+        params = {"path": path, "last_commits": "1" if last_commits else None, "max_commits": max_commits}
+        return self._get(f"/repos/{_seg(repo)}/tree/{_seg(rev)}", params) or {}
 
     def diff(self, repo: str, from_: str | None, to: str) -> DiffResponse:
         return DiffResponse.from_dict(self._get(f"/repos/{_seg(repo)}/diff", {"from": from_, "to": to}))

@@ -60,6 +60,8 @@ export interface TreeEntry {
   mode: EntryMode;
   id: ObjectId;
   size: number;
+  /** With `last_commits=1`: the most recent commit that changed this entry. */
+  last_commit?: BlameCommit;
 }
 
 export interface Signature {
@@ -186,6 +188,8 @@ export interface TreeDir {
   path: string;
   id: ObjectId;
   entries: TreeEntry[];
+  /** With `last_commits=1`: the history walk stopped before every entry was resolved. */
+  last_commits_truncated?: boolean;
 }
 
 export interface TreeBlob {

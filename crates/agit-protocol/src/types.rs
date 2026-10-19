@@ -201,6 +201,10 @@ pub enum TreeResponse {
         path: String,
         id: ObjectId,
         entries: Vec<TreeEntryJson>,
+        /// Present with `last_commits=1`: true when the history walk hit
+        /// `max_commits` before every entry got its `last_commit`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_commits_truncated: Option<bool>,
     },
     Blob {
         path: String,
@@ -218,6 +222,10 @@ pub struct TreeEntryJson {
     pub mode: agit_core::EntryMode,
     pub id: ObjectId,
     pub size: u64,
+    /// With `last_commits=1`: the most recent commit (first-parent history)
+    /// that changed this entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_commit: Option<agit_core::history::BlameCommit>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

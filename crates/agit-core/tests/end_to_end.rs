@@ -787,3 +787,42 @@ fn user_agit_dir_in_home_is_not_a_repository() {
         proj.canonicalize().unwrap_or(proj.clone())
     );
 }
+
+#[test]
+fn last_commit_per_directory_entry() {
+    let (_tmp, repo) = fresh();
+    let root = repo.work_dir().to_path_buf();
+    write(&root, "a.txt", "a\n");
+    write(&root, "dir/b.txt", "b\n");
+    write(&root, "dir/c.txt", "c\n");
+    let c1 = commit_all(&repo, "first", None);
+    write(&root, "dir/b.txt", "b2\n");
+    let c2 = commit_all(&repo, "touch b", Some("agent-b"));
+    write(&root, "z.txt", "z\n");
+    let c3 = commit_all(&repo, "add z", None);
+
+    let head = repo.head_commit().unwrap().unwrap();
+    let top = agit_core::history::last_commits(repo.store(), head, "", 100).unwrap();
+    assert!(!top.truncated);
+    assert_eq!(top.entries["a.txt"].id, c1.id);
+    assert_eq!(
+        top.entries["dir"].id, c2.id,
+        "a directory takes the latest change below it"
+    );
+    assert_eq!(top.entries["dir"].agent.as_deref(), Some("agent-b"));
+    assert_eq!(top.entries["z.txt"].id, c3.id);
+
+    let sub = agit_core::history::last_commits(repo.store(), head, "dir", 100).unwrap();
+    assert_eq!(sub.entries["b.txt"].id, c2.id);
+    assert_eq!(sub.entries["c.txt"].id, c1.id);
+    assert_eq!(sub.entries["b.txt"].summary, "touch b");
+
+    let cut = agit_core::history::last_commits(repo.store(), head, "", 1).unwrap();
+    assert!(cut.truncated);
+    assert_eq!(
+        cut.entries.len(),
+        1,
+        "only z.txt is resolved by the newest commit"
+    );
+    assert!(agit_core::history::last_commits(repo.store(), head, "missing", 10).is_err());
+}

@@ -54,7 +54,7 @@ export interface Api {
   // Browsing
   commits(repo: string, q?: { rev?: string; limit?: number; agent?: string; task?: string; path?: string }): Promise<T.CommitListItem[]>;
   commit(repo: string, rev: string): Promise<T.CommitDetail>;
-  tree(repo: string, rev: string, path?: string, signal?: AbortSignal): Promise<T.TreeResponse>;
+  tree(repo: string, rev: string, path?: string, signal?: AbortSignal, opts?: { lastCommits?: boolean }): Promise<T.TreeResponse>;
   diff(repo: string, from: string, to: string): Promise<T.Diff>;
   blame(repo: string, rev: string, path: string, maxCommits?: number, signal?: AbortSignal): Promise<T.Blame>;
   branches(repo: string): Promise<T.Branch[]>;
@@ -222,7 +222,7 @@ export const liveApi: Api = {
   objectJson: (repo, id) => request("GET", `${r(repo)}/objects/${enc(id)}/json`),
   commits: (repo, q = {}) => request("GET", `${r(repo)}/commits`, { query: q }),
   commit: (repo, rev) => request("GET", `${r(repo)}/commits/${enc(rev)}`),
-  tree: (repo, rev, path, signal) => request("GET", `${r(repo)}/tree/${enc(rev)}`, { query: { path }, signal }),
+  tree: (repo, rev, path, signal, opts) => request("GET", `${r(repo)}/tree/${enc(rev)}`, { query: { path, last_commits: opts?.lastCommits ? 1 : undefined }, signal }),
   diff: (repo, from, to) => request("GET", `${r(repo)}/diff`, { query: { from, to } }),
   blame: (repo, rev, path, maxCommits, signal) => request("GET", `${r(repo)}/blame/${enc(rev)}`, { query: { path, max_commits: maxCommits }, signal }),
   branches: (repo) => request("GET", `${r(repo)}/branches`),

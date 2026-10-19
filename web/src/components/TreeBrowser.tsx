@@ -7,6 +7,7 @@ import { bytes, fullDate, summaryLine, timeAgo } from "../lib/format";
 import { BranchSelector } from "./BranchSelector";
 import { Markdown } from "./Markdown";
 import { AgentBadge, EmptyState, ErrorState, Sha, SkeletonRows, Skeleton } from "./ui";
+import { FileIcon, sortEntries } from "./FileIcon";
 
 export function Breadcrumbs({ repo, rev, path, leafIsLink = false }: { repo: string; rev: string; path: string; leafIsLink?: boolean }) {
   const base = `/r/${encodeURIComponent(repo)}`;
@@ -50,8 +51,6 @@ export function LatestCommitBar({ repo, rev, path }: { repo: string; rev: string
   );
 }
 
-const iconFor = (e: TreeEntry) => (e.mode === "dir" ? "▸" : e.mode === "symlink" ? "↪" : e.mode === "submodule" ? "◫" : e.mode === "executable" ? "⚙" : "▫");
-
 export function TreeBrowser({ repo, rev, path, showReadme = true, header }: { repo: string; rev: string; path: string; showReadme?: boolean; header?: React.ReactNode }) {
   const tree = useAsync(() => api.tree(repo, rev, path || undefined), [repo, rev, path]);
   const base = `/r/${encodeURIComponent(repo)}`;
@@ -62,7 +61,16 @@ export function TreeBrowser({ repo, rev, path, showReadme = true, header }: { re
     if (tree.data?.kind === "blob") navigate(`${base}/blob/${encodeURIComponent(rev)}/${path}`, { replace: true });
   }, [tree.data, base, rev, path, navigate]);
 
-  const entries = tree.data?.kind === "tree" ? tree.data.entries : [];
+  const entries = useMemo(() => sortEntries(tree.data?.kind === "tree" ? tree.data.entries : []), [tree.data]);
+  // The listing shows at once; the last commit per entry walks history and fills in afterwards.
+  const lastCommits = useAsync(() => api.tree(repo, rev, path || undefined, undefined, { lastCommits: true }), [repo, rev, path], { silent: true, enabled: tree.data?.kind === "tree" });
+  const last = useMemo(() => {
+    const m = new Map<string, NonNullable<TreeEntry["last_commit"]>>();
+    if (lastCommits.data?.kind === "tree") for (const e of lastCommits.data.entries) if (e.last_commit) m.set(e.name, e.last_commit);
+    return m;
+  }, [lastCommits.data]);
+  const truncated = lastCommits.data?.kind === "tree" && !!lastCommits.data.last_commits_truncated;
+  const pendingLast = lastCommits.loading && !lastCommits.data;
   const readme = showReadme ? entries.find((e) => e.mode !== "dir" && /^readme(\.md|\.markdown|\.txt)?$/i.test(e.name)) : undefined;
   const readmePath = readme ? (path ? `${path}/${readme.name}` : readme.name) : null;
   const readmeBlob = useAsync(() => api.tree(repo, rev, readmePath!), [repo, rev, readmePath], { silent: true, enabled: !!readmePath });
@@ -89,20 +97,42 @@ export function TreeBrowser({ repo, rev, path, showReadme = true, header }: { re
           <EmptyState icon="▢" title="Empty directory" />
         ) : (
           <>
+            <div className="box-row static file-head" aria-hidden>
+              <span className="icon" />
+              <span className="name">Name</span>
+              <span className="msg hidden-sm">Last commit</span>
+              <span className="size hidden-sm">Size</span>
+              <span className="when">Updated</span>
+            </div>
             {path ? (
               <div className="box-row">
-                <span className="icon dir">▸</span>
+                <span className="icon"><FileIcon name=".." mode="up" /></span>
                 <span className="name"><Link to={`${base}/tree/${encodeURIComponent(rev)}${parent ? "/" + parent : ""}`}>..</Link></span>
               </div>
             ) : null}
             {entries.map((e) => {
               const p = path ? `${path}/${e.name}` : e.name;
-              const to = e.mode === "dir" ? `${base}/tree/${encodeURIComponent(rev)}/${p}` : `${base}/blob/${encodeURIComponent(rev)}/${p}`;
+              const isDir = e.mode === "dir";
+              const to = isDir ? `${base}/tree/${encodeURIComponent(rev)}/${p}` : `${base}/blob/${encodeURIComponent(rev)}/${p}`;
+              const lc = last.get(e.name);
+              const who = lc ? lc.agent ?? lc.author : "";
               return (
-                <div key={e.name} className="box-row">
-                  <span className={`icon ${e.mode === "dir" ? "dir" : ""}`} aria-hidden>{iconFor(e)}</span>
+                <div key={e.name} className={`box-row ${isDir || e.mode === "submodule" ? "is-dir" : "is-file"}`}>
+                  <span className="icon"><FileIcon name={e.name} mode={e.mode} /></span>
                   <span className="name truncate"><Link to={to}>{e.name}</Link>{e.mode === "submodule" ? <span className="muted small"> @ {e.id.slice(0, 7)}</span> : null}</span>
-                  <span className="size">{e.mode === "dir" ? "" : bytes(e.size)}</span>
+                  <span className="msg truncate hidden-sm">
+                    {lc ? (
+                      <Link className="link-plain" to={`${base}/commit/${lc.id}`} title={`${lc.summary}${lc.intent ? `\nIntent: ${lc.intent}` : ""}\n${who} · ${fullDate(lc.time_ms)}`}>{lc.summary}</Link>
+                    ) : pendingLast ? (
+                      <span className="skeleton skeleton-line" style={{ width: "60%", margin: 0 }} />
+                    ) : truncated ? (
+                      <span className="subtle small" title="The history walk stopped before reaching the last change to this entry">older history</span>
+                    ) : null}
+                  </span>
+                  <span className="size hidden-sm">{isDir ? "" : bytes(e.size)}</span>
+                  <span className="when nowrap" title={lc ? `${fullDate(lc.time_ms)} by ${who}` : undefined}>
+                    {lc ? timeAgo(lc.time_ms) : pendingLast ? <span className="skeleton skeleton-line" style={{ width: 56, margin: 0, display: "inline-block" }} /> : ""}
+                  </span>
                 </div>
               );
             })}
@@ -111,7 +141,7 @@ export function TreeBrowser({ repo, rev, path, showReadme = true, header }: { re
       </div>
       {readmePath ? (
         <div className="box">
-          <div className="box-head"><span aria-hidden>≡</span><Link className="link-plain" to={`${base}/blob/${encodeURIComponent(rev)}/${readmePath}`}>{readme!.name}</Link></div>
+          <div className="box-head"><FileIcon name={readme!.name} mode="file" /><Link className="link-plain" to={`${base}/blob/${encodeURIComponent(rev)}/${readmePath}`}>{readme!.name}</Link></div>
           {readmeBlob.data?.kind === "blob" && readmeBlob.data.text != null ? <Markdown source={readmeBlob.data.text} /> : <Skeleton lines={5} />}
         </div>
       ) : null}
@@ -142,7 +172,7 @@ export function FileFinder({ entries, base, rev, path }: { entries: TreeEntry[];
   const matches = useMemo(() => {
     const needle = q.trim().toLowerCase();
     if (!needle) return [];
-    return entries.filter((e) => e.name.toLowerCase().includes(needle)).slice(0, 12);
+    return sortEntries(entries.filter((e) => e.name.toLowerCase().includes(needle))).slice(0, 12);
   }, [q, entries]);
   useEffect(() => setSel(0), [q]);
 
@@ -171,8 +201,8 @@ export function FileFinder({ entries, base, rev, path }: { entries: TreeEntry[];
         <div className="results">
           {matches.length === 0 ? <span className="muted small" style={{ display: "block", padding: "6px 12px" }}>No matching entries here</span> : null}
           {matches.map((e, i) => (
-            <Link key={e.name} to={hrefFor(e)} className={i === sel ? "sel" : ""} onClick={() => setQ("")}>
-              {e.mode === "dir" ? "▸ " : "▫ "}{e.name}
+            <Link key={e.name} to={hrefFor(e)} className={`row ${i === sel ? "sel" : ""}`} style={{ gap: 8 }} onClick={() => setQ("")}>
+              <FileIcon name={e.name} mode={e.mode} />{e.name}
             </Link>
           ))}
         </div>

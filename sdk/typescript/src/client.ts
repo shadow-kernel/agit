@@ -339,8 +339,13 @@ export class AgitClient {
   getCommit(repo: string, rev: string, opts?: RequestOptions): Promise<T.CommitDetail> {
     return this.request("GET", `${repoPath(repo)}/commits/${enc(rev)}`, opts);
   }
-  getTree(repo: string, rev: string, path?: string, opts?: RequestOptions): Promise<T.TreeResponse> {
-    return this.request("GET", `${repoPath(repo)}/tree/${enc(rev)}`, { ...opts, query: { path } });
+  /** Directory or file at `path`. `lastCommits: true` attaches the last commit that changed each entry. */
+  getTree(repo: string, rev: string, path?: string, opts?: RequestOptions & T.TreeQuery): Promise<T.TreeResponse> {
+    const { lastCommits, maxCommits, ...rest } = opts ?? {};
+    return this.request("GET", `${repoPath(repo)}/tree/${enc(rev)}`, {
+      ...rest,
+      query: { path, last_commits: lastCommits ? 1 : undefined, max_commits: maxCommits },
+    });
   }
   getDiff(repo: string, from: string, to: string, opts?: RequestOptions): Promise<T.DiffResponse> {
     return this.request("GET", `${repoPath(repo)}/diff`, { ...opts, query: { from, to } });

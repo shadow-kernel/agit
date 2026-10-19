@@ -110,6 +110,26 @@ export interface TreeEntry {
   id: ObjectId;
   /** Blob size in bytes, or number of entries for a directory. */
   size: number;
+  /** With `lastCommits`: the most recent commit (first-parent history) that changed this entry. */
+  last_commit?: LastCommit;
+}
+
+/** Commit summary attached to tree entries by `getTree(..., { lastCommits: true })`. */
+export interface LastCommit {
+  id: ObjectId;
+  author: string;
+  agent?: string | null;
+  time_ms: number;
+  summary: string;
+  intent?: string | null;
+}
+
+/** Extra options for `getTree`. */
+export interface TreeQuery {
+  /** Attach `last_commit` to every directory entry. */
+  lastCommits?: boolean;
+  /** Commits to walk at most when resolving `last_commit` (server default 1000). */
+  maxCommits?: number;
 }
 
 export interface Signature {
@@ -350,6 +370,8 @@ export interface TreeDirResponse {
   path: string;
   id: ObjectId;
   entries: TreeEntry[];
+  /** Present with `lastCommits`: the walk stopped before every entry got its `last_commit`. */
+  last_commits_truncated?: boolean;
 }
 
 export interface TreeBlobResponse {

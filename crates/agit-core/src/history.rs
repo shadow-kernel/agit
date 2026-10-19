@@ -1,7 +1,7 @@
-//! History operations beyond commit/merge: blame, revert, cherry-pick,
-//! stash and grep.
+//! History operations beyond commit/merge: blame, last commit per directory
+//! entry, revert, cherry-pick, stash and grep.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -69,6 +69,129 @@ fn lines(bytes: &[u8]) -> Vec<String> {
         .split_inclusive('\n')
         .map(|l| l.trim_end_matches(['\n', '\r']).to_string())
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Last commit per directory entry
+// ---------------------------------------------------------------------------
+
+/// The most recent commit that changed each entry of one directory.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LastCommits {
+    /// Entry name -> commit, for every entry the walk resolved.
+    pub entries: BTreeMap<String, BlameCommit>,
+    /// True when the walk stopped at its limit before every entry was
+    /// resolved; unresolved entries are missing from `entries`.
+    pub truncated: bool,
+}
+
+fn brief(id: ObjectId, c: &Commit) -> BlameCommit {
+    BlameCommit {
+        id,
+        author: c.author.name.clone(),
+        agent: c.agent.as_ref().map(|a| a.id.clone()),
+        time_ms: c.time_ms,
+        summary: c.summary().to_string(),
+        intent: c.intent.clone(),
+    }
+}
+
+/// Id of the directory at `path` inside the tree `root` (None when it does
+/// not exist or is not a directory). The empty path is the root.
+fn subtree_id(store: &ObjectStore, root: ObjectId, path: &str) -> Result<Option<ObjectId>> {
+    let mut cur = root;
+    if path.is_empty() {
+        return Ok(Some(cur));
+    }
+    for part in path.split('/') {
+        let t = store.read_tree(&cur)?;
+        match t.get(part) {
+            Some(e) if e.mode.is_dir() => cur = e.id,
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some(cur))
+}
+
+fn dir_listing(
+    store: &ObjectStore,
+    dir: Option<ObjectId>,
+) -> Result<HashMap<String, (ObjectId, crate::object::EntryMode)>> {
+    let Some(id) = dir else {
+        return Ok(HashMap::new());
+    };
+    Ok(store
+        .read_tree(&id)?
+        .entries()
+        .iter()
+        .map(|e| (e.name.clone(), (e.id, e.mode)))
+        .collect())
+}
+
+/// For every entry of the directory `dir` at `rev`, the most recent commit
+/// along first-parent history whose change touched that entry (its content,
+/// or the content of anything below it for a subdirectory). Commits that do
+/// not change the directory at all are skipped by comparing directory tree
+/// ids, so the cost is proportional to the commits that touched it. The walk
+/// stops after `max_commits` commits.
+pub fn last_commits(
+    store: &ObjectStore,
+    rev: ObjectId,
+    dir: &str,
+    max_commits: usize,
+) -> Result<LastCommits> {
+    let dir = dir.trim_matches('/');
+    let mut cur = store.read_commit(&rev)?;
+    let Some(start_dir) = subtree_id(store, cur.tree, dir)? else {
+        return Err(Error::PathNotTracked(dir.into()));
+    };
+    let mut pending: HashSet<String> = store
+        .read_tree(&start_dir)?
+        .entries()
+        .iter()
+        .map(|e| e.name.clone())
+        .collect();
+    let mut out = LastCommits::default();
+    let mut cur_id = rev;
+    let mut cur_dir = Some(start_dir);
+    let mut walked = 0usize;
+    while !pending.is_empty() {
+        if walked >= max_commits {
+            out.truncated = true;
+            break;
+        }
+        walked += 1;
+        let parent = match cur.parents.first().copied() {
+            Some(pid) => {
+                let pc = store.read_commit(&pid)?;
+                let pdir = subtree_id(store, pc.tree, dir)?;
+                Some((pid, pc, pdir))
+            }
+            None => None,
+        };
+        let parent_dir = parent.as_ref().and_then(|(_, _, d)| *d);
+        if cur_dir != parent_dir {
+            let now = dir_listing(store, cur_dir)?;
+            let before = dir_listing(store, parent_dir)?;
+            let info = brief(cur_id, &cur);
+            pending.retain(|name| {
+                let changed = now.get(name) != before.get(name);
+                if changed {
+                    out.entries.insert(name.clone(), info.clone());
+                }
+                !changed
+            });
+        }
+        match parent {
+            Some((pid, pc, pdir)) => {
+                cur_id = pid;
+                cur = pc;
+                cur_dir = pdir;
+            }
+            None => break,
+        }
+    }
+    Ok(out)
 }
 
 /// Line-by-line attribution of `path` at `rev`, following the first-parent

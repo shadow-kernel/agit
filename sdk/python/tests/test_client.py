@@ -272,6 +272,10 @@ def test_commit_tree_diff_branches_tags(server, client):
     assert t["kind"] == "tree" and t["entries"][0]["name"] == "x.txt"
     b = client.tree("demo", "main", path="x.txt")
     assert b["kind"] == "blob" and b["text"] == "x\n"
+    client.tree("demo", "main", last_commits=True, max_commits=50)
+    assert server.last.q("last_commits") == "1" and server.last.q("max_commits") == "50"
+    client.tree("demo", "main")
+    assert "last_commits" not in server.last.query
 
     diff = client.diff("demo", None, "main")
     assert server.last.query == {"to": ["main"]}

@@ -1529,10 +1529,11 @@ export const mockApi: Api = {
     for (const id of Object.keys(commits)) if (!used.has(id)) delete commits[id];
     return { path, rev: head.id, lines: r.lines.map((l) => ({ line: l.no, commit: l.commit >= 0 ? r.commits[l.commit].id : r.commits[r.commits.length - 1].id, text: l.text })), commits, truncated: r.truncated || r.commits.length >= maxCommits };
   },
-  async tree(name, rev, path = "") {
+  async tree(name, rev, path = "", _signal, opts) {
     await latency();
     const st = repoOf(name);
-    const snap = resolve(st, rev).commit.snapshot;
+    const resolved = resolve(st, rev);
+    const snap = resolved.commit.snapshot;
     const p = path.replace(/^\/+|\/+$/g, "");
     if (p && snap.has(p)) {
       const text = snap.get(p)!;
@@ -1554,7 +1555,29 @@ export const mockApi: Api = {
     }
     if (entries.size === 0 && p) notFound(`path ${p}`);
     const list = [...entries.values()].sort((a, b) => (a.mode === "dir") === (b.mode === "dir") ? a.name.localeCompare(b.name) : a.mode === "dir" ? -1 : 1);
-    return { kind: "tree", path: p, id: hashId(`tree:${p}:${resolve(st, rev).commit.commit.tree}`), entries: list };
+    if (opts?.lastCommits) {
+      // Content signature of an entry in a snapshot: the file text, or every file below a directory.
+      const sig = (s: Map<string, string>, full: string, dir: boolean) => {
+        if (!dir) return s.get(full) ?? null;
+        const parts: string[] = [];
+        for (const [fp, text] of s) if (fp.startsWith(full + "/")) parts.push(fp + "\u0000" + text);
+        return parts.length ? parts.sort().join("\u0001") : null;
+      };
+      const hist = resolved.history;
+      for (const e of list) {
+        const full = prefix + e.name;
+        const isDir = e.mode === "dir";
+        for (let i = hist.length - 1; i >= 0; i--) {
+          const before = i > 0 ? sig(hist[i - 1].snapshot, full, isDir) : null;
+          if (sig(hist[i].snapshot, full, isDir) !== before) {
+            const c = hist[i];
+            e.last_commit = { id: c.id, author: c.commit.author.name, agent: c.commit.agent?.id ?? undefined, time_ms: c.commit.time_ms, summary: c.commit.message.split("\n")[0], intent: c.commit.intent ?? undefined };
+            break;
+          }
+        }
+      }
+    }
+    return { kind: "tree", path: p, id: hashId(`tree:${p}:${resolved.commit.commit.tree}`), entries: list, ...(opts?.lastCommits ? { last_commits_truncated: false } : {}) };
   },
   async diff(name, from, to) {
     await latency();

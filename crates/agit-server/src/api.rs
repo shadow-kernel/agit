@@ -809,6 +809,23 @@ async fn get_tree(
     }
     if cur_mode.is_dir() {
         let t = r.store.read_tree(&cur)?;
+        let want_last = flag(&q, "last_commits");
+        let last = if want_last {
+            let max = q
+                .get("max_commits")
+                .and_then(|m| m.parse().ok())
+                .unwrap_or(1000usize);
+            let (store, dir) = (r.store.clone(), path.clone());
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    agit_core::history::last_commits(&store, id, &dir, max)
+                })
+                .await
+                .map_err(|e| ApiErr::BadRequest(e.to_string()))??,
+            )
+        } else {
+            None
+        };
         Ok(Json(TreeResponse::Tree {
             path,
             id: cur,
@@ -820,8 +837,10 @@ async fn get_tree(
                     mode: e.mode,
                     id: e.id,
                     size: e.size,
+                    last_commit: last.as_ref().and_then(|l| l.entries.get(&e.name).cloned()),
                 })
                 .collect(),
+            last_commits_truncated: last.as_ref().map(|l| l.truncated),
         }))
     } else {
         let b = r.store.read_blob(&cur)?;

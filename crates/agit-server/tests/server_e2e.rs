@@ -1,5 +1,6 @@
 //! Server + client end-to-end: push, clone, pull, pull requests, knowledge.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -1481,6 +1482,59 @@ async fn push_and_clone_larger_than_two_mib() {
                 .len(),
             40 * 1024
         );
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tree_with_last_commits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = start_server(&tmp.path().join("data")).await;
+    let tmp_path = tmp.path().to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let url = format!("{base}/repos/lc");
+        let a = Repository::init(&tmp_path.join("a")).unwrap();
+        write(a.work_dir(), "README.md", "# lc\n");
+        write(a.work_dir(), "src/main.rs", "fn main() {}\n");
+        let c1 = commit_all(&a, "initial", "agent-a");
+        write(a.work_dir(), "src/main.rs", "fn main() { println!(); }\n");
+        let c2 = commit_all(&a, "print", "agent-b");
+        sync::add_remote(&a, "origin", &url).unwrap();
+        sync::push(&a, "origin", "main", false, true).unwrap();
+        let client = Client::new(&base);
+        let plain: TreeResponse = client.get_json_public("/repos/lc/tree/main").unwrap();
+        match plain {
+            TreeResponse::Tree {
+                entries,
+                last_commits_truncated,
+                ..
+            } => {
+                assert!(entries.iter().all(|e| e.last_commit.is_none()));
+                assert!(last_commits_truncated.is_none());
+            }
+            _ => panic!("expected a tree"),
+        }
+        let rich: TreeResponse = client
+            .get_json_public("/repos/lc/tree/main?last_commits=1")
+            .unwrap();
+        match rich {
+            TreeResponse::Tree {
+                entries,
+                last_commits_truncated,
+                ..
+            } => {
+                assert_eq!(last_commits_truncated, Some(false));
+                let by: HashMap<_, _> = entries.iter().map(|e| (e.name.as_str(), e)).collect();
+                let readme = by["README.md"].last_commit.as_ref().unwrap();
+                assert_eq!(readme.id, c1.id);
+                let src = by["src"].last_commit.as_ref().unwrap();
+                assert_eq!(src.id, c2.id);
+                assert_eq!(src.agent.as_deref(), Some("agent-b"));
+                assert_eq!(src.summary, "print");
+            }
+            _ => panic!("expected a tree"),
+        }
     })
     .await
     .unwrap();
